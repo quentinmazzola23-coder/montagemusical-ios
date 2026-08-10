@@ -537,26 +537,9 @@ struct PaceSelectionView: View {
     }
 }
 
-// MARK: - Forme parlée VoiceOver (§39)
-
-private extension MediaTime {
-    /// Forme parlée d'une durée pour VoiceOver, calquée sur l'exemple §39
-    /// (« 1 virgule 20 seconde ») : centièmes d'AFFICHAGE, jamais
-    /// réinjectés dans un calcul.
-    var spokenString: String {
-        let centiseconds = Self.roundedDivision(ticks, dividedBy: 600)
-        let total = max(0, centiseconds)
-        let seconds = total / 100
-        let fraction = total % 100
-        // Accord : « 2 secondes » mais « 1 virgule 20 seconde » (§39).
-        let secondsLabel = seconds >= 2 ? "secondes" : "seconde"
-        guard fraction > 0 else { return "\(seconds) \(secondsLabel)" }
-        // « zéro 5 » : sans le zéro explicite, « 1 virgule 05 » serait lu
-        // comme « 1 virgule 5 ».
-        let spokenFraction = fraction < 10 ? "zéro \(fraction)" : "\(fraction)"
-        return "\(seconds) virgule \(spokenFraction) \(secondsLabel)"
-    }
-}
+// La forme parlée VoiceOver `MediaTime.spokenString` (§39) est partagée
+// avec `SlotCardView` : définition unique dans
+// `App/Core/Time/MediaTimeFormatting.swift`.
 
 // MARK: - Previews (famille synthétique en mémoire, aucune lecture disque)
 

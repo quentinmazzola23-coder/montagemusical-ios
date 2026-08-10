@@ -7,6 +7,11 @@
 //  (`audio/original.<extension>`, §11) ; aucun traitement n'est jamais
 //  écrit dans ce fichier.
 //
+//  Jalon 7 (§35.1 « lecture par toucher sur l'aperçu ») : lecture d'un
+//  PASSAGE MUSICAL borné (`playSegment(from:to:)` / `stopSegment()`) —
+//  seek exact puis pause automatique à la fin du passage. Le §47.1
+//  complet (vidéo + musique) arrive avec la preview du Jalon 9.
+//
 
 import AVFoundation
 import Foundation
@@ -36,6 +41,10 @@ final class AudioPlayerController {
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var timeObserver: Any?
     @ObservationIgnored private var endObserver: (any NSObjectProtocol)?
+
+    /// Fin du passage musical en cours (§35.1) — `nil` en lecture pleine
+    /// piste. Comparée en ticks canoniques par l'observateur périodique.
+    @ObservationIgnored private var segmentEnd: MediaTime?
 
     init() {}
 
@@ -87,6 +96,10 @@ final class AudioPlayerController {
 
     func play() {
         guard let player else { return }
+        // Lecture PLEINE PISTE (waveform de `ProjectView`) : tout passage
+        // musical en cours est oublié — jamais de pause automatique
+        // inattendue en pleine écoute.
+        segmentEnd = nil
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(true)
         #endif
@@ -123,6 +136,65 @@ final class AudioPlayerController {
         self.progress = clamped
     }
 
+    // MARK: - Passage musical d'une case (Jalon 7, §35.1)
+
+    /// Lit le PASSAGE MUSICAL d'une case : seek EXACT sur `start`
+    /// (tolérance zéro, §53) puis lecture avec pause automatique à `end` —
+    /// l'observateur périodique existant (10 Hz) compare la position à
+    /// `segmentEnd` en ticks canoniques (§9). Le dépassement maximal est
+    /// donc ~100 ms : tolérance d'AFFICHAGE V1, aucune frontière
+    /// persistée n'en dépend.
+    ///
+    /// La lecture ne démarre qu'APRÈS la fin du seek (API asynchrone) :
+    /// jamais un instant de l'ancien passage audible. Un second appel ou
+    /// `stopSegment()` pendant le seek invalide la lecture en attente
+    /// (garde `segmentEnd == end`).
+    func playSegment(from start: MediaTime, to end: MediaTime) {
+        guard let player else { return }
+        guard end.ticks > start.ticks else { return }
+        segmentEnd = end
+        isPlaying = true
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
+        // Même pattern que l'observateur périodique : le handler
+        // AVFoundation arrive sur une file interne — retour explicite sur
+        // la file principale avant de toucher l'état (`assumeIsolated`).
+        // `AudioPlayerController` est @MainActor donc implicitement
+        // `Sendable` : la capture faible est sûre.
+        player.seek(
+            to: start.cmTime,
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] finished in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // Passage remplacé/arrêté pendant le seek : ne pas
+                    // lancer une lecture périmée.
+                    guard self.segmentEnd == end, self.isPlaying else { return }
+                    guard finished else {
+                        // Seek interrompu par AVFoundation sans nouvelle
+                        // commande : resynchroniser l'état affiché — jamais
+                        // d'icône pause sans son.
+                        self.isPlaying = false
+                        self.segmentEnd = nil
+                        return
+                    }
+                    self.player?.play()
+                }
+            }
+        }
+    }
+
+    /// Arrête le passage musical en cours (changement de case, sortie
+    /// d'écran, second toucher sur l'aperçu). Sans effet destructeur si
+    /// aucun passage n'est en cours.
+    func stopSegment() {
+        segmentEnd = nil
+        pause()
+    }
+
     // MARK: - Nettoyage
 
     /// Retire les observateurs et libère le lecteur. À appeler à la
@@ -141,6 +213,7 @@ final class AudioPlayerController {
         player = nil
         isPlaying = false
         progress = 0
+        segmentEnd = nil
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(
             false,
@@ -152,6 +225,15 @@ final class AudioPlayerController {
     // MARK: - Privé
 
     private func updateProgress(currentTime: CMTime) {
+        // Pause automatique à la fin du passage musical (§35.1) —
+        // comparaison en ticks canoniques (§9 : `Double`/`CMTime` confinés
+        // à la frontière AVFoundation).
+        if let segmentEnd,
+           let current = MediaTime(cmTime: currentTime),
+           current.ticks >= segmentEnd.ticks {
+            self.segmentEnd = nil
+            pause()
+        }
         guard let item = player?.currentItem else { return }
         let duration = item.duration
         // `duration` peut être indéfinie tant que l'item n'est pas prêt.
@@ -160,8 +242,11 @@ final class AudioPlayerController {
     }
 
     /// Fin de lecture : arrêt et retour au début, sans boucle automatique.
+    /// (Couvre aussi un passage musical dont `end` serait la fin du
+    /// morceau.)
     private func handlePlaybackEnded() {
         isPlaying = false
+        segmentEnd = nil
         player?.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         progress = 0
     }

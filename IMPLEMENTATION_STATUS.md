@@ -16,8 +16,8 @@
 | 3 — Import audio | ✅ Terminé (CI verte, run 31385112438) |
 | 4 — Moteur musical déterministe | ✅ Terminé (CI verte, run 31392520681) |
 | 5 — Générateur de scores | ✅ Terminé (CI verte, run 31398882782) |
-| 6 — Interface analyse / choix rythme | 🔄 En cours |
-| 7 — Timeline d'assemblage | ⬜ Non démarré |
+| 6 — Interface analyse / choix rythme | ✅ Terminé (CI verte, run 31419878812) |
+| 7 — Timeline d'assemblage | 🔄 En cours |
 | 8 — PhotoKit | ⬜ Non démarré |
 | 9 — Géométrie et preview | ⬜ Non démarré |
 | 10 — Export | ⬜ Non démarré |
@@ -137,6 +137,17 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 - §34 « feuille inférieure » rendue en plein écran routé par statut (choix V1).
 - Matériau `.ultraThinMaterial` au lieu du Liquid Glass natif iOS 26 (§37/§81) — cohérent avec tous les docks existants, migration au Jalon 12.
 - §60 : restauration automatique du dernier projet ouvert au lancement à froid non implémentée (la réouverture manuelle retombe au bon écran via le routage par statut) — report Jalon 12.
+
+## Jalon 7 — Timeline d'assemblage (10 août 2026)
+
+**Fichiers** : `App/Features/ProjectTimeline/AssemblyModels.swift` (états de case §13.3/§44/§64 avec forme parlée unique §39, géométrie durée-proportionnelle testable), `SlotCardView.swift` (cartes §35.2 : vide « Plan 8 / 1,20 s / + », remplie miniature+numéro+durée+coche, downloading/unavailable/tooShort/resolving distincts sans seule couleur), `AssemblyMiniTimelineView.swift` (§35.3 : segments proportionnels précalculés, position courante, fenêtre carrousel, limite d'export §51, tap+drag, fluide à 300+ cases §82), `AssemblyView.swift` (écran §35 complet : zone haute avec Plan X sur N + timestamps + durée requise + lecture du passage musical au toucher, carrousel 3 cases à 55 % scroll+tap, dock contextuel §36 avec Export à l'état réel §51, debounce navigation 300 ms §59, case active restaurée §60), `AudioPlayerController.playSegment/stopSegment`, routage `ProjectView`, 2 fichiers de tests logique.
+
+**Écarts documentés (résorption prévue)** :
+- §35.1 : aperçu = placeholder 16:9 + lecture du passage **musical** seul — miniature vidéo au Jalon 8, aperçu vidéo+musique §47.1 au Jalon 9.
+- §35.3 : « courbe musicale simplifiée » non dessinée dans la mini-timeline — résorption au Jalon 9 (la waveform 200 bins est déjà disponible).
+- §30 : « Changer de rythme » (action secondaire §65) dans un Menu ellipsis en haut à droite — hors zone pouce, assumé pour une action non essentielle ; réexamen au Jalon 12.
+- Pause de fin de passage par observateur 10 Hz : dépassement max ~100 ms (affichage V1) — boundary observer exact envisageable au Jalon 9.
+- Dynamic Type : hauteurs de cartes/carrousel fixes — passage à @ScaledMetric au Jalon 12 (§87 accessibilité).
 
 ## Distribution et vérification (pipeline ClipFlow)
 

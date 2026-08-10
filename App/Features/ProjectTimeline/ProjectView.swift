@@ -21,10 +21,10 @@ import UniformTypeIdentifiers
 ///    checkpoint à la disparition de la vue §8.1) ; `failed` a un état
 ///    sobre (bouton « Réessayer » §63). Jalon 6 : au statut
 ///    `awaitingPaceSelection`, l'écran du choix du rythme
-///    (`PaceSelectionView`, §34) remplace cet état ; au statut
-///    `assembling`, un placeholder sobre affiche le rythme choisi et le
-///    nombre de plans avec l'action « Changer de rythme » (§65 : verrouillé
-///    par des associations → alerte avec duplication).
+///    (`PaceSelectionView`, §34) remplace cet état. Jalon 7 : au statut
+///    `assembling`, la timeline d'assemblage (`AssemblyView`, §35) remplace
+///    le placeholder du Jalon 6 — « Changer de rythme » (§65) vit désormais
+///    dans le menu de `AssemblyView`.
 ///
 /// Flux d'import (annexe A) : `setStatus(.importingAudio)` →
 /// `importAudio(from:into:)` → `attachAudio` (qui place le statut sur
@@ -73,17 +73,6 @@ struct ProjectView: View {
     /// Dernière progression publiée par `AudioAnalysisActor` (§33 : phase
     /// courante + étapes terminées, jamais de pourcentage).
     @State private var analysisProgress: AnalysisProgress?
-
-    // MARK: État assemblage (Jalon 6 — placeholder)
-
-    /// Nombre de plans du rythme choisi (`ProjectStore.slotCount`), `nil`
-    /// tant que la lecture est en cours.
-    @State private var assemblingSlotCount: Int?
-    /// Alerte §65 : changement de rythme refusé car des vidéos sont déjà
-    /// associées — proposer la duplication, jamais de mutation destructive.
-    @State private var isPaceLockAlertPresented = false
-    /// Alerte générique d'échec du changement de rythme (jamais silencieux).
-    @State private var isPaceChangeErrorPresented = false
 
     init(projectID: UUID) {
         self.projectID = projectID
@@ -149,7 +138,10 @@ struct ProjectView: View {
                     // reste réservé aux statuts d'analyse.
                     PaceSelectionView(projectID: projectID)
                 case .assembling:
-                    assemblingContent(for: project)
+                    // Jalon 7 : timeline d'assemblage complète (§35, §36) —
+                    // remplace le placeholder du Jalon 6. « Changer de
+                    // rythme » (§65) et ses alertes vivent dans AssemblyView.
+                    AssemblyView(projectID: projectID)
                 default:
                     musicContent(status: status)
                 }
@@ -161,20 +153,6 @@ struct ProjectView: View {
         }
         .navigationTitle(displayTitle)
         .toolbarTitleDisplayMode(.inline)
-        // §65 : jamais de mutation destructive — proposer la duplication.
-        .alert("Rythme verrouillé", isPresented: $isPaceLockAlertPresented) {
-            Button("Dupliquer") {
-                duplicateForPaceChange()
-            }
-            Button("Annuler", role: .cancel) {}
-        } message: {
-            Text("Ce rythme est verrouillé par des vidéos déjà associées. Dupliquez le projet pour changer de rythme.")
-        }
-        .alert("Action impossible", isPresented: $isPaceChangeErrorPresented) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Le changement de rythme a échoué. Réessayez.")
-        }
     }
 
     // MARK: - État 1 : sans musique (§32)
@@ -443,77 +421,6 @@ struct ProjectView: View {
         .padding(.bottom, 12)
     }
 
-    // MARK: - État 4 : assemblage (Jalon 6 — placeholder sobre)
-
-    /// Placeholder du statut `assembling` : la timeline d'assemblage
-    /// (carrousel trois cases, mini-timeline §35) arrive au Jalon 7.
-    /// En attendant : libellé français du rythme choisi + nombre de plans
-    /// (`ProjectStore.slotCount`), action secondaire « Changer de rythme »
-    /// au dock (§30 : zone basse, ≥ 44 pt).
-    private func assemblingContent(for project: ProjectRecord) -> some View {
-        let mode = project.selectedPaceRaw.flatMap(PaceMode.init(rawValue:))
-        return VStack(spacing: 8) {
-            Spacer(minLength: 0)
-            if let mode {
-                Text("Rythme \(mode.displayLabel)")
-                    .font(.title3.weight(.medium))
-            }
-            if let assemblingSlotCount {
-                Text(assemblingSlotCount == 1 ? "1 plan" : "\(assemblingSlotCount) plans")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            } else {
-                // Lecture du nombre de plans en cours — jamais de faux
-                // chiffre (§33 par analogie).
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Spacer(minLength: 0)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .safeAreaInset(edge: .bottom) { assemblingDock }
-        .task(id: projectID) {
-            do {
-                assemblingSlotCount = try await environment.projectStore.slotCount(projectID: projectID)
-            } catch {
-                environment.logger.error("Nombre de plans illisible : \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Dock du placeholder d'assemblage : `Projets` | `Changer de rythme`.
-    /// (Le dock complet §36 « Case vide/remplie » arrive au Jalon 7.)
-    private var assemblingDock: some View {
-        HStack(spacing: 12) {
-            dockSecondaryButton(
-                title: "Projets",
-                accessibilityHint: "Revient à la liste des projets."
-            ) {
-                dismiss()
-            }
-
-            Button {
-                changePace()
-            } label: {
-                Text("Changer de rythme")
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .frame(maxWidth: .infinity, minHeight: 52) // ≥ 44 pt (§39)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Changer de rythme")
-            .accessibilityHint("Revient au choix du rythme. Les cases actuelles seront remplacées.")
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
-
     // MARK: - Actions Jalon 3
 
     /// Flux d'import — annexe A (`importMusic`).
@@ -572,43 +479,8 @@ struct ProjectView: View {
         }
     }
 
-    // MARK: - Actions Jalon 6
-
-    /// Changement de rythme AVANT association (§65 : seule la mutation
-    /// APRÈS association est interdite) : `revertToPaceSelection` efface
-    /// les cases et ramène le statut à `awaitingPaceSelection` — le
-    /// routage affiche alors `PaceSelectionView`. Si une association
-    /// existe : alerte §65 avec « Dupliquer », aucune mutation.
-    private func changePace() {
-        Task {
-            do {
-                try await environment.projectStore.revertToPaceSelection(projectID: projectID)
-                assemblingSlotCount = nil
-            } catch ProjectStoreError.paceLockedByAssignments {
-                isPaceLockAlertPresented = true
-            } catch {
-                environment.logger.error("Changement de rythme impossible : \(error.localizedDescription)")
-                isPaceChangeErrorPresented = true
-            }
-        }
-    }
-
-    /// §65 : duplication POUR CHANGER DE RYTHME — la copie repart SANS
-    /// associations, au choix du rythme (`duplicateForPaceChange` du store),
-    /// sinon la copie serait verrouillée comme l'original (impasse). Après
-    /// duplication, retour à la liste où la copie apparaît.
-    /// Non defini par la specification — definition minimale V1.
-    private func duplicateForPaceChange() {
-        Task {
-            do {
-                _ = try await environment.projectStore.duplicateForPaceChange(projectID: projectID)
-                dismiss()
-            } catch {
-                environment.logger.error("Duplication impossible : \(error.localizedDescription)")
-                isPaceChangeErrorPresented = true
-            }
-        }
-    }
+    // (Les actions « Changer de rythme »/duplication §65 du placeholder
+    // Jalon 6 vivent désormais dans `AssemblyView` — Jalon 7.)
 
     /// Charge le lecteur, la durée et la forme d'onde du fichier original.
     private func loadMedia() async {

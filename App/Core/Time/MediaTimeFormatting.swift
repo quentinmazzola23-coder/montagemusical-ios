@@ -25,6 +25,30 @@ extension MediaTime {
 
 extension MediaTime {
 
+    /// Forme parlée d'une durée pour VoiceOver (§39), calquée sur l'exemple
+    /// de la spécification : « Plan 7, durée requise **1 virgule 20
+    /// seconde**, rempli ». Centièmes d'AFFICHAGE, jamais réinjectés dans
+    /// un calcul (§9).
+    ///
+    /// Partagée par `PaceSelectionView` (stats §34) et `SlotCardView`
+    /// (cases §35.2) — définition UNIQUE, ne pas dupliquer localement.
+    var spokenString: String {
+        let centiseconds = Self.roundedDivision(ticks, dividedBy: 600)
+        let total = max(0, centiseconds)
+        let seconds = total / 100
+        let fraction = total % 100
+        // Accord : « 2 secondes » mais « 1 virgule 20 seconde » (§39).
+        let secondsLabel = seconds >= 2 ? "secondes" : "seconde"
+        guard fraction > 0 else { return "\(seconds) \(secondsLabel)" }
+        // « zéro 5 » : sans le zéro explicite, « 1 virgule 05 » serait lu
+        // comme « 1 virgule 5 ».
+        let spokenFraction = fraction < 10 ? "zéro \(fraction)" : "\(fraction)"
+        return "\(seconds) virgule \(spokenFraction) \(secondsLabel)"
+    }
+}
+
+extension MediaTime {
+
     /// Chaîne d'affichage au centième de seconde, format français.
     ///
     /// - `"mm:ss,cc"` en dessous d'une heure (exemple spec : 8,431764 s
