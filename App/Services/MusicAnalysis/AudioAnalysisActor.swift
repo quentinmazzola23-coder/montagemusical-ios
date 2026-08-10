@@ -8,18 +8,32 @@
 //  `DeterministicMusicAnalyzer`).
 //
 //  Cycle de vie (annexe A `analyze`, §8.1, §63) :
-//  - succès    → `saveAnalysisResult` (statut `awaitingPaceSelection`) ;
-//  - annulation → checkpoint conservé, statut INCHANGÉ (`analyzing`) :
-//    reprise à la prochaine ouverture du projet ;
-//  - échec     → statut `failed` + journal ; le bouton « Réessayer » (§63)
-//    est offert par l'interface (version complète au Jalon 6).
+//  - succès    → phase 5 §33 (« Création des rythmes ») publiée par
+//    l'acteur, génération des partitions (Jalon 5, HORS acteur — tâche
+//    détachée pour ne pas geler le polling ni l'annulation), écriture
+//    `analysis/scores-v1.json` + `analysis/scores-meta-v1.json` (§11,
+//    §61), puis `saveScores` + `saveAnalysisResult` (statut final
+//    `awaitingPaceSelection`) ;
+//  - annulation → checkpoint (ou cache §69) conservé, statut INCHANGÉ
+//    (`analyzing`) : reprise à la prochaine ouverture du projet ;
+//  - échec (analyse OU génération) → statut `failed` + journal ; le bouton
+//    « Réessayer » (§63) est offert par l'interface (version complète au
+//    Jalon 6).
 //
 
 import AVFoundation
+import CryptoKit
 import Foundation
 
 // Non defini par la specification — definition minimale V1.
 actor AudioAnalysisActor {
+
+    /// Chemin relatif §11 des partitions générées (Jalon 5).
+    static let scoresRelativePath = "analysis/scores-v1.json"
+
+    /// Chemin relatif §11 des métadonnées de validité des partitions
+    /// (§61) : version du générateur + empreinte de configuration.
+    static let scoresMetaRelativePath = "analysis/scores-meta-v1.json"
 
     private let analyzer: DeterministicMusicAnalyzer
     private let projectStore: ProjectStore
@@ -69,6 +83,12 @@ actor AudioAnalysisActor {
         defer { startingProjects.remove(projectID) }
 
         // Ne démarrer que pour un projet réellement en attente d'analyse.
+        // IDEMPOTENCE (Jalon 5) : un projet déjà en `awaitingPaceSelection`
+        // — analyse ET partitions déjà sauvegardées (`scores-v1.json` écrit
+        // avec la version courante du générateur) — est écarté ici :
+        // `startAnalysisIfNeeded` ne refait rien. Une régénération après
+        // évolution du moteur passe par une action explicite (§61 : jamais
+        // de recalcul automatique d'un projet terminé).
         do {
             guard let summary = try await projectStore.summary(id: projectID),
                   summary.status == .analyzing else {
@@ -133,31 +153,145 @@ actor AudioAnalysisActor {
 
     private func runAnalysis(audio: ImportedAudio, projectID: UUID) async {
         do {
-            _ = try await analyzer.analyze(audio: audio, configuration: .production) { progress in
+            let result = try await analyzer.analyze(audio: audio, configuration: .production) { progress in
                 Task { await self.update(progress: progress, projectID: projectID) }
             }
-            // Succès : chemin du résultat + version + statut
-            // `awaitingPaceSelection` en une seule écriture (annexe A).
+
+            // ========================================================
+            // Phase 5 §33 — « Création des rythmes » (Jalon 5)
+            // ========================================================
+            // Publiée par l'ACTEUR : le moteur d'analyse s'arrête aux 4
+            // premières phases §33 ; les 4 sont terminées, la génération
+            // des partitions commence.
+            update(
+                progress: AnalysisProgress(
+                    phase: .rhythmCreation,
+                    completedPhases: [
+                        .audioPreparation, .pulseAndTempo,
+                        .phrasesAndStructure, .buildUpsAndImpacts,
+                    ]
+                ),
+                projectID: projectID
+            )
+            try Task.checkCancellation()
+
+            // Génération HORS acteur : `generateScores` est un calcul pur
+            // potentiellement long ; exécuté sur l'executor de l'acteur il
+            // gèlerait `currentProgress` (polling de l'interface) et
+            // `cancelAnalysis` pendant toute la phase 5. `Task.detached`
+            // l'envoie sur le pool global (`result` et la configuration
+            // sont `Sendable`, le générateur est un struct `Sendable`).
+            // Le calcul lui-même n'est pas annulable, mais l'annulation
+            // est honorée ci-dessous AVANT toute écriture : rien n'est
+            // modifié sur disque ni en base après un `cancel`.
+            let configuration = ScoreConfiguration.production
+            let scores = try await Task.detached(priority: .userInitiated) {
+                try DeterministicEditScoreGenerator()
+                    .generateScores(from: result, configuration: configuration)
+            }.value
+
+            // Annulée pendant la génération → aucune écriture (le résultat
+            // d'analyse reste en cache §69, les partitions seront
+            // régénérées à la reprise).
+            try Task.checkCancellation()
+            try writeScores(scores, projectID: projectID)
+            try writeScoresMeta(configuration: configuration, projectID: projectID)
+
+            // Les deux sauvegardes, dans cet ordre : `saveScores` (champ
+            // `scoreVersion` §61, statut inchangé) PUIS `saveAnalysisResult`
+            // (chemin + version d'analyse + statut) — le statut final reste
+            // `awaitingPaceSelection` (annexe A).
+            try await projectStore.saveScores(
+                relativePath: Self.scoresRelativePath,
+                scoreVersion: DeterministicEditScoreGenerator.generatorVersion,
+                projectID: projectID
+            )
             try await projectStore.saveAnalysisResult(
                 relativePath: "analysis/analysis-v1.json",
                 analysisVersion: DeterministicMusicAnalyzer.engineVersion,
                 projectID: projectID
             )
         } catch is CancellationError {
-            // §8.1/§63 : checkpoint conservé, statut INCHANGÉ (`analyzing`)
-            // — l'analyse reprend à la prochaine ouverture du projet.
-            logger.info("Analyse annulée — checkpoint conservé pour reprise.")
+            // §8.1/§63 : statut INCHANGÉ (`analyzing`) — reprise à la
+            // prochaine ouverture du projet. Deux fenêtres d'annulation :
+            // - pendant l'ANALYSE : le checkpoint du dernier jalon terminé
+            //   est conservé, la reprise repart de ce checkpoint ;
+            // - pendant la GÉNÉRATION des partitions (Jalon 5) : le
+            //   checkpoint d'analyse a déjà été effacé au succès de
+            //   l'analyse, mais le résultat complet est en cache (§69) —
+            //   la réouverture RELANCE l'analyse via `startAnalysisIfNeeded`
+            //   (statut resté `analyzing`), l'analyse sort immédiatement du
+            //   cache sans recalcul, puis les partitions sont REGÉNÉRÉES.
+            logger.info("Analyse annulée — reprise à la prochaine ouverture (checkpoint ou cache §69).")
         } catch {
-            logger.error("Analyse échouée : \(error.localizedDescription)")
+            // Échec de l'analyse OU de la génération des partitions : même
+            // traitement (§63) — statut `failed` + journal ; le bouton
+            // « Réessayer » relance via `setStatus(.analyzing)` +
+            // `startAnalysisIfNeeded` (une analyse déjà réussie sortira du
+            // cache §69, seules les partitions seront recalculées).
+            logger.error("Analyse ou génération des partitions échouée : \(error.localizedDescription)")
             do {
-                // §63 : échec → statut `failed` ; le bouton « Réessayer »
-                // relance via `setStatus(.analyzing)` + `startAnalysisIfNeeded`.
                 try await projectStore.setStatus(.failed, projectID: projectID)
             } catch {
                 logger.error("Statut d'échec non enregistré : \(error.localizedDescription)")
             }
         }
         finish(projectID: projectID)
+    }
+
+    /// Écrit `analysis/scores-v1.json` (§11) — `EditScoreFamily` est
+    /// `Codable`. Écriture ATOMIQUE (jamais de JSON partiel lisible),
+    /// encodeur à clés triées (déterministe, même convention que
+    /// `AnalysisCache`).
+    private func writeScores(_ scores: EditScoreFamily, projectID: UUID) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(scores)
+        let url = fileStore.directory(for: projectID).appending(path: Self.scoresRelativePath)
+        try data.write(to: url, options: .atomic)
+    }
+
+    // Non defini par la specification — traçabilité §61 des partitions.
+    /// Métadonnées de validité des partitions (§61) : version du
+    /// générateur + empreinte de la `ScoreConfiguration` utilisée.
+    private struct ScoresMeta: Codable {
+        let generatorVersion: Int
+        let configurationFingerprint: String
+    }
+
+    /// Écrit `analysis/scores-meta-v1.json` À CÔTÉ des partitions (§61 :
+    /// les critères de validité — version du générateur + configuration —
+    /// sont tracés avec le résultat, même approche que
+    /// `analysis-meta-v1.json` pour l'analyse). Exploité au Jalon 6 : des
+    /// partitions absentes ou dont la méta ne correspond plus (générateur
+    /// ou configuration ayant évolué) sont PÉRIMÉES → l'application
+    /// propose une régénération explicite, jamais silencieuse (§61 :
+    /// aucun recalcul automatique d'un projet terminé). Écrit APRÈS
+    /// `scores-v1.json` : une méta sans partitions validerait un fichier
+    /// absent, l'inverse est inoffensif (méta absente → partitions
+    /// considérées périmées).
+    private func writeScoresMeta(configuration: ScoreConfiguration, projectID: UUID) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let meta = ScoresMeta(
+            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            configurationFingerprint: try Self.configurationFingerprint(of: configuration)
+        )
+        let data = try encoder.encode(meta)
+        let url = fileStore.directory(for: projectID).appending(path: Self.scoresMetaRelativePath)
+        try data.write(to: url, options: .atomic)
+    }
+
+    /// Empreinte SHA-256 de la `ScoreConfiguration` ENCODÉE (clés triées
+    /// → encodage déterministe, deux configurations égales donnent la
+    /// même empreinte). Même approche que `configurationFingerprint`
+    /// côté analyse (`AnalysisCache`/`DeterministicMusicAnalyzer`),
+    /// appliquée ici à la configuration des partitions.
+    private static func configurationFingerprint(of configuration: ScoreConfiguration) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(configuration)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func update(progress: AnalysisProgress, projectID: UUID) {

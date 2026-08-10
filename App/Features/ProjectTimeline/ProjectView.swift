@@ -277,18 +277,17 @@ struct ProjectView: View {
 
     // MARK: - Zone analyse (Jalon 4, §33, §63)
 
-    /// Les quatre phases publiées par le moteur au Jalon 4 (la 5ᵉ phase §33
-    /// « Création des rythmes » arrive avec le générateur de scores,
-    /// Jalon 5).
-    private static let analysisPhases: [AnalysisPhase] = [
-        .audioPreparation, .pulseAndTempo, .phrasesAndStructure, .buildUpsAndImpacts,
-    ]
+    /// Les cinq phases §33, dans l'ordre de déclaration de `AnalysisPhase`
+    /// (ordre §33). Jalon 5 : la 5ᵉ phase « Création des rythmes » est
+    /// publiée par `AudioAnalysisActor` après le succès de l'analyse —
+    /// l'affichage indique désormais « Phase x sur 5 ».
+    private static let analysisPhases: [AnalysisPhase] = AnalysisPhase.allCases
 
     @ViewBuilder
     private func analysisStatusArea(status: ProjectStatus) -> some View {
         switch status {
         case .analyzing:
-            // §33 : phase courante + « Phase x sur 4 » — SANS pourcentage
+            // §33 : phase courante + « Phase x sur 5 » — SANS pourcentage
             // (le spinner est indéterminé). Avant la première publication,
             // la première phase est affichée.
             let phase = analysisProgress?.phase ?? .audioPreparation

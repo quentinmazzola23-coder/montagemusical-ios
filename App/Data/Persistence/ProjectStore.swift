@@ -363,6 +363,27 @@ actor ProjectStore {
         try touchAndSave(record) // updatedAt + autosauvegarde (§59)
     }
 
+    // MARK: - Partitions (Jalon 5)
+
+    /// Enregistre la génération des partitions du projet (annexe A
+    /// `analyze`, Jalon 5) : version du générateur (§61 `scoreVersion`) —
+    /// `updatedAt` + autosauvegarde (§59).
+    ///
+    /// Le statut n'est PAS modifié ici : c'est `saveAnalysisResult` qui pose
+    /// `awaitingPaceSelection` — quel que soit l'ordre des deux sauvegardes
+    /// dans `AudioAnalysisActor`, le statut final reste identique.
+    ///
+    /// `relativePath` (contrat Jalon 5 : `analysis/scores-v1.json`, §11) :
+    /// le schéma §10 verbatim n'a pas de colonne dédiée au chemin des
+    /// partitions — le chemin est FIXE (§11) et re-dérivable ; le paramètre
+    /// documente le contrat sans changement de schéma SwiftData.
+    /// Non defini par la specification — definition minimale V1.
+    func saveScores(relativePath: String, scoreVersion: Int, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        record.scoreVersion = scoreVersion
+        try touchAndSave(record) // updatedAt + autosauvegarde (§59)
+    }
+
     // MARK: - Cases (point d'insertion Jalon 6)
 
     /// Point d'insertion unique des cases d'un projet. Les cases sont

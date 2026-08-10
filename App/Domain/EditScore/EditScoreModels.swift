@@ -57,6 +57,11 @@ struct EditAnchor: Codable, Identifiable, Sendable {
     let hierarchyRank: Int
     let attraction: Double
     let inhibition: Double
+    /// Utilité finale §26.3 au moment de la POSE de l'ancre :
+    /// attraction − inhibition − pénalité d'incertitude. La valeur
+    /// persistée EXCLUT le terme `overcutPenalty`, qui dépend de l'état de
+    /// sélection (densité des coupes déjà activées) et n'est appliqué
+    /// qu'au choix des splits (`DeterministicEditScoreGenerator.evaluate`).
     let finalUtility: Double
     let confidence: Double
     let reasons: [String]

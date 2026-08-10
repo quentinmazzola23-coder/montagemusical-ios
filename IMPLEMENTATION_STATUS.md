@@ -14,8 +14,8 @@
 | 1 — Temps et domaine | ✅ Terminé (tests CI verts) |
 | 2 — Projets et persistance | ✅ Terminé (CI verte, run 31382568859) |
 | 3 — Import audio | ✅ Terminé (CI verte, run 31385112438) |
-| 4 — Moteur musical déterministe | 🔄 En cours |
-| 5 — Générateur de scores | ⬜ Non démarré |
+| 4 — Moteur musical déterministe | ✅ Terminé (CI verte, run 31392520681) |
+| 5 — Générateur de scores | 🔄 En cours |
 | 6 — Interface analyse / choix rythme | ⬜ Non démarré |
 | 7 — Timeline d'assemblage | ⬜ Non démarré |
 | 8 — PhotoKit | ⬜ Non démarré |
@@ -114,6 +114,18 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 - §24 : fonctions dramaturgiques réduites à ~6 états heuristiques (confiance ≤ 0,5).
 - §11 : pas encore de `features-v1.bin` séparé — les features vivent dans le checkpoint (supprimé au succès) ; à extraire au Jalon 5 pour éviter un redécodage (§69).
 - Prior de tempo log-normal (120 BPM, σ 0,5 octave) : choix d'implémentation standard non décrit par la spec, pour départager les familles half/double-time — toutes les hypothèses restent conservées avec leurs relations (§63).
+
+## Jalon 5 — Générateur de partitions (10 août 2026)
+
+**Fichiers** : `App/Services/EditScore/AnchorField.swift` (champ d'ancres §26 : attraction/inhibition, formule d'utilité §26.3 avec les 9 poids de ScoreConfiguration, kinds §13.1, rangs hiérarchiques, fenêtres optimales/tolérées, raisons §29 en français), `GestureDetector.swift` (§27 niveau A : burst-résolution en groupe atomique, impact-maintien, respiration, accent simple), `DeterministicEditScoreGenerator.swift` (§28 : racine début+fin+majeures communes, splits par file de priorité sur splitGain, **imbrication garantie par construction** — une seule séquence d'activations fluid→balanced→percussive avec planchers §28.2, résidu final §28.2, respiration bidirectionnelle après burst), extension `ScoreConfiguration` (seuils de gain, cibles de durée, coûts — défauts documentés), wiring `AudioAnalysisActor` (5ᵉ phase §33 « Création des rythmes » publiée, génération hors acteur annulable, `scores-v1.json` + `scores-meta-v1.json` avec empreinte de config §61), `ProjectStore.saveScores`. Tests : bloc §70 « Partitions » complet + intégration bout-en-bout + tests des poids §26.3.
+
+**Écarts niveau A documentés** :
+- §27 : gestes accélération / écho de motif / variation / réinitialisation non générés (4 types sur 8).
+- §28.3 étape 6 : pas de passe globale post-sélection distincte — repliée dans overcutPenalty (densité locale), seuils de gain et contraintes de respiration.
+- `EditAnchor.finalUtility` persisté exclut le terme overcutPenalty (dépendant de l'état de sélection).
+- `saveScores(relativePath:)` : chemin non persisté dans `ProjectRecord` (schéma §10 verbatim sans colonne dédiée) — chemin fixe §11 re-dérivable.
+- Projets pré-J5 en `awaitingPaceSelection` sans `scores-v1.json` : pas de régénération silencieuse (§61) — le Jalon 6 proposera la régénération.
+- Perf : ré-évaluation complète des candidats après chaque activation — acceptable ≤ ~6 min de musique, optimisation locale notée.
 
 ## Distribution et vérification (pipeline ClipFlow)
 
