@@ -84,9 +84,16 @@
 
 Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation Swift 6/pbxproj, qualité des tests) : 17 findings, 0 bloqueur, 1 majeur, 16 mineurs. Corrigés dans la foulée : règle d'arrondi unifiée « ,5 supérieur » (`init(seconds:)` aligné sur `roundedDivision`), `roundedDivision` réécrite sans multiplication (zéro débordement possible), `init?(cmTime:)` failable + PGCD, catalogue d'assets créé, assertions tautologiques des tests remplacées par des égalités complètes de structs (`Equatable` ajouté à `ProjectSlot`/`ClipAssignmentSnapshot`), cas `.resolving`/`.tooShort` ajoutés aux tests de préfixe, documentation de suivi corrigée.
 
+## Distribution et vérification (pipeline ClipFlow)
+
+- `.github/workflows/build-ipa.yml` : à chaque push sur `main`, un runner GitHub macOS (Xcode 26) compile en Release sans signature, empaquette `MontageMusical-unsigned.ipa` et la publie en release GitHub (tag `build-N-rM`). Job `tests` parallèle : tests unitaires sur simulateur (informatif, `continue-on-error`).
+- Installation iPhone : Sideloadly sous Windows, signature Apple ID personnelle (validité 7 jours). Voir README.
+- Scheme partagé `MontageMusical.xcscheme` requis par `xcodebuild -scheme` sur le runner.
+- Dépôt : `github.com/quentinmazzola23-coder/montagemusical-ios` (public, comme clipflow-ios — minutes Actions macOS illimitées).
+
 ## Reste à faire (Jalons 0–1)
 
-- Compilation + tests sur Mac (bloqué : environnement Windows).
+- ~~Compilation + tests sur Mac~~ → vérifiés par le workflow GitHub Actions à chaque push ; passer les jalons à « Terminé » quand le run `build` + `tests` est vert.
 
 ## À ne pas oublier (jalons suivants)
 

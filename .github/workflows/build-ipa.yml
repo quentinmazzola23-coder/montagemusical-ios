@@ -1,0 +1,112 @@
+name: Build IPA (non signée)
+
+# Compile MontageMusical sur un runner macOS GitHub et produit une IPA NON
+# SIGNÉE. La signature est faite ensuite sur le PC Windows par Sideloadly
+# avec l'identifiant Apple personnel (gratuit, validité 7 jours).
+# Même pipeline que ClipFlow-iOS.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nécessaire pour publier l'IPA en release avec le jeton par défaut.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Image macOS avec Xcode 26 (SDK iOS 26 requis par le projet).
+    # AUCUNE action GitHub (uses:) dans ce job : clone git direct et publication
+    # en release via gh préinstallé — insensible aux pannes du service de
+    # résolution d'actions ("Failed to resolve action download info").
+    runs-on: macos-26
+    timeout-minutes: 40
+
+    steps:
+      - name: Cloner le dépôt
+        run: |
+          git clone --depth 1 --branch "${GITHUB_REF_NAME}" \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" src
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          xcodebuild -version
+
+      - name: Générer BuildInfo (n° de build + horodatage)
+        working-directory: src
+        run: |
+          cat > App/BuildInfo.swift <<EOF
+          enum BuildInfo {
+              static let version = "0.1"
+              static let build = "${{ github.run_number }}"
+              static let stamp = "$(TZ=Europe/Paris date '+%d/%m/%Y %H:%M')"
+          }
+          EOF
+          cat App/BuildInfo.swift
+
+      - name: Compiler (sans signature)
+        working-directory: src
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project MontageMusical.xcodeproj \
+            -scheme MontageMusical \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Empaqueter l'IPA
+        working-directory: src
+        run: |
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/MontageMusical.app" Payload/
+          zip -qry MontageMusical-unsigned.ipa Payload
+          ls -la MontageMusical-unsigned.ipa
+
+      - name: Publier en release
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}-r${{ github.run_attempt }}"
+          gh release create "$TAG" MontageMusical-unsigned.ipa \
+            --title "IPA $TAG (${GITHUB_SHA:0:7})" \
+            --notes "IPA non signée — à signer avec Sideloadly." \
+            -R "${{ github.repository }}"
+
+  tests:
+    runs-on: macos-26
+    timeout-minutes: 40
+    continue-on-error: true # informatif : l'IPA reste produite même si un test casse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sélectionner Xcode 26 si présent
+        run: |
+          XCODE_26=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$XCODE_26" ]; then
+            sudo xcode-select -s "$XCODE_26"
+          fi
+          xcodebuild -version
+
+      - name: Tests unitaires (simulateur)
+        run: |
+          set -o pipefail
+          DEVICE=$(xcrun simctl list devices available | grep -m1 -oE "iPhone [0-9]+[^(]*" | head -1 | xargs || echo "iPhone 16 Pro")
+          echo "Simulateur : $DEVICE"
+          xcodebuild \
+            -project MontageMusical.xcodeproj \
+            -scheme MontageMusical \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
