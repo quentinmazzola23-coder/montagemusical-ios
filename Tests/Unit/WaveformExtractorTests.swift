@@ -137,10 +137,10 @@ final class WaveformExtractorTests: XCTestCase {
 // aucune collision avec l'extension équivalente d'AudioImporterTests).
 private extension Data {
     mutating func appendLittleEndian(_ value: UInt16) {
-        withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
     }
 
     mutating func appendLittleEndian(_ value: UInt32) {
-        withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
     }
 }

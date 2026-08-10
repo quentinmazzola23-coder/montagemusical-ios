@@ -297,11 +297,13 @@ final class AudioImporterTests: XCTestCase {
 
 // Non partagé : extension file-private d'écriture little-endian.
 private extension Data {
+    // `Swift.` obligatoire : dans une extension de Data, l'appel non
+    // qualifié résout vers la méthode d'instance `Data.withUnsafeBytes(_:)`.
     mutating func appendLittleEndian(_ value: UInt16) {
-        withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
     }
 
     mutating func appendLittleEndian(_ value: UInt32) {
-        withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }
     }
 }
