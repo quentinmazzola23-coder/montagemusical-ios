@@ -129,6 +129,53 @@ struct ProjectFileStore: Sendable {
         hasFiles(in: .exports, projectID: projectID)
     }
 
+    /// URL du DERNIER export réussi du projet (§60 : « dernier export
+    /// réussi » restauré à la réouverture), ou `nil` si `exports/` est vide
+    /// ou absent.
+    ///
+    /// Le schéma §10 est verbatim : aucune colonne ne décrit un export — le
+    /// FICHIER est la trace durable (§11). Son nom est horodaté et TRIABLE
+    /// (`Montage-yyyyMMdd-HHmmss[-n].mov`, `ProjectExporter.uniqueOutputURL`) :
+    /// le maximum lexicographique est donc le plus récent, sans lire aucune
+    /// date système (une date de fichier peut être altérée par une
+    /// restauration de sauvegarde, pas un nom).
+    ///
+    /// Un seul export est normalement conservé (`pruneExports`) ; le tri
+    /// reste correct si un résidu subsiste.
+    func lastExportURL(projectID: UUID) -> URL? {
+        exportFileURLs(projectID: projectID)
+            .max { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// Ne conserve dans `exports/` que le fichier `keptURL` (§11, §57 : un
+    /// export complet par relance saturerait le stockage ; §60 ne demande de
+    /// restaurer que le DERNIER export réussi).
+    ///
+    /// Appelé APRÈS le déplacement du nouvel export : à aucun instant le
+    /// projet ne se retrouve sans export livrable. Retourne le nombre de
+    /// fichiers supprimés.
+    @discardableResult
+    func pruneExports(projectID: UUID, keeping keptURL: URL) -> Int {
+        let keptName = keptURL.lastPathComponent
+        var removedCount = 0
+        for url in exportFileURLs(projectID: projectID) where url.lastPathComponent != keptName {
+            if (try? FileManager.default.removeItem(at: url)) != nil {
+                removedCount += 1
+            }
+        }
+        return removedCount
+    }
+
+    /// Contenu de `exports/` (§11), fichiers cachés exclus. Vide si le
+    /// dossier n'existe pas encore.
+    private func exportFileURLs(projectID: UUID) -> [URL] {
+        (try? FileManager.default.contentsOfDirectory(
+            at: subdirectoryURL(.exports, for: projectID),
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+    }
+
     /// Identifiants des dossiers projets présents sur disque — réconciliation
     /// au lancement : une suppression interrompue entre la sauvegarde SwiftData
     /// et la suppression du dossier laisse un dossier orphelin (§69A).

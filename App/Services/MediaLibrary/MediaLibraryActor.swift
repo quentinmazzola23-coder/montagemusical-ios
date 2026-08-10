@@ -392,13 +392,16 @@ actor MediaLibraryActor {
     /// Continuation UNIQUE garantie par `SingleResumeGuard` (PhotoKit peut
     /// rappeler son handler : versions dégradées, annulation).
     ///
-    /// Limite V1 documentée : un asset PhotoKit sans fichier unique
+    /// Limite documentée : un asset PhotoKit sans fichier unique
     /// (ralenti/timelapse recomposé, montage iCloud) est livré comme
     /// `AVComposition` et non comme `AVURLAsset` → `assetNotFound`. La
-    /// prévisualisation refuse alors ce rush (l'appelant le traduit en
-    /// « asset indisponible ») plutôt que d'afficher une image fausse ;
-    /// l'export du Jalon 10 pourra passer par un `AVAssetExportSession`
-    /// PhotoKit pour ces cas.
+    /// PRÉVISUALISATION refuse alors ce rush (l'appelant le traduit en
+    /// « asset indisponible ») plutôt que d'afficher une image fausse.
+    /// L'EXPORT, lui, ne peut pas se contenter de ce refus (§52.3 : « respecter
+    /// la cadence de lecture, pas seulement la cadence de capture ralentie »
+    /// suppose que ces rushs soient exportables) : il utilise
+    /// `exportableVideoURL(id:allowNetwork:intermediateDirectory:)`, qui
+    /// matérialise un fichier intermédiaire pour ces cas.
     ///
     /// - Parameters:
     ///   - id: identifiant local PhotoKit du rush.
@@ -408,7 +411,93 @@ actor MediaLibraryActor {
     ///     surprise pendant une lecture.
     func videoAssetURL(id: String, allowNetwork: Bool) async throws -> URL {
         try requireReadAccess()
+        let phAsset = try requireVideoAsset(id: id)
+        guard let url = try await requestFileURL(for: phAsset, allowNetwork: allowNetwork) else {
+            // Rush recomposé par Photos (ralenti/timelapse) : aucun fichier
+            // unique à lire — refus documenté ci-dessus.
+            throw MediaLibraryError.assetNotFound
+        }
+        return url
+    }
 
+    // MARK: - URL exploitable à l'EXPORT (§52.3, §54, §66)
+
+    /// URL d'un fichier lisible par AVFoundation pour ce rush, **quel que
+    /// soit son mode de livraison PhotoKit** — c'est la résolution utilisée
+    /// par l'export (§54 étape 1).
+    ///
+    /// Deux chemins :
+    /// 1. rush livré comme `AVURLAsset` (cas courant) → son URL, telle
+    ///    quelle, AUCUNE copie ;
+    /// 2. rush recomposé par Photos — **ralenti, timelapse**, montage
+    ///    appliqué — livré comme `AVComposition` : PhotoKit fournit alors une
+    ///    session d'export (`requestExportSession`) qui APPLIQUE le montage,
+    ///    donc la cadence de LECTURE (§52.3). Le résultat est écrit dans
+    ///    `intermediateDirectory` (le `temp/` du projet, §11) et son URL est
+    ///    rendue.
+    ///
+    /// **Pourquoi ce chemin et pas un refus.** Ces rushs ont pu être ASSOCIÉS
+    /// (§43 : la résolution `resolveAsset` lit très bien un `AVComposition`) :
+    /// les refuser à l'export seulement rendrait un montage déjà construit
+    /// inexportable — §66 n'a aucune case pour un rush « associable mais pas
+    /// exportable ». L'alternative (les refuser dès l'association, §64
+    /// « piste vidéo absente : refuser ») interdirait tout montage de rushs
+    /// ralentis, que §52.3 prévoit explicitement.
+    ///
+    /// **Limites V1, assumées et documentées :**
+    /// - le fichier intermédiaire est un ré-encodage supplémentaire pour CES
+    ///   rushs uniquement (§55 « une seule ré-encodage final » vise le
+    ///   montage : ici il s'agit de matérialiser une SOURCE) ;
+    /// - sa taille n'entre pas dans l'estimation §57 (elle est bornée par le
+    ///   rush source et le fichier est supprimé avec `temp/`) ;
+    /// - le fichier est RÉUTILISÉ s'il existe déjà (nom déterministe) : le
+    ///   résumé §56 et l'export qui le suit ne matérialisent qu'une fois.
+    ///
+    /// - Parameters:
+    ///   - id: identifiant local PhotoKit du rush.
+    ///   - allowNetwork: §44 — l'export passe `false` (une case `ready` a
+    ///     déjà été résolue, aucun téléchargement surprise).
+    ///   - intermediateDirectory: dossier d'accueil des fichiers
+    ///     intermédiaires (`temp/` du projet, §11) — créé si nécessaire.
+    func exportableVideoURL(
+        id: String,
+        allowNetwork: Bool,
+        intermediateDirectory: URL
+    ) async throws -> URL {
+        try requireReadAccess()
+
+        // Intermédiaire déjà matérialisé (résumé §56 puis export, ou export
+        // relancé sans nettoyage) : réutilisé tel quel, aucune requête.
+        let intermediateURL = Self.intermediateFileURL(id: id, in: intermediateDirectory)
+        if FileManager.default.fileExists(atPath: intermediateURL.path(percentEncoded: false)) {
+            return intermediateURL
+        }
+
+        let phAsset = try requireVideoAsset(id: id)
+        if let url = try await requestFileURL(for: phAsset, allowNetwork: allowNetwork) {
+            return url
+        }
+        return try await materializeVideo(
+            for: phAsset,
+            allowNetwork: allowNetwork,
+            destinationURL: intermediateURL
+        )
+    }
+
+    /// Nom DÉTERMINISTE du fichier intermédiaire d'un rush (§11 `temp/`) :
+    /// deux résolutions du même rush désignent le même fichier, donc une
+    /// seule matérialisation. L'identifiant PhotoKit contient des `/`
+    /// (`<uuid>/L0/001`) : tout caractère non alphanumérique devient `-`.
+    static func intermediateFileURL(id: String, in directory: URL) -> URL {
+        let sanitized = String(id.unicodeScalars.map {
+            CharacterSet.alphanumerics.contains($0) ? Character($0) : "-"
+        }.prefix(80))
+        return directory.appending(path: "source-\(sanitized).mov")
+    }
+
+    /// PHAsset vidéo du projet, ou erreur §64 (asset supprimé / média non
+    /// vidéo) — garde commune à toutes les résolutions.
+    private func requireVideoAsset(id: String) throws -> PHAsset {
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
         guard let phAsset = fetched.firstObject else {
             throw MediaLibraryError.assetNotFound // §64 : asset supprimé
@@ -416,7 +505,20 @@ actor MediaLibraryActor {
         guard phAsset.mediaType == .video else {
             throw MediaLibraryError.noVideoTrack // §64 : refuser sans piste vidéo
         }
+        return phAsset
+    }
 
+    /// URL du fichier livré par PhotoKit, ou `nil` si le rush est recomposé
+    /// (`AVComposition` — ralenti/timelapse/montage).
+    ///
+    /// Aucune boîte `@unchecked Sendable` n'est nécessaire : la lecture est
+    /// SYNCHRONE dans le rappel (aucune `Task` capturant l'asset) et seule
+    /// l'`URL` (`Sendable`) en sort — l'`AVAsset` reste dans la région du
+    /// rappel PhotoKit (§8).
+    ///
+    /// Continuation UNIQUE garantie par `SingleResumeGuard` (PhotoKit peut
+    /// rappeler son handler : versions dégradées, annulation).
+    private func requestFileURL(for phAsset: PHAsset, allowNetwork: Bool) async throws -> URL? {
         let options = PHVideoRequestOptions()
         options.isNetworkAccessAllowed = allowNetwork // §44 : à la demande
         options.deliveryMode = .highQualityFormat
@@ -432,13 +534,65 @@ actor MediaLibraryActor {
                     continuation.resume(throwing: Self.resolutionError(info: info))
                     return
                 }
-                // Seule l'URL (`Sendable`) sort du rappel — l'`AVAsset` reste
-                // dans la région du rappel PhotoKit (§8).
-                guard let urlAsset = avAsset as? AVURLAsset else {
-                    continuation.resume(throwing: MediaLibraryError.assetNotFound)
+                // Seule l'URL (`Sendable`) sort du rappel.
+                continuation.resume(returning: (avAsset as? AVURLAsset)?.url)
+            }
+        }
+    }
+
+    /// Écrit le rush recomposé dans un fichier lisible (§52.3) via la session
+    /// d'export fournie par PhotoKit — c'est elle qui applique le montage
+    /// Photos (ralenti, trim), donc la cadence de LECTURE.
+    ///
+    /// La session (non-`Sendable`) est livrée par un rappel qui n'est pas
+    /// `sending` : elle transite par la boîte `UncheckedSendableBox` et n'est
+    /// utilisée QUE dans la `Task` locale au rappel — même contrat d'usage
+    /// que `resolvedVideoAsset`.
+    ///
+    /// Le preset est celui de plus haute qualité : un `Passthrough`
+    /// ignorerait le remappage temporel d'un ralenti et livrerait le fichier
+    /// de capture (120/240 i/s), ce que §52.3 interdit d'exporter.
+    private func materializeVideo(
+        for phAsset: PHAsset,
+        allowNetwork: Bool,
+        destinationURL: URL
+    ) async throws -> URL {
+        try? FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = allowNetwork // §44
+        options.deliveryMode = .highQualityFormat
+        options.version = .current // montage Photos APPLIQUÉ (§52.3)
+
+        let guardBox = SingleResumeGuard()
+        return try await withCheckedThrowingContinuation { continuation in
+            PHImageManager.default().requestExportSession(
+                forVideo: phAsset,
+                options: options,
+                exportPreset: AVAssetExportPresetHighestQuality
+            ) { exportSession, info in
+                guard guardBox.beginResume() else { return }
+                guard let exportSession else {
+                    continuation.resume(throwing: Self.resolutionError(info: info))
                     return
                 }
-                continuation.resume(returning: urlAsset.url)
+                let sessionBox = UncheckedSendableBox(value: exportSession)
+                Task {
+                    let session = sessionBox.value
+                    // Résidu d'une matérialisation interrompue : jamais
+                    // réutilisé à moitié.
+                    try? FileManager.default.removeItem(at: destinationURL)
+                    do {
+                        try await session.export(to: destinationURL, as: .mov)
+                        continuation.resume(returning: destinationURL)
+                    } catch {
+                        try? FileManager.default.removeItem(at: destinationURL)
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
         }
     }

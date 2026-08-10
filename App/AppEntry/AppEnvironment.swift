@@ -7,11 +7,11 @@ import SwiftData
 /// Jalon 3 : expose l'import audio (`AudioImporter`), l'accès aux fichiers
 /// de projet (`ProjectFileStore`) et l'extraction de forme d'onde
 /// (`WaveformExtractor`) en plus de la persistance (Jalon 2) et du logger.
-/// Les services des jalons suivants s'y brancheront :
+/// Les services des jalons suivants s'y branchent :
 /// - Jalon 4+ : analyse musicale (`MusicAnalyzing`), génération de scores
 ///   (`EditScoreGenerating`), photothèque (`MediaLibraryBrowsing`) ;
 /// - Jalon 9 : prévisualisation (`PreviewBuilder` + cache §48) ;
-/// - Jalon 10 : export (`ProjectExporting`).
+/// - Jalon 10 : export (`ProjectExporter`, `ExportActor`, `PhotoLibrarySaver`).
 ///
 /// `@Observable` pour permettre l'injection via `.environment(_:)` et la
 /// lecture via `@Environment(AppEnvironment.self)` dans les vues.
@@ -84,6 +84,25 @@ final class AppEnvironment {
     /// change.
     let previewCache: PreviewCache
 
+    /// Construction et encodage du montage exporté (Jalon 10, §51 préfixe,
+    /// §52 profil maître, §53 exactitude temporelle, §54 composition, §55
+    /// encodage unique, §57 estimation de taille). Type concret `@MainActor`
+    /// — il porte la signature §7 `ProjectExporting` sans nécessairement
+    /// déclarer la conformance (même choix documenté qu'au Jalon 9 pour
+    /// `PreviewBuilder`).
+    let projectExporter: ProjectExporter
+
+    /// Acteur d'export (§8, §58) : **un seul export actif par projet**,
+    /// progression interrogeable, annulation, dernier résultat conservé
+    /// (§60 : « dernier export réussi » restauré à la réouverture).
+    let exportActor: ExportActor
+
+    /// Enregistrement du montage dans Photos (§40 : l'autorisation
+    /// d'ÉCRITURE est demandée au PREMIER enregistrement, §55 :
+    /// « enregistrement dans Photos seulement après succès complet »,
+    /// §66 : refus → le fichier est conservé et proposé au partage).
+    let photoLibrarySaver: PhotoLibrarySaver
+
     /// Initialiseur de production : ouvre le conteneur persistant partagé
     /// (Application Support).
     convenience init() {
@@ -127,6 +146,18 @@ final class AppEnvironment {
         self.thumbnailProvider = ThumbnailProvider()
         self.previewBuilder = PreviewBuilder(fileStore: fileStore, mediaLibrary: mediaLibrary)
         self.previewCache = PreviewCache()
+        let projectExporter = ProjectExporter(fileStore: fileStore, mediaLibrary: mediaLibrary)
+        self.projectExporter = projectExporter
+        // §8/§58 : l'acteur sérialise les exports par projet et porte les
+        // transitions de statut §10 (`setExporting`) ainsi que la mémoire du
+        // dernier export réussi §60 (`markExportSucceeded`) — la vue ne les
+        // écrit jamais elle-même.
+        self.exportActor = ExportActor(
+            exporter: projectExporter,
+            projectStore: projectStore,
+            fileStore: fileStore
+        )
+        self.photoLibrarySaver = PhotoLibrarySaver()
     }
 
     /// Maintenance au lancement (§69A) : brouillons vides résiduels,

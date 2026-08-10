@@ -7,8 +7,9 @@
 //  - clamp de l'index de case active (§60 : valeur restaurée hors bornes) ;
 //  - fenêtre du carrousel §35.3 clampée aux bornes 0 et N-1 ;
 //  - dérivation des libellés du dock contextuel §36 (case vide/remplie) et
-//    de sa ZONE DROITE (Jalon 9, §88.11/§89 : « Prévisualiser » dès qu'un
-//    préfixe exportable existe, « Export » désactivé sinon) ;
+//    de sa ZONE DROITE (Jalon 10 : « Export » dans tous les cas, comme le
+//    tableau §36 — seul son état actif/désactivé varie ; l'aperçu principal
+//    §47.2 a son propre bouton en zone basse, §88.11/§89) ;
 //  - Export désactivé quand le préfixe exportable §51 est vide (réutilise
 //    `contiguousReadyPrefix` du Domain avec des snapshots `ProjectSlot`).
 //
@@ -124,8 +125,7 @@ final class AssemblyViewLogicTests: XCTestCase {
         // 72 000 ticks = 1,2 s → « 1,20 s » (§35.2, `shortDurationString`).
         let labels = AssemblyViewLogic.dockLabels(
             activeState: .empty,
-            requiredDuration: MediaTime(ticks: 72_000),
-            isExportEnabled: false
+            requiredDuration: MediaTime(ticks: 72_000)
         )
 
         XCTAssertEqual(labels.left, "Projets")
@@ -136,8 +136,7 @@ final class AssemblyViewLogicTests: XCTestCase {
     func testDockLabelsForReadySlotShowReplace() {
         let labels = AssemblyViewLogic.dockLabels(
             activeState: .ready,
-            requiredDuration: MediaTime(ticks: 72_000),
-            isExportEnabled: false
+            requiredDuration: MediaTime(ticks: 72_000)
         )
 
         XCTAssertEqual(labels.left, "Projets")
@@ -155,8 +154,7 @@ final class AssemblyViewLogicTests: XCTestCase {
         for state in assignedStates {
             let labels = AssemblyViewLogic.dockLabels(
                 activeState: state,
-                requiredDuration: MediaTime(ticks: 30_000),
-                isExportEnabled: false
+                requiredDuration: MediaTime(ticks: 30_000)
             )
             XCTAssertEqual(labels.center, "Remplacer", "état : \(state)")
             XCTAssertEqual(labels.left, "Projets", "état : \(state)")
@@ -164,43 +162,40 @@ final class AssemblyViewLogicTests: XCTestCase {
         }
     }
 
-    // MARK: - Zone droite du dock (§88.11, §89, Jalon 9)
+    // MARK: - Zone droite du dock (§36, Jalon 10)
 
-    func testDockRightZoneBecomesPreviewWhenPrefixIsExportable() {
-        // §88.11 « prévisualiser le préfixe rempli » appartient au parcours
-        // minimal, et §89 interdit qu'une action essentielle vive
-        // exclusivement en haut : dès qu'un préfixe exportable existe, la
-        // zone droite du dock (zone BASSE) porte « Prévisualiser ».
-        for state in [AssemblySlotState.empty, .ready, .downloading] {
+    func testDockRightZoneAlwaysShowsExport() {
+        // Jalon 10 : l'écran d'export existe — la zone droite porte
+        // « Export » dans TOUS les états, exactement comme le tableau §36.
+        // Seul son ÉTAT (actif/désactivé) varie, ce que décrit
+        // `isExportEnabled` ; l'aperçu principal §47.2 a migré vers son
+        // propre bouton en zone basse (§88.11/§89).
+        for state in [AssemblySlotState.empty, .ready, .downloading, .unavailable, .tooShort, .resolving] {
             let labels = AssemblyViewLogic.dockLabels(
                 activeState: state,
-                requiredDuration: MediaTime(ticks: 72_000),
-                isExportEnabled: true
+                requiredDuration: MediaTime(ticks: 72_000)
             )
-            XCTAssertEqual(labels.right, "Prévisualiser", "état : \(state)")
+            XCTAssertEqual(labels.right, "Export", "état : \(state)")
             XCTAssertEqual(labels.left, "Projets", "état : \(state)")
         }
     }
 
-    func testDockKeepsExactlyThreeZonesInBothStates() {
-        // §36 : « maximum trois zones importantes » — la bascule
-        // Export ↔ Prévisualiser n'en ajoute AUCUNE.
-        let disabled = AssemblyViewLogic.dockLabels(
-            activeState: .ready,
-            requiredDuration: MediaTime(ticks: 72_000),
-            isExportEnabled: false
+    func testDockKeepsExactlyThreeZonesWhateverTheState() {
+        // §36 : « maximum trois zones importantes » — seul le CENTRE change
+        // avec l'état de la case.
+        let empty = AssemblyViewLogic.dockLabels(
+            activeState: .empty,
+            requiredDuration: MediaTime(ticks: 72_000)
         )
-        let enabled = AssemblyViewLogic.dockLabels(
+        let filled = AssemblyViewLogic.dockLabels(
             activeState: .ready,
-            requiredDuration: MediaTime(ticks: 72_000),
-            isExportEnabled: true
+            requiredDuration: MediaTime(ticks: 72_000)
         )
 
-        XCTAssertEqual(disabled.left, enabled.left, "Zone gauche inchangée")
-        XCTAssertEqual(disabled.center, enabled.center, "Zone centrale inchangée")
-        XCTAssertNotEqual(disabled.right, enabled.right, "Seule la zone droite bascule")
-        XCTAssertEqual(disabled.right, "Export")
-        XCTAssertEqual(enabled.right, "Prévisualiser")
+        XCTAssertEqual(empty.left, filled.left, "Zone gauche inchangée")
+        XCTAssertEqual(empty.right, filled.right, "Zone droite inchangée")
+        XCTAssertNotEqual(empty.center, filled.center, "Seule la zone centrale bascule")
+        XCTAssertEqual(filled.right, "Export")
     }
 
     // MARK: - Export désactivé si le préfixe §51 est vide

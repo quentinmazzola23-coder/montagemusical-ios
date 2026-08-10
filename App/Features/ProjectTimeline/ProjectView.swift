@@ -24,7 +24,10 @@ import UniformTypeIdentifiers
 ///    (`PaceSelectionView`, §34) remplace cet état. Jalon 7 : au statut
 ///    `assembling`, la timeline d'assemblage (`AssemblyView`, §35) remplace
 ///    le placeholder du Jalon 6 — « Changer de rythme » (§65) vit désormais
-///    dans le menu de `AssemblyView`.
+///    dans le menu de `AssemblyView`. Jalon 10 : `partiallyPreviewable`,
+///    `complete` et `exporting` mènent à CETTE MÊME timeline (§58, §88.12 —
+///    l'écran du montage ne disparaît ni pendant l'export ni une fois le
+///    montage terminé).
 ///
 /// Flux d'import (annexe A) : `setStatus(.importingAudio)` →
 /// `importAudio(from:into:)` → `attachAudio` (qui place le statut sur
@@ -131,18 +134,36 @@ struct ProjectView: View {
         let status = ProjectStatus(rawValue: project.statusRaw) ?? .draft
         Group {
             if project.audioRelativePath != nil {
+                // Aiguillage EXHAUSTIF (aucun `default`) : les neuf statuts
+                // §10 sont listés, de sorte qu'un statut ajouté plus tard
+                // force une décision au lieu de retomber silencieusement sur
+                // l'écran « musique présente ».
                 switch status {
                 case .awaitingPaceSelection:
                     // Jalon 6 : choix du rythme (§34) — remplace l'état
                     // « musique présente » ; l'aperçu waveform/lecture
                     // reste réservé aux statuts d'analyse.
                     PaceSelectionView(projectID: projectID)
-                case .assembling:
+                case .assembling, .partiallyPreviewable, .complete, .exporting:
                     // Jalon 7 : timeline d'assemblage complète (§35, §36) —
                     // remplace le placeholder du Jalon 6. « Changer de
                     // rythme » (§65) et ses alertes vivent dans AssemblyView.
+                    //
+                    // Jalon 10 (§58/§88.12) : `exporting` et `complete`
+                    // MÈNENT AU MÊME ÉCRAN. `ExportActor` pose `exporting`
+                    // pendant l'encodage puis `complete`/`assembling` ensuite
+                    // (§10) : router ces statuts ailleurs faisait disparaître
+                    // la timeline — et donc la feuille d'export présentée
+                    // par-dessus — dès l'appui sur « Exporter », puis à
+                    // nouveau à la fin. §88.12 exige au contraire de pouvoir
+                    // « exporter le préfixe sans finir le projet » et de
+                    // rester sur son montage.
+                    // `partiallyPreviewable` désigne un montage partiellement
+                    // rempli (§10) : c'est exactement la timeline §35.
                     AssemblyView(projectID: projectID)
-                default:
+                case .draft, .importingAudio, .analyzing, .failed:
+                    // Musique présente mais montage pas encore ouvert :
+                    // waveform, progression d'analyse §33, échec §63.
                     musicContent(status: status)
                 }
             } else if status == .importingAudio {

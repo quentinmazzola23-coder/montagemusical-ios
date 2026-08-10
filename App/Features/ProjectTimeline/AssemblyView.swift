@@ -12,33 +12,50 @@
 //  duplication si verrouillé).
 //
 //  Jalon 9 : §47.1 (aperçu LOCAL — toucher sur la zone haute quand la case
-//  active est prête), §47.2 (aperçu PRINCIPAL du préfixe continu, ZONE
-//  DROITE du dock + entrée de menu), §48 (invalidation du cache de preview
+//  active est prête), §47.2 (aperçu PRINCIPAL du préfixe continu — son
+//  emplacement a changé au Jalon 10, voir ci-dessous), §48 (invalidation du cache de preview
 //  dès qu'une association change), §35.3 (courbe musicale simplifiée passée à
 //  la mini-timeline — écart Jalon 7 résorbé), §49 (rattrapage du verrou de
 //  géométrie si aucune géométrie n'a été posée alors qu'une case est prête).
 //
+//  Jalon 10 : §36 la zone DROITE du dock retrouve « Export » — l'écran
+//  d'export existe désormais (`ExportSummaryView`, §56) — et l'aperçu
+//  principal §47.2 prend un bouton dédié en zone basse (voir la DÉCISION
+//  ci-dessous), §51 (Export actif seulement si le préfixe est non vide),
+//  §66 (première case vide → export désactivé, raison annoncée).
+//
 //  Règle du pouce §30 / §89 : toutes les actions ESSENTIELLES vivent dans la
 //  moitié basse ou sur le contenu lui-même — navigation entre cases
-//  (carrousel + mini-timeline), ajout/remplacement de vidéo et APERÇU
-//  PRINCIPAL §47.2 (dock §36), APERÇU LOCAL §47.1 (toucher sur la zone
-//  haute). Seul « Changer de rythme » (§65), action rare et non essentielle
-//  au parcours minimal §88, vit dans le menu ellipsis en haut à droite
-//  (écart §30 assumé — la règle vise les contrôles obligatoires).
+//  (carrousel + mini-timeline), ajout/remplacement de vidéo et EXPORT
+//  (dock §36), APERÇU PRINCIPAL §47.2 (bouton pleine largeur sous le
+//  carrousel), APERÇU LOCAL §47.1 (toucher sur la zone haute). Seul
+//  « Changer de rythme » (§65), action rare et non essentielle au parcours
+//  minimal §88, vit dans le menu ellipsis en haut à droite (écart §30
+//  assumé — la règle vise les contrôles obligatoires).
 //
-//  DÉCISION Jalon 9 — placement de « Prévisualiser » (§88.11, §89, §36) :
-//  « prévisualiser le préfixe rempli » fait partie du parcours MINIMAL
-//  (§88.11) et §89 interdit de placer une action essentielle exclusivement
-//  en haut ; le menu ellipsis ne pouvait donc pas rester son seul accès. Le
-//  dock §36 n'admettant que TROIS zones, la zone DROITE porte
-//  « Prévisualiser » dès qu'un préfixe exportable existe (§51) — l'écran
-//  d'export n'existe pas avant le Jalon 10 (§85), un bouton « Export » actif
-//  ne mènerait nulle part ; sans préfixe, elle garde « Export » DÉSACTIVÉ
-//  avec son hint. L'entrée du menu est CONSERVÉE (accès secondaire
-//  redondant, jamais l'unique).
-//  Au Jalon 10, le dock retrouvera « Export » en zone droite et l'aperçu
-//  principal migrera vers la ligne « Prévisualisation » §36 (ou un accès
-//  équivalent en zone basse) — jamais vers le seul menu du haut.
+//  DÉCISION Jalon 10 — placement de « Prévisualiser le montage » (§88.11,
+//  §88.12, §89, §36) :
+//  Le parcours minimal exige DEUX actions distinctes en fin de chaîne —
+//  « prévisualiser le préfixe rempli » (§88.11) et « exporter le préfixe sans
+//  finir le projet » (§88.12) — alors que le dock §36 n'admet que TROIS
+//  zones, déjà occupées par `Projets`, `+ Vidéo`/`Remplacer` et `Export`.
+//  Au Jalon 9, la zone droite portait provisoirement « Prévisualiser » faute
+//  d'écran d'export ; ce n'est plus tenable maintenant que l'export existe.
+//  Solutions écartées :
+//  - aperçu en zone CENTRE : cette zone porte « Remplacer » (§36), action de
+//    remplissage utilisée à chaque case — la déplacer casserait le tableau ;
+//  - aperçu dans le seul menu ellipsis : §89 interdit qu'une action
+//    essentielle vive exclusivement en haut ;
+//  - quatrième zone dans le dock : §36 plafonne à trois zones importantes.
+//  Retenu : un bouton DISCRET pleine largeur « Prévisualiser le montage »
+//  placé SOUS le carrousel, juste au-dessus de la mini-timeline — donc en
+//  zone basse (§30), cible ≥ 44 pt (§39), affiché UNIQUEMENT quand un
+//  préfixe exportable existe (§51) : il n'occupe aucune place tant qu'il n'y
+//  a rien à lire, et il ne fait pas partie du dock (les trois zones §36
+//  restent intactes). L'entrée « Prévisualiser » du menu ellipsis est
+//  RETIRÉE : elle serait désormais un doublon d'un bouton toujours visible
+//  quand il est utile, et un menu du haut n'est pas le bon endroit pour une
+//  action du parcours minimal (§89).
 //
 //  Matériaux translucides sobres §37 (aucun verre permanent sur l'aperçu),
 //  aucune animation décorative §38, accessibilité §39 complète.
@@ -79,39 +96,31 @@ enum AssemblyViewLogic {
         let right: String
     }
 
-    /// Dérivation §36 : case vide → `[Projets] [+ Vidéo • durée] [droite]` ;
+    /// Dérivation §36 : case vide → `[Projets] [+ Vidéo • durée] [Export]` ;
     /// case remplie (tout état d'association, même non prêt) →
-    /// `[Projets] [Remplacer] [droite]`.
+    /// `[Projets] [Remplacer] [Export]`.
     ///
-    /// ZONE DROITE — décision Jalon 9 (§88.11/§89) : dès qu'un préfixe
-    /// exportable existe (`isExportEnabled`, §51), elle porte
-    /// « Prévisualiser » — l'aperçu principal §47.2 fait partie du parcours
-    /// MINIMAL (§88.11) et §89 interdit qu'une action essentielle vive
-    /// exclusivement en haut ; l'écran d'export, lui, n'existe pas avant le
-    /// Jalon 10 (§85), donc un bouton « Export » actif ne mènerait nulle
-    /// part. Sans préfixe exportable, la zone garde « Export » DÉSACTIVÉ avec
-    /// son hint (§51 : « export désactivé si le résultat est vide ») : rien
-    /// à prévisualiser non plus, et l'utilisateur voit quelle action attend
-    /// la première case remplie. Le dock reste donc à TROIS zones (§36).
-    ///
-    /// Jalon 10 : le dock retrouvera « Export » en zone droite et l'aperçu
-    /// principal migrera vers la ligne « Prévisualisation » §36 (ou un accès
-    /// équivalent en zone basse) — jamais vers le seul menu du haut (§89).
+    /// ZONE DROITE — Jalon 10 : « Export » dans TOUS les cas, exactement
+    /// comme le tableau §36. Son libellé ne bouge plus (l'écran d'export
+    /// existe désormais) ; seul son ÉTAT varie — actif si le préfixe §51 est
+    /// non vide (`isExportEnabled`), désactivé sinon avec un hint qui dit
+    /// pourquoi (§66 : « première case vide : export désactivé »).
+    /// L'aperçu principal §47.2 ne passe plus par cette zone : il a son
+    /// propre bouton pleine largeur sous le carrousel (décision documentée en
+    /// tête de fichier) — le dock reste donc à TROIS zones (§36).
     static func dockLabels(
         activeState: AssemblySlotState,
-        requiredDuration: MediaTime,
-        isExportEnabled: Bool
+        requiredDuration: MediaTime
     ) -> DockLabels {
-        let right = isExportEnabled ? "Prévisualiser" : "Export"
         switch activeState {
         case .empty:
             return DockLabels(
                 left: "Projets",
                 center: "+ Vidéo • \(requiredDuration.shortDurationString)",
-                right: right
+                right: "Export"
             )
         case .resolving, .downloading, .ready, .unavailable, .tooShort:
-            return DockLabels(left: "Projets", center: "Remplacer", right: right)
+            return DockLabels(left: "Projets", center: "Remplacer", right: "Export")
         }
     }
 
@@ -156,17 +165,20 @@ private struct PreviewSheetContext {
 }
 
 // Non defini par la specification — definition minimale V1.
-/// UNE seule feuille à la fois (photothèque §40–§46 OU prévisualisation
-/// §47) : un `sheet(item:)` unique évite les conflits de présentations
+/// UNE seule feuille à la fois (photothèque §40–§46, prévisualisation §47 OU
+/// export §56) : un `sheet(item:)` unique évite les conflits de présentations
 /// concurrentes attachées à la même vue.
 private enum AssemblySheet: Identifiable {
     case clipPicker(ClipPickerContext)
     case preview(PreviewSheetContext)
+    /// Résumé avant export §56 + progression §58 (Jalon 10).
+    case export
 
     var id: String {
         switch self {
         case .clipPicker(let context): "picker-\(context.id.uuidString)"
         case .preview(let context): "preview-\(context.id)"
+        case .export: "export"
         }
     }
 }
@@ -185,8 +197,13 @@ private struct AssemblyChangeToken: Equatable {
 
 // MARK: - Écran d'assemblage (§35)
 
-/// Écran affiché par `ProjectView` quand le statut du projet est
-/// `assembling` (Jalon 7 — remplace le placeholder du Jalon 6).
+/// Écran affiché par `ProjectView` pour les statuts de MONTAGE (§10) :
+/// `assembling` (Jalon 7 — remplace le placeholder du Jalon 6) et, depuis le
+/// Jalon 10, `partiallyPreviewable`, `complete` et `exporting`. L'écran reste
+/// donc en place PENDANT l'export (§58 : la feuille de progression est
+/// présentée par-dessus lui) et APRÈS lui (§88.12 : « exporter le préfixe
+/// sans finir le projet » — l'utilisateur revient à son montage, pas à un
+/// écran de musique).
 ///
 /// Structure verticale (§35) :
 /// 1. **Zone haute §35.1** : aperçu (miniature RÉELLE du rush pour une case
@@ -195,13 +212,16 @@ private struct AssemblyChangeToken: Equatable {
 ///    prête, sinon lecture du PASSAGE MUSICAL de la case ;
 /// 2. **Carrousel §35.2** : trois cases visibles (précédente, active,
 ///    suivante), cartes à largeur tactile stable, scroll = sélection ;
-/// 3. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées
+/// 3. **Aperçu principal §47.2** : bouton discret pleine largeur
+///    « Prévisualiser le montage », visible uniquement quand un préfixe
+///    exportable existe (§51) — zone basse §30, hors des trois zones du
+///    dock §36 (décision Jalon 10 en tête de fichier) ;
+/// 4. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées
 ///    avec courbe musicale simplifiée en fond, toucher/glisser = navigation
 ///    rapide ;
-/// 4. **Dock contextuel §36** : `[Projets] [+ Vidéo • durée | Remplacer]
-///    [Prévisualiser | Export]` — la zone droite porte l'aperçu principal
-///    §47.2 dès qu'un préfixe exportable existe (§51, §88.11), sinon
-///    « Export » désactivé.
+/// 5. **Dock contextuel §36** : `[Projets] [+ Vidéo • durée | Remplacer]
+///    [Export]` — « Export » présente le résumé §56 dès qu'un préfixe
+///    exportable existe (§51, §88.12), désactivé sinon.
 ///
 /// La case active est persistée avec un debounce ~300 ms (§59 : « debounce
 /// très court uniquement pour les changements fréquents de navigation,
@@ -317,28 +337,15 @@ struct AssemblyView: View {
                 assemblyContent(items: items)
             }
         }
-        // Menu ellipsis : « Changer de rythme » (§65, action rare) et un
-        // accès REDONDANT à l'aperçu principal §47.2 — l'accès de référence
-        // est la zone droite du dock (§88.11/§89, décision en tête de
-        // fichier) ; aucune action essentielle ne vit ici seulement.
+        // Menu ellipsis : « Changer de rythme » UNIQUEMENT (§65, action rare
+        // et non essentielle au parcours minimal §88). L'entrée
+        // « Prévisualiser » du Jalon 9 en a été RETIRÉE au Jalon 10 : l'aperçu
+        // principal §47.2 a désormais son bouton dédié en zone basse (sous le
+        // carrousel) — un doublon dans un menu du haut n'apporterait rien et
+        // brouillerait la lecture (décision en tête de fichier, §89).
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                let items = slotItems
-                // §51/§47.2 : sans préfixe continu prêt, l'aperçu principal
-                // n'a rien à lire — entrée présente mais désactivée (l'état
-                // est annoncé par VoiceOver, jamais deviné par la couleur).
-                let canPreview = AssemblyViewLogic.isExportEnabled(items: items)
                 Menu {
-                    Button("Prévisualiser") {
-                        requestPrefixPreview()
-                    }
-                    .disabled(!canPreview)
-                    .accessibilityHint(
-                        canPreview
-                            ? "Lit le montage jusqu'au premier plan non prêt."
-                            : "Remplissez la première case pour prévisualiser."
-                    )
-
                     Button("Changer de rythme") {
                         changePace()
                     }
@@ -346,7 +353,7 @@ struct AssemblyView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel("Options du projet")
-                .accessibilityHint("Contient les actions Prévisualiser et Changer de rythme.")
+                .accessibilityHint("Contient l'action Changer de rythme.")
             }
         }
         // §65 : jamais de mutation destructive — proposer la duplication.
@@ -388,6 +395,10 @@ struct AssemblyView: View {
                     scope: context.scope,
                     title: context.title
                 )
+            case .export:
+                // §56 : résumé INFORMATIF puis progression §58 — jamais un
+                // écran de réglages (§89).
+                ExportSummaryView(projectID: projectID)
             }
         }
         .task(id: projectID) {
@@ -564,6 +575,16 @@ struct AssemblyView: View {
             Spacer(minLength: 0)
 
             carousel(items: items, activeIndex: active)
+
+            // APERÇU PRINCIPAL §47.2 — décision Jalon 10 (§88.11/§89,
+            // documentée en tête de fichier) : bouton discret pleine largeur,
+            // en ZONE BASSE (§30) et hors des trois zones du dock §36,
+            // affiché UNIQUEMENT quand un préfixe exportable existe (§51) :
+            // sans lui, il n'y aurait rien à lire et la place est rendue au
+            // contenu.
+            if AssemblyViewLogic.isExportEnabled(items: items) {
+                prefixPreviewButton
+            }
 
             // Mini-timeline §35.3 : toucher/glisser déplace la sélection.
             AssemblyMiniTimelineView(
@@ -746,30 +767,51 @@ struct AssemblyView: View {
         .frame(height: 132)
     }
 
+    // MARK: - Aperçu principal du préfixe (§47.2, zone basse §30)
+
+    /// Bouton DISCRET pleine largeur « Prévisualiser le montage » — accès de
+    /// référence à l'aperçu principal §47.2 depuis le Jalon 10.
+    ///
+    /// Sobre (matériau translucide léger §37, pas de couleur d'accent) : il
+    /// ne concurrence pas le CTA de remplissage du dock (« + Vidéo » /
+    /// « Remplacer »), qui reste l'action dominante tant que le montage se
+    /// construit. Cible ≥ 44 pt (§39), libellé complet pour VoiceOver.
+    private var prefixPreviewButton: some View {
+        Button {
+            requestPrefixPreview()
+        } label: {
+            Label("Prévisualiser le montage", systemImage: "play.rectangle")
+                .font(.subheadline.weight(.medium))
+                .frame(maxWidth: .infinity, minHeight: 44) // cible ≥ 44 pt (§39)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 20)
+        .accessibilityLabel("Prévisualiser le montage")
+        .accessibilityHint("Lit le montage jusqu'au premier plan non prêt.")
+    }
+
     // MARK: - Dock contextuel (§36)
 
-    /// `[Projets] [+ Vidéo • durée] [Prévisualiser | Export]` (case vide) ou
-    /// `[Projets] [Remplacer] [Prévisualiser | Export]` (case remplie).
-    /// Libellés dérivés par la logique pure `AssemblyViewLogic.dockLabels`
-    /// (testée).
+    /// `[Projets] [+ Vidéo • durée] [Export]` (case vide) ou
+    /// `[Projets] [Remplacer] [Export]` (case remplie) — exactement le
+    /// tableau §36. Libellés dérivés par la logique pure
+    /// `AssemblyViewLogic.dockLabels` (testée).
     ///
-    /// Zone droite (§88.11/§89, décision Jalon 9 documentée sur
-    /// `dockLabels`) :
-    /// - préfixe exportable §51 NON vide → « Prévisualiser », qui ouvre
-    ///   l'aperçu principal §47.2 — action du parcours minimal §88.11, donc
-    ///   accessible en ZONE BASSE et pas seulement dans le menu du haut
-    ///   (§89) ;
-    /// - préfixe vide → « Export » DÉSACTIVÉ avec son hint (§51 : « export
-    ///   désactivé si le résultat est vide ») — état RÉEL calculé par
-    ///   `contiguousReadyPrefix`, pas un stub.
+    /// Zone droite (Jalon 10) : « Export » ouvre le résumé §56
+    /// (`ExportSummaryView`) dès que le préfixe exportable §51 est non vide ;
+    /// sinon le bouton est DÉSACTIVÉ avec un hint qui dit pourquoi (§51 :
+    /// « export désactivé si le résultat est vide », §66 : « première case
+    /// vide : export désactivé ») — état RÉEL calculé par
+    /// `contiguousReadyPrefix`, pas un stub.
     private func contextualDock(activeItem: AssemblySlotItem, items: [AssemblySlotItem]) -> some View {
         // O(1) sur les items déjà matérialisés (§82 : rien de recalculé
         // pendant un glisser sur la mini-timeline) — équivalent §51 strict.
         let isExportEnabled = AssemblyViewLogic.isExportEnabled(items: items)
         let labels = AssemblyViewLogic.dockLabels(
             activeState: activeItem.state,
-            requiredDuration: activeItem.duration,
-            isExportEnabled: isExportEnabled
+            requiredDuration: activeItem.duration
         )
         return HStack(spacing: 8) {
             dockSecondaryButton(
@@ -800,17 +842,10 @@ struct AssemblyView: View {
             )
             .accessibilityHint("Ouvre la photothèque pour choisir une vidéo.")
 
-            // Droite : « Prévisualiser » (aperçu principal §47.2, parcours
-            // minimal §88.11) dès qu'un préfixe exportable existe ; sinon
-            // « Export » désactivé (§51). L'écran d'export arrive au
-            // Jalon 10 — le bouton ne promet donc jamais une action qui
-            // n'existe pas.
+            // Droite : « Export » (§36) — présente le résumé §56 dès qu'un
+            // préfixe exportable existe (§51), désactivé sinon.
             Button {
-                if isExportEnabled {
-                    requestPrefixPreview()
-                } else {
-                    requestExport()
-                }
+                requestExport()
             } label: {
                 Text(labels.right)
                     .font(.body.weight(.medium))
@@ -828,7 +863,7 @@ struct AssemblyView: View {
             .accessibilityLabel(labels.right)
             .accessibilityHint(
                 isExportEnabled
-                    ? "Lit le montage jusqu'au premier plan non prêt."
+                    ? "Affiche le résumé de l'export du montage déjà prêt."
                     : "Remplissez la première case pour exporter."
             )
         }
@@ -933,11 +968,11 @@ struct AssemblyView: View {
     }
 
     /// §47.2 « Aperçu principal » : commence au début et s'arrête avant la
-    /// première case non prête (`contiguousPrefix`). DEUX déclencheurs — la
-    /// zone droite du dock (accès de référence, zone basse §88.11/§89) et
-    /// l'entrée redondante du menu ; les deux sont inactifs quand le préfixe
-    /// est vide (§51), ce chemin n'est donc atteint qu'avec au moins une case
-    /// prête.
+    /// première case non prête (`contiguousPrefix`). Déclencheur UNIQUE
+    /// depuis le Jalon 10 — le bouton « Prévisualiser le montage » sous le
+    /// carrousel (zone basse §30/§88.11), affiché seulement quand le préfixe
+    /// §51 est non vide : ce chemin n'est donc atteint qu'avec au moins une
+    /// case prête.
     private func requestPrefixPreview() {
         playerController.stopSegment()
         activeSheet = .preview(PreviewSheetContext(
@@ -1083,11 +1118,22 @@ struct AssemblyView: View {
         ))
     }
 
-    /// // Jalon 10 : export — le bouton n'est actif que si le préfixe §51
-    /// est non vide (première association prête du Jalon 8) ; l'écran
-    /// d'export arrive au Jalon 10.
+    /// Export (Jalon 10, §56) : présente le résumé AVANT export en feuille.
+    /// Le bouton du dock n'est actif que si le préfixe §51 est non vide, ce
+    /// chemin n'est donc atteint qu'avec au moins une case prête ; le résumé
+    /// revérifie de son côté (source unique : `contiguousReadyPrefix` sur
+    /// l'instantané persisté).
+    ///
+    /// Rouvrir cette feuille PENDANT un encodage ne lance jamais un second
+    /// export (§58) : `ExportSummaryView` détecte la progression en cours et
+    /// en reprend le suivi.
+    ///
+    /// Le passage musical en cours est arrêté (§35.1) — l'écran d'export ne
+    /// produit aucun son, mais laisser la musique tourner sous une feuille
+    /// modale serait déroutant.
     private func requestExport() {
-        environment.logger.info("Export demandé — l'écran d'export arrive au Jalon 10.")
+        playerController.stopSegment()
+        activeSheet = .export
     }
 
     // MARK: - Changement de rythme (§65 — venant du placeholder Jalon 6)

@@ -344,10 +344,12 @@ actor ProjectStore {
 
     /// Maintenance au lancement (§69A : « supprimer les temporaires au
     /// prochain lancement après un crash ») :
-    /// 1. brouillons vides résiduels (§31) ;
-    /// 2. dossiers §11 orphelins — suppression interrompue entre la
+    /// 1. reprises d'état interrompues (§8, §8.1) : import audio, résolution
+    ///    d'association, **export** ;
+    /// 2. brouillons vides résiduels (§31) ;
+    /// 3. dossiers §11 orphelins — suppression interrompue entre la
     ///    sauvegarde SwiftData et la suppression du dossier ;
-    /// 3. vidage des `temp/` de chaque projet existant.
+    /// 4. vidage des `temp/` de chaque projet existant.
     func performStartupMaintenance() throws {
         // §8 : reprise propre après relance — une app tuée pendant l'import
         // laisse un projet bloqué en `importingAudio` sans audio. Retour à
@@ -381,6 +383,28 @@ actor ProjectStore {
         if !stuckAssignments.isEmpty {
             for assignment in stuckAssignments {
                 assignment.statusRaw = ClipAssignmentStatus.unavailable.rawValue
+            }
+            try modelContext.save()
+        }
+        // §8.1/§66 : reprise après kill PENDANT un export. L'application tuée
+        // en plein encodage laisse le projet figé en `exporting` : l'écran
+        // d'accueil et le dock afficheraient indéfiniment un export en cours
+        // qu'aucune tâche ne poursuit (§8.1 : « ne jamais annoncer un export
+        // réussi avant confirmation effective » — et jamais un export en cours
+        // qui n'existe plus). Le statut revient à sa valeur RESTAURÉE, avec la
+        // règle EXACTE qu'applique `ExportActor` après un export
+        // (`restoredStatusRaw` : `complete` si le préfixe §51 couvre toutes
+        // les cases, `assembling` sinon). Le montage n'est pas touché : §66
+        // « interruption : projet intact ». Les fichiers temporaires —
+        // encodage partiel, sources matérialisées §52.3 — sont supprimés par
+        // le vidage des `temp/` ci-dessous.
+        let exportingRaw = ProjectStatus.exporting.rawValue
+        let stuckExports = try modelContext.fetch(FetchDescriptor<ProjectRecord>(
+            predicate: #Predicate<ProjectRecord> { $0.statusRaw == exportingRaw }
+        ))
+        if !stuckExports.isEmpty {
+            for record in stuckExports {
+                record.statusRaw = try restoredStatusRaw(projectID: record.id)
             }
             try modelContext.save()
         }
@@ -1109,5 +1133,74 @@ extension ProjectStore {
         }
 
         return ProjectSnapshot(projectID: projectID, slots: slots, geometry: geometry)
+    }
+}
+
+// MARK: - Export (Jalon 10)
+
+// Non defini par la specification — definition minimale V1 (contrat Jalon 10).
+extension ProjectStore {
+
+    /// Bascule le statut d'export du projet (§10, §58).
+    ///
+    /// - `true` : statut `exporting` pendant l'encodage ;
+    /// - `false` : retour à `complete` si TOUTES les cases sont prêtes,
+    ///   `assembling` sinon (§10) — appelé après une annulation ou un échec
+    ///   (§66 : « interruption : projet intact »).
+    ///
+    /// Les deux sens sont GARDÉS pour ne jamais écraser un statut étranger :
+    /// - poser `exporting` alors qu'il l'est déjà est un no-op silencieux
+    ///   (`updatedAt` intact) ;
+    /// - retirer `exporting` alors que le projet est dans un tout autre état
+    ///   (analyse relancée, projet remis au choix du rythme pendant un export
+    ///   que l'utilisateur a quitté) ne touche à rien : la restauration
+    ///   tardive d'un export mort ne doit jamais réécrire l'état courant.
+    func setExporting(_ isExporting: Bool, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let exportingRaw = ProjectStatus.exporting.rawValue
+        if isExporting {
+            guard record.statusRaw != exportingRaw else { return }
+            record.statusRaw = exportingRaw
+        } else {
+            guard record.statusRaw == exportingRaw else { return }
+            record.statusRaw = try restoredStatusRaw(projectID: projectID)
+        }
+        try touchAndSave(record) // autosauvegarde (§59)
+    }
+
+    /// Enregistre un export RÉUSSI (§60 : « dernier export réussi »
+    /// restauré à la réouverture).
+    ///
+    /// Le schéma §10 est VERBATIM : aucune colonne n'y décrit un export. La
+    /// trace durable du dernier export réussi est donc le FICHIER lui-même,
+    /// dans `exports/` du projet (§11) — écrit seulement après un succès
+    /// complet (§55, §58) et nommé de façon horodatée triable
+    /// (`ProjectExporter.uniqueOutputURL`). Cette méthode enregistre côté
+    /// projet ce que la base peut porter sans changement de schéma :
+    /// - le statut revient de `exporting` à `complete`/`assembling` (§10) ;
+    /// - `updatedAt` est touché (§59), ce qui remonte le projet en tête de
+    ///   l'écran d'accueil (§31).
+    ///
+    /// C'est aussi le point d'insertion unique le jour où une colonne
+    /// `lastExportRelativePath` serait ajoutée au schéma.
+    func markExportSucceeded(projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        if record.statusRaw == ProjectStatus.exporting.rawValue {
+            record.statusRaw = try restoredStatusRaw(projectID: projectID)
+        }
+        try touchAndSave(record) // autosauvegarde (§59)
+    }
+
+    /// Statut à restaurer après un export (§10) : `complete` si le montage
+    /// est intégralement prêt (le préfixe §51 couvre toutes les cases),
+    /// `assembling` sinon — un montage partiellement rempli n'est pas
+    /// « terminé » parce qu'un export partiel a réussi.
+    private func restoredStatusRaw(projectID: UUID) throws -> String {
+        let snapshot = try projectSnapshot(projectID: projectID)
+        let readyPrefixCount = snapshot.contiguousReadyPrefix.count
+        let isComplete = readyPrefixCount > 0 && readyPrefixCount == snapshot.slots.count
+        return isComplete
+            ? ProjectStatus.complete.rawValue
+            : ProjectStatus.assembling.rawValue
     }
 }

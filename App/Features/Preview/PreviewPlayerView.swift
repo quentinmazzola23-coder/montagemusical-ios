@@ -14,10 +14,19 @@
 //  AUCUNE animation décorative §38, accessibilité §39 (libellés complets,
 //  cibles ≥ 44 pt, état annoncé sans dépendre de la couleur).
 //
-//  Écart documenté (Jalon 9) : la zone droite du dock « Export » est
-//  PRÉSENTE mais DÉSACTIVÉE — l'export est le Jalon 10 (§85). Le dock garde
-//  ainsi ses trois zones §36 dès maintenant, sans promettre une action qui
-//  n'existe pas (hint VoiceOver explicite).
+//  Jalon 10 : la zone droite « Export » devient ACTIVE (§85) — elle présente
+//  le résumé avant export §56 (`ExportSummaryView`) quand la portée
+//  prévisualisée EST le montage exportable et qu'il n'est pas vide. L'écart
+//  du Jalon 9 (bouton présent mais désactivé, « l'export arrive dans une
+//  prochaine version ») est résorbé : le hint ne promet plus rien, il décrit
+//  l'action réelle — il annonce le RÉSUMÉ, jamais un enregistrement dans
+//  Photos, qui reste un geste explicite dans l'écran d'export (§40, §55 ;
+//  décision documentée en tête d'`ExportSummaryView`).
+//
+//  Cet aperçu survit à l'export : `ProjectView` route les statuts de montage
+//  `assembling`/`partiallyPreviewable`/`complete`/`exporting` vers le MÊME
+//  écran d'assemblage (§10, §58), de sorte que le passage au statut
+//  `exporting` ne démonte ni cette feuille ni celle du résumé posée dessus.
 //
 
 import AVFoundation
@@ -68,6 +77,9 @@ struct PreviewPlayerView: View {
     /// Observation de `AVPlayerItem.status` (§64) — un item qui bascule en
     /// `.failed` ne doit JAMAIS rester un écran noir silencieux.
     @State private var statusObserver: AnyCancellable?
+    /// Jalon 10 : feuille du résumé avant export §56 présentée par la zone
+    /// droite du dock (§36).
+    @State private var isExportPresented = false
 
     init(projectID: UUID, scope: PreviewScope, title: String) {
         self.projectID = projectID
@@ -89,6 +101,13 @@ struct PreviewPlayerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) { previewDock }
+        // Jalon 10 (§36 zone droite, §56) : le résumé avant export se présente
+        // PAR-DESSUS l'aperçu — la portée lue reste intacte derrière, et
+        // fermer le résumé rend l'aperçu tel quel (aucune reconstruction, le
+        // cache §48 n'est pas touché).
+        .sheet(isPresented: $isExportPresented) {
+            ExportSummaryView(projectID: projectID)
+        }
         .task { await preparePreview() }
         // §38 : rien à animer — la fin de lecture repositionne simplement
         // l'état du bouton Lecture/Pause.
@@ -163,9 +182,9 @@ struct PreviewPlayerView: View {
 
     // MARK: - Dock §36 « Prévisualisation »
 
-    /// `[Retour] [Lecture/Pause] [Export]` — Export DÉSACTIVÉ au Jalon 9
-    /// (écart documenté en tête de fichier : l'écran d'export est le
-    /// Jalon 10). Le titre de la portée est une ligne INFORMATIVE au-dessus
+    /// `[Retour] [Lecture/Pause] [Export]` — Export ACTIF (Jalon 10) quand la
+    /// portée prévisualisée est celle qui sera exportée et qu'elle est
+    /// lisible. Le titre de la portée est une ligne INFORMATIVE au-dessus
     /// des trois zones, jamais un contrôle.
     private var previewDock: some View {
         VStack(spacing: 6) {
@@ -207,11 +226,12 @@ struct PreviewPlayerView: View {
                         : (isPlaying ? "Met l'aperçu en pause." : "Lance la lecture de l'aperçu.")
                 )
 
-                // Droite : Export — Jalon 10. L'état désactivé est marqué par
-                // l'opacité ET annoncé par VoiceOver (trait « estompé »
-                // automatique + hint), jamais par la seule couleur (§39).
+                // Droite : Export (§36) — présente le résumé §56. L'état
+                // désactivé est marqué par l'opacité ET annoncé par VoiceOver
+                // (trait « estompé » automatique + hint), jamais par la seule
+                // couleur (§39).
                 Button {
-                    // // Jalon 10 : écran d'export.
+                    requestExport()
                 } label: {
                     Text("Export")
                         .font(.body.weight(.medium))
@@ -221,15 +241,61 @@ struct PreviewPlayerView: View {
                         .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .disabled(true)
-                .opacity(0.4)
+                .disabled(!canExport)
+                .opacity(canExport ? 1 : 0.4)
                 .accessibilityLabel("Export")
-                .accessibilityHint("L'export arrive dans une prochaine version.")
+                .accessibilityHint(exportHint)
             }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 12)
+    }
+
+    // MARK: - Export depuis l'aperçu (Jalon 10, §36, §56)
+
+    /// Vrai si la portée AFFICHÉE est bien celle qui sera exportée.
+    ///
+    /// - `.contiguousPrefix` (§47.2) : c'est exactement le préfixe exportable
+    ///   §51 — l'aperçu et l'export partagent `contiguousReadyPrefix` ;
+    /// - `.complete` : portée demandée quand TOUTES les cases sont prêtes
+    ///   (§47.2) ; le préfixe §51 couvre alors le projet entier, l'export
+    ///   produit donc rigoureusement le montage prévisualisé ;
+    /// - `.slot` (§47.1) : aperçu d'UNE case. L'export ne porte jamais sur un
+    ///   plan isolé (§51) — le bouton reste désactivé, avec un hint qui le
+    ///   dit plutôt que de laisser deviner.
+    private var isExportableScope: Bool {
+        switch scope {
+        case .contiguousPrefix, .complete: true
+        case .slot: false
+        }
+    }
+
+    /// §51 « export désactivé si le résultat est vide » : un préfixe vide
+    /// fait échouer la construction avec `PreviewError.emptyScope` — donc un
+    /// lecteur PRÊT et sans erreur prouve que la portée contient au moins une
+    /// case. Aucune seconde lecture du projet n'est nécessaire pour le savoir.
+    private var canExport: Bool {
+        isExportableScope && errorMessage == nil && player != nil
+    }
+
+    private var exportHint: String {
+        if canExport {
+            return "Affiche le résumé de l'export du montage prévisualisé."
+        }
+        if !isExportableScope {
+            return "L'export porte sur le montage, pas sur un plan isolé."
+        }
+        return "Disponible dès que l'aperçu du montage est prêt."
+    }
+
+    /// Présente le résumé avant export §56. La lecture est mise en pause : le
+    /// résumé se lit au calme, et rien ne continue à jouer sous la feuille.
+    private func requestExport() {
+        guard canExport else { return }
+        player?.pause()
+        isPlaying = false
+        isExportPresented = true
     }
 
     // MARK: - Préparation de la composition (§48)
