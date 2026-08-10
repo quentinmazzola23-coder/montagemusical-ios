@@ -10,8 +10,8 @@
 
 | Jalon | État |
 |---|---|
-| 0 — Bootstrap | 🔄 En cours |
-| 1 — Temps et domaine | 🔄 En cours |
+| 0 — Bootstrap | ✅ Terminé (build CI vert) |
+| 1 — Temps et domaine | ✅ Terminé (tests CI verts) |
 | 2 — Projets et persistance | ⬜ Non démarré |
 | 3 — Import audio | ⬜ Non démarré |
 | 4 — Moteur musical déterministe | ⬜ Non démarré |
@@ -93,7 +93,7 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 
 ## Reste à faire (Jalons 0–1)
 
-- ~~Compilation + tests sur Mac~~ → vérifiés par le workflow GitHub Actions à chaque push ; passer les jalons à « Terminé » quand le run `build` + `tests` est vert.
+- ~~Compilation + tests sur Mac~~ → **vérifié** : run Actions 31379440653 (10 août 2026) vert, jobs `build` et `tests` en succès. Première IPA publiée : release `build-1-r1` (commit 33a0bc0). Jalons 0 et 1 terminés — critères d'acceptation §75/§76 satisfaits (compilation sans erreur, tests dont non-dérive passants). Prochain jalon : 2 (projets et persistance).
 
 ## À ne pas oublier (jalons suivants)
 
