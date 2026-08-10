@@ -138,8 +138,17 @@ struct CachedComposition {
     ///
     /// À appeler à CHAQUE ouverture du lecteur : l'item est jetable, la
     /// composition ne l'est pas.
+    ///
+    /// `AVPlayerItem(asset:)` prend son asset en paramètre `sending` : la
+    /// composition CONSERVÉE par le cache ne peut donc pas lui être passée
+    /// telle quelle (Swift 6 : « sending value of non-Sendable type »). Chaque
+    /// item reçoit sa propre COPIE immuable — l'opération ne duplique que la
+    /// structure des pistes (aucune donnée média), et le cache garde son
+    /// exemplaire intact pour les présentations suivantes.
     func makePlayerItem() -> AVPlayerItem {
-        let item = AVPlayerItem(asset: asset)
+        // swiftlint:disable:next force_cast — `AVComposition.copy()` rend
+        // toujours une `AVComposition` (idiome AVFoundation documenté).
+        let item = AVPlayerItem(asset: asset.copy() as! AVComposition)
         item.videoComposition = videoComposition
         return item
     }
