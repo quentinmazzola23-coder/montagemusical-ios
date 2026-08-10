@@ -204,60 +204,31 @@ actor MediaLibraryActor {
             throw MediaLibraryError.noVideoTrack // §64 : refuser sans piste vidéo
         }
 
-        let avAsset = try await requestAVAsset(
+        return try await resolvedVideoAsset(
             for: phAsset,
+            id: id,
             allowNetwork: allowNetwork,
             progress: progress
         )
-
-        // §64 : piste vidéo absente → refuser (avant toute autre lecture).
-        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
-        guard let videoTrack = videoTracks.first else {
-            throw MediaLibraryError.noVideoTrack
-        }
-
-        // §43 : durée RÉELLE de l'AVAsset résolu — jamais la métadonnée.
-        // Une durée non numérique (asset corrompu) est refusée comme un
-        // asset sans piste vidéo lisible (§64 : refuser, jamais de zéro
-        // fabriqué). Non defini par la specification — choix minimal V1.
-        let cmDuration = try await avAsset.load(.duration)
-        guard let duration = MediaTime(cmTime: cmDuration) else {
-            throw MediaLibraryError.noVideoTrack
-        }
-
-        // Largeur/hauteur BRUTES de la piste (naturalSize non orientée) —
-        // l'orientation et le verrouillage de géométrie complets (§49)
-        // arrivent au Jalon 9.
-        let naturalSize = try await videoTrack.load(.naturalSize)
-        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
-
-        // HDR best effort : caractéristique média officielle de la piste.
-        // En cas d'échec de lecture, `false` (le pipeline HDR/SDR complet
-        // arrive au Jalon 10). Non defini par la specification — V1.
-        let isHDR = ((try? await videoTrack.load(.mediaCharacteristics))
-            ?? []).contains(.containsHDRVideo)
-
-        return ResolvedVideoAsset(
-            localIdentifier: id,
-            duration: duration,
-            naturalWidth: Int(naturalSize.width.rounded()),
-            naturalHeight: Int(naturalSize.height.rounded()),
-            isHDR: isHDR,
-            nominalFrameRate: Double(nominalFrameRate)
-        )
     }
 
-    /// Requête `PHImageManager.requestAVAsset(forVideo:)` pontée en async.
+    /// Requête `PHImageManager.requestAVAsset(forVideo:)` pontée en async,
+    /// avec TOUTES les lectures AVFoundation effectuées DANS le rappel
+    /// PhotoKit : l'`AVAsset` (non-`Sendable`) reste dans la région du
+    /// rappel et ne traverse JAMAIS la frontière de l'acteur (Swift 6 :
+    /// « sending 'avAsset' risks causing data races ») — seul le
+    /// `ResolvedVideoAsset` (`Sendable`) en sort.
     ///
     /// Continuation UNIQUE : PhotoKit peut rappeler le `resultHandler`
     /// (annulation + livraison, versions dégradées) — un garde verrouillé
     /// (`SingleResumeGuard`) garantit exactement un `resume`, les rappels
     /// suivants sont ignorés.
-    private func requestAVAsset(
+    private func resolvedVideoAsset(
         for phAsset: PHAsset,
+        id: String,
         allowNetwork: Bool,
         progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> AVAsset {
+    ) async throws -> ResolvedVideoAsset {
         let options = PHVideoRequestOptions()
         options.isNetworkAccessAllowed = allowNetwork // §44 : à la demande
         options.deliveryMode = .highQualityFormat
@@ -274,11 +245,53 @@ actor MediaLibraryActor {
                 options: options
             ) { avAsset, _, info in
                 guard guardBox.beginResume() else { return }
-                if let avAsset {
-                    continuation.resume(returning: avAsset)
+                guard let avAsset else {
+                    continuation.resume(throwing: Self.resolutionError(info: info))
                     return
                 }
-                continuation.resume(throwing: Self.resolutionError(info: info))
+                // Lectures asynchrones dans une Task locale au rappel :
+                // `avAsset`/`videoTrack` (non-`Sendable`) vivent et meurent
+                // dans cette région — région disjointe transférée à la Task,
+                // jamais fusionnée avec celle de l'acteur.
+                Task {
+                    do {
+                        // §64 : piste vidéo absente → refuser d'abord.
+                        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
+                        guard let videoTrack = videoTracks.first else {
+                            throw MediaLibraryError.noVideoTrack
+                        }
+
+                        // §43 : durée RÉELLE de l'AVAsset résolu — jamais la
+                        // métadonnée. Durée non numérique (asset corrompu) →
+                        // refus, jamais de zéro fabriqué. Non defini par la
+                        // specification — choix minimal V1.
+                        let cmDuration = try await avAsset.load(.duration)
+                        guard let duration = MediaTime(cmTime: cmDuration) else {
+                            throw MediaLibraryError.noVideoTrack
+                        }
+
+                        // Largeur/hauteur BRUTES (naturalSize non orientée) —
+                        // orientation et verrouillage §49 au Jalon 9.
+                        let naturalSize = try await videoTrack.load(.naturalSize)
+                        let nominalFrameRate = try await videoTrack.load(.nominalFrameRate)
+
+                        // HDR best effort — pipeline HDR/SDR complet au
+                        // Jalon 10. Non defini par la specification — V1.
+                        let isHDR = ((try? await videoTrack.load(.mediaCharacteristics))
+                            ?? []).contains(.containsHDRVideo)
+
+                        continuation.resume(returning: ResolvedVideoAsset(
+                            localIdentifier: id,
+                            duration: duration,
+                            naturalWidth: Int(naturalSize.width.rounded()),
+                            naturalHeight: Int(naturalSize.height.rounded()),
+                            isHDR: isHDR,
+                            nominalFrameRate: Double(nominalFrameRate)
+                        ))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
         }
     }

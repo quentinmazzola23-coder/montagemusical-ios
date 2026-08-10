@@ -41,6 +41,8 @@
 //
 
 import Photos
+// `presentLimitedLibraryPicker` est une extension PhotosUI de PHPhotoLibrary.
+import PhotosUI
 import SwiftData
 import SwiftUI
 import UIKit
