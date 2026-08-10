@@ -4,8 +4,9 @@
 //
 //  Écran de la timeline d'assemblage — Jalon 7, spec §35 (zone haute,
 //  carrousel trois cases, mini-timeline), §36 (dock contextuel « Case
-//  vide » / « Case remplie »), §46 (préparé : la sélection avance par
-//  case), §51 (Export désactivé si le préfixe exportable est vide),
+//  vide » / « Case remplie » ; « + Vidéo »/« Remplacer » présentent la
+//  photothèque Jalon 8 §40–§46 en sheet, `onSlotChanged` recentre le
+//  carrousel §46), §51 (Export désactivé si le préfixe exportable est vide),
 //  §59 (debounce très court UNIQUEMENT pour la navigation), §60 (case
 //  active restaurée à la réouverture), §65 (« Changer de rythme » →
 //  duplication si verrouillé).
@@ -23,6 +24,7 @@
 
 import SwiftData
 import SwiftUI
+import UIKit
 
 // MARK: - Logique pure testable (Jalon 7)
 
@@ -91,16 +93,30 @@ enum AssemblyViewLogic {
     }
 }
 
+// MARK: - Contexte d'ouverture de la photothèque (Jalon 8)
+
+// Non defini par la specification — definition minimale V1.
+/// Paramètres de la feuille photothèque (§40–§46) : la case visée au moment
+/// de l'appui. « Remplacer » (§36) rouvre le sélecteur sur la MÊME case —
+/// le nouveau choix remplace l'association via `beginAssignment`.
+private struct ClipPickerContext: Identifiable {
+    /// Identifiant de la case (`ProjectSlotRecord.id`).
+    let id: UUID
+    let slotIndex: Int
+    let requiredDuration: MediaTime
+}
+
 // MARK: - Écran d'assemblage (§35)
 
 /// Écran affiché par `ProjectView` quand le statut du projet est
 /// `assembling` (Jalon 7 — remplace le placeholder du Jalon 6).
 ///
 /// Structure verticale (§35) :
-/// 1. **Zone haute §35.1** : aperçu (placeholder neutre 16:9 — la vraie
-///    miniature arrive au Jalon 8, la preview vidéo au Jalon 9) avec
-///    lecture par toucher du PASSAGE MUSICAL de la case, « Plan X sur N »,
-///    timestamps début → fin, durée requise ;
+/// 1. **Zone haute §35.1** : aperçu (miniature RÉELLE du rush pour une
+///    case prête depuis le Jalon 8 — placeholder neutre 16:9 sinon ; la
+///    preview vidéo §47.1 arrive au Jalon 9) avec lecture par toucher du
+///    PASSAGE MUSICAL de la case, « Plan X sur N », timestamps
+///    début → fin, durée requise ;
 /// 2. **Carrousel §35.2** : trois cases visibles (précédente, active,
 ///    suivante), cartes à largeur tactile stable, scroll = sélection ;
 /// 3. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées,
@@ -118,6 +134,7 @@ enum AssemblyViewLogic {
 struct AssemblyView: View {
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.displayScale) private var displayScale
 
     private let projectID: UUID
 
@@ -162,6 +179,18 @@ struct AssemblyView: View {
     @State private var isPaceLockAlertPresented = false
     /// Alerte générique d'échec (jamais silencieux).
     @State private var isPaceChangeErrorPresented = false
+
+    // MARK: État photothèque (Jalon 8, §40–§46)
+
+    /// Case visée par la feuille photothèque — `nil` : feuille fermée.
+    @State private var pickerContext: ClipPickerContext?
+
+    // MARK: État miniatures (Jalon 8, §35.1/§35.2)
+
+    /// Cache LOCAL des miniatures réelles des cases remplies, par
+    /// identifiant d'asset (§35.2) — chargé FENÊTRÉ autour de la case
+    /// active (± 2), jamais tout le projet ; libéré avec l'écran (@State).
+    @State private var thumbnailsByAssetID: [String: UIImage] = [:]
 
     init(projectID: UUID) {
         self.projectID = projectID
@@ -223,6 +252,22 @@ struct AssemblyView: View {
         } message: {
             Text("Le changement de rythme a échoué. Réessayez.")
         }
+        // Photothèque (Jalon 8, §40–§46) : la feuille RESTE ouverte pendant
+        // l'enchaînement §46/§83 — `onSlotChanged` recentre le carrousel
+        // DERRIÈRE la feuille à chaque avancement automatique. Les états
+        // resolving/downloading/ready/unavailable des cartes se mettent à
+        // jour automatiquement via les @Query (associations §13.3).
+        .sheet(item: $pickerContext) { context in
+            ClipPickerView(
+                projectID: projectID,
+                slotID: context.id,
+                slotIndex: context.slotIndex,
+                requiredDuration: context.requiredDuration,
+                onSlotChanged: { index in
+                    select(index, in: slotItems)
+                }
+            )
+        }
         .task(id: projectID) {
             loadAudio()
         }
@@ -243,6 +288,12 @@ struct AssemblyView: View {
             guard let newValue, newValue != activeIndex else { return }
             selectionDidChange(to: newValue)
         }
+        // Miniatures réelles (Jalon 8, §35.1/§35.2) : chargées FENÊTRÉES —
+        // les cases prêtes autour de la case active (± 2) uniquement, la
+        // clé change avec la navigation et les associations.
+        .task(id: thumbnailWindowAssetIDs) {
+            await loadThumbnails(for: thumbnailWindowAssetIDs)
+        }
         .onDisappear {
             // Lecture arrêtée et observateurs retirés (§35.1). La tâche de
             // persistance débouncée N'EST PAS annulée : la dernière case
@@ -255,25 +306,27 @@ struct AssemblyView: View {
 
     /// `[AssemblySlotItem]` dérivés des records — dérivation UNIQUE de
     /// l'état par `AssemblySlotState.from(assignmentStatusRaw:)` via un
-    /// dictionnaire `assignmentID → statusRaw`. Recalculé par SwiftUI à
-    /// chaque changement des deux `@Query`, O(N).
+    /// dictionnaire `assignmentID → record`. Recalculé par SwiftUI à
+    /// chaque changement des deux `@Query`, O(N). L'identifiant d'asset de
+    /// l'association alimente les miniatures réelles (§35.1/§35.2).
     private var slotItems: [AssemblySlotItem] {
-        let statusByAssignmentID = Dictionary(
-            assignmentRecords.map { ($0.id, $0.statusRaw) },
+        let assignmentsByID = Dictionary(
+            assignmentRecords.map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
         return slotRecords.map { record in
-            AssemblySlotItem(
+            // `assignmentID` orphelin (association supprimée) → raw `nil`
+            // → `.empty` : la case redevient remplissable.
+            let assignment = record.assignmentID.flatMap { assignmentsByID[$0] }
+            return AssemblySlotItem(
                 id: record.id,
                 index: record.index,
                 start: MediaTime(ticks: record.startTicks),
                 end: MediaTime(ticks: record.endTicks),
-                // `assignmentID` orphelin (association supprimée) → raw
-                // `nil` → `.empty` : la case redevient remplissable.
                 state: AssemblySlotState.from(
-                    assignmentStatusRaw: record.assignmentID
-                        .flatMap { statusByAssignmentID[$0] }
-                )
+                    assignmentStatusRaw: assignment?.statusRaw
+                ),
+                assetLocalIdentifier: assignment?.assetLocalIdentifier
             )
         }
     }
@@ -377,28 +430,56 @@ struct AssemblyView: View {
 
     /// Aperçu + « Plan X sur N » + timestamps début → fin + durée requise.
     ///
-    /// L'aperçu est un placeholder neutre 16:9 : la vraie miniature du rush
-    /// arrive au Jalon 8, la preview vidéo au Jalon 9 (§47.1). Le toucher
-    /// lit dès maintenant le PASSAGE MUSICAL de la case (§35.1 « lecture
-    /// par toucher sur l'aperçu ») — fichier original §16.1, pause
-    /// automatique à la fin de la case.
+    /// L'aperçu affiche la miniature RÉELLE du rush pour une case PRÊTE
+    /// (Jalon 8, §35.1 — même image que sa carte du carrousel), un
+    /// placeholder neutre 16:9 sinon ; la preview vidéo arrive au Jalon 9
+    /// (§47.1). Le toucher lit le PASSAGE MUSICAL de la case (§35.1
+    /// « lecture par toucher sur l'aperçu ») — fichier original §16.1,
+    /// pause automatique à la fin de la case.
     private func topZone(item: AssemblySlotItem, count: Int) -> some View {
         VStack(spacing: 8) {
             Button {
                 togglePassagePlayback(item: item)
             } label: {
                 ZStack {
-                    // Fond neutre — pas de verre permanent sur la zone
-                    // vidéo (§37 : le contenu reste prioritaire).
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.quaternary)
-                    VStack(spacing: 6) {
+                    if let image = thumbnail(for: item) {
+                        // Jalon 8 (§35.1) : miniature RÉELLE du rush de la
+                        // case active prête — MÊME image que sa carte du
+                        // carrousel ; remplace le placeholder neutre 16:9
+                        // (l'aperçu VIDÉO §47.1 arrive au Jalon 9). Posée en
+                        // overlay d'un gabarit fixe puis rognée : sa taille
+                        // intrinsèque n'influence pas la mise en page.
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(.quaternary)
+                            .overlay(
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFill()
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        // Commande de lecture lisible sur la photo : icône
+                        // blanche sur pastille sombre (même recette que les
+                        // badges de la photothèque §42) — contraste garanti,
+                        // l'état est AUSSI porté par `accessibilityValue`
+                        // (§39, jamais la seule apparence).
                         Image(systemName: playerController.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title2)
-                            .foregroundStyle(.secondary)
-                        Text("Passage musical")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.white)
+                            .padding(14)
+                            .background(.black.opacity(0.55), in: Circle())
+                    } else {
+                        // Fond neutre — pas de verre permanent sur la zone
+                        // vidéo (§37 : le contenu reste prioritaire).
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(.quaternary)
+                        VStack(spacing: 6) {
+                            Image(systemName: playerController.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("Passage musical")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                 }
                 .aspectRatio(16 / 9, contentMode: .fit)
@@ -452,7 +533,13 @@ struct AssemblyView: View {
                     // `scrollPosition(id:)` lit/écrit — les cases ne se
                     // réordonnent jamais (§10.1, index gelés).
                     ForEach(Array(items.enumerated()), id: \.offset) { position, item in
-                        SlotCardView(item: item, isActive: position == activeIndex)
+                        SlotCardView(
+                            item: item,
+                            isActive: position == activeIndex,
+                            // Miniature réelle (§35.2) — `nil` tant qu'elle
+                            // n'est pas chargée (fenêtre active ± 2).
+                            thumbnail: thumbnail(for: item)
+                        )
                             .containerRelativeFrame(.horizontal) { length, _ in
                                 // Largeur tactile stable §35.2.
                                 length * 0.55
@@ -500,8 +587,8 @@ struct AssemblyView: View {
                 dismiss()
             }
 
-            // Centre : « + Vidéo • durée » / « Remplacer » — la photothèque
-            // arrive au Jalon 8 (§40–§46) : action stub journalisée.
+            // Centre : « + Vidéo • durée » / « Remplacer » — ouvre la
+            // photothèque (Jalon 8, §40–§46) sur la case active.
             Button {
                 requestVideoSelection(for: activeItem)
             } label: {
@@ -519,7 +606,7 @@ struct AssemblyView: View {
                     ? "Ajouter une vidéo, durée requise \(activeItem.duration.spokenString)"
                     : "Remplacer la vidéo"
             )
-            .accessibilityHint("La photothèque arrive dans une prochaine version.")
+            .accessibilityHint("Ouvre la photothèque pour choisir une vidéo.")
 
             // Droite : Export (§51) — l'écran d'export est le Jalon 10 ;
             // l'état actif/inactif est déjà le vrai (§51).
@@ -619,19 +706,78 @@ struct AssemblyView: View {
         }
     }
 
-    // MARK: - Actions stub (Jalons 8 et 10)
+    // MARK: - Miniatures réelles (Jalon 8, §35.1/§35.2)
 
-    /// // Jalon 8 : photothèque — ouverture du navigateur de rushs
-    /// (§40–§46) avec avancement automatique après association.
+    /// Miniature d'une case si elle est PRÊTE et déjà chargée — `nil`
+    /// sinon (placeholder). Source unique pour la carte ET la zone haute
+    /// (« même image », §35.1).
+    private func thumbnail(for item: AssemblySlotItem) -> UIImage? {
+        guard item.state == .ready, let assetID = item.assetLocalIdentifier else {
+            return nil
+        }
+        return thumbnailsByAssetID[assetID]
+    }
+
+    /// Fenêtre de chargement des miniatures : identifiants d'asset des
+    /// cases PRÊTES autour de la case active (± 2 — les trois cartes
+    /// visibles du carrousel et leurs voisines immédiates §35.2). Sert de
+    /// clé au `.task(id:)` : navigation ou nouvelle association → la
+    /// fenêtre change → chargement des manquantes.
+    private var thumbnailWindowAssetIDs: [String] {
+        let items = slotItems
+        guard !items.isEmpty else { return [] }
+        let active = AssemblyViewLogic.clampedActiveIndex(activeIndex, slotCount: items.count)
+        let window = max(0, active - 2)...min(items.count - 1, active + 2)
+        return window.compactMap { position in
+            let item = items[position]
+            guard item.state == .ready else { return nil }
+            return item.assetLocalIdentifier
+        }
+    }
+
+    /// Taille de carte en PIXELS pour les miniatures (§35.2) : largeur de
+    /// carte ~55 % d'un grand iPhone (~215 pt) × hauteur de carte 132 pt, à
+    /// l'échelle de l'écran — approximation STABLE documentée (la largeur
+    /// réelle dépend du conteneur), jamais de décodage 4K (§42/§67). La
+    /// zone haute réutilise la même image (§35.1 « même image »), quitte à
+    /// l'agrandir légèrement.
+    private var cardThumbnailPixelSize: CGSize {
+        CGSize(width: 215 * displayScale, height: 132 * displayScale)
+    }
+
+    /// Charge les miniatures MANQUANTES de la fenêtre (§35.2) via
+    /// `ThumbnailProvider` — séquentiel (au plus 5 assets), chaque image
+    /// mise en cache local par identifiant d'asset.
+    private func loadThumbnails(for assetIDs: [String]) async {
+        for assetID in assetIDs where thumbnailsByAssetID[assetID] == nil {
+            guard !Task.isCancelled else { return }
+            guard let image = await environment.thumbnailProvider.thumbnail(
+                for: assetID,
+                targetSize: cardThumbnailPixelSize
+            ) else { continue } // asset disparu (§64) → placeholder
+            thumbnailsByAssetID[assetID] = image
+        }
+    }
+
+    // MARK: - Photothèque (Jalon 8) et export (Jalon 10)
+
+    /// Ouvre la photothèque (Jalon 8, §40–§46) sur la case active. Le dock
+    /// « + Vidéo » (case vide) et « Remplacer » (case remplie §36) mènent au
+    /// MÊME sélecteur : sur une case remplie, le nouveau choix remplace
+    /// l'association existante via `beginAssignment`. Le passage musical en
+    /// cours est arrêté (§35.1).
     private func requestVideoSelection(for item: AssemblySlotItem) {
-        environment.logger.info(
-            "Sélection vidéo demandée pour le plan \(item.index + 1) — la photothèque arrive au Jalon 8."
+        playerController.stopSegment()
+        pickerContext = ClipPickerContext(
+            id: item.id,
+            slotIndex: item.index,
+            requiredDuration: item.duration
         )
     }
 
-    /// // Jalon 10 : export — inatteignable au Jalon 7 (le bouton n'est
-    /// actif que si le préfixe §51 est non vide, ce qui exige une
-    /// association prête du Jalon 8).
+    /// // Jalon 10 : export — le bouton n'est actif que si le préfixe §51
+    /// est non vide (première association prête du Jalon 8) ; l'écran
+    /// d'export arrive au Jalon 10.
     private func requestExport() {
         environment.logger.info("Export demandé — l'écran d'export arrive au Jalon 10.")
     }

@@ -86,6 +86,29 @@ struct AssemblySlotItem: Identifiable, Equatable, Sendable {
     let end: MediaTime
     /// État d'affichage dérivé par `AssemblySlotState.from`.
     let state: AssemblySlotState
+    /// Identifiant PhotoKit du rush associé (Jalon 8, §35.1/§35.2) — `nil`
+    /// pour une case sans association. Sert UNIQUEMENT à retrouver la
+    /// miniature réelle (`ThumbnailProvider`) ; jamais interprété ailleurs.
+    let assetLocalIdentifier: String?
+
+    /// Init explicite : `assetLocalIdentifier` vaut `nil` par défaut — les
+    /// tests de géométrie et les previews (Jalon 7) n'ont pas de rush ;
+    /// `AssemblyView` le renseigne depuis l'association (§35.2).
+    init(
+        id: UUID,
+        index: Int,
+        start: MediaTime,
+        end: MediaTime,
+        state: AssemblySlotState,
+        assetLocalIdentifier: String? = nil
+    ) {
+        self.id = id
+        self.index = index
+        self.start = start
+        self.end = end
+        self.state = state
+        self.assetLocalIdentifier = assetLocalIdentifier
+    }
 
     /// Durée TOUJOURS calculée `end - start`, jamais stockée (§9).
     var duration: MediaTime { end - start }

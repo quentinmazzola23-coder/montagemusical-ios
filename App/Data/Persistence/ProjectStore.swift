@@ -25,6 +25,12 @@ enum ProjectStoreError: Error, Equatable {
     /// verrouillage après première association ; §89 : ne jamais perdre les
     /// associations).
     case paceLockedByAssignments(UUID)
+    /// Jalon 8 : la case visée n'existe pas ou n'appartient pas au projet.
+    /// Non defini par la specification — definition minimale V1.
+    case slotNotFound(UUID)
+    /// Jalon 8 : l'association visée n'existe pas ou n'appartient pas au
+    /// projet. Non defini par la specification — definition minimale V1.
+    case assignmentNotFound(UUID)
 }
 
 /// Acteur dédié à la cohérence des écritures projet (spec §8). Toutes les
@@ -344,6 +350,25 @@ actor ProjectStore {
         if !stuckImports.isEmpty {
             for record in stuckImports {
                 record.statusRaw = ProjectStatus.draft.rawValue
+            }
+            try modelContext.save()
+        }
+        // §8/§64 : reprise après kill — une association restée en `resolving`
+        // ou `downloading` (app tuée en pleine résolution ou en plein
+        // téléchargement iCloud) ne se terminera jamais : aucune tâche ne la
+        // reprendra. Bascule vers `unavailable` : la case GARDE son
+        // association (§64 — le dock propose « Remplacer », jamais de perte
+        // silencieuse §89), l'utilisateur voit un état honnête et décide.
+        let resolvingRaw = ClipAssignmentStatus.resolving.rawValue
+        let downloadingRaw = ClipAssignmentStatus.downloading.rawValue
+        let stuckAssignments = try modelContext.fetch(FetchDescriptor<ClipAssignmentRecord>(
+            predicate: #Predicate<ClipAssignmentRecord> {
+                $0.statusRaw == resolvingRaw || $0.statusRaw == downloadingRaw
+            }
+        ))
+        if !stuckAssignments.isEmpty {
+            for assignment in stuckAssignments {
+                assignment.statusRaw = ClipAssignmentStatus.unavailable.rawValue
             }
             try modelContext.save()
         }
@@ -693,4 +718,278 @@ extension ProjectStore {
 
     // `duplicateForPaceChange` (§65) est définie plus haut, à côté de
     // `duplicate` — les deux partagent `performDuplication(resetPaceInCopy:)`.
+}
+
+// MARK: - Associations vidéo (Jalon 8)
+
+// Non defini par la specification — definition minimale V1.
+/// Résumé `Sendable` d'une association §13.3 — seule forme qui traverse la
+/// frontière de l'acteur (jamais de `ClipAssignmentRecord`).
+struct AssignmentSummary: Sendable, Equatable {
+    let id: UUID
+    let slotID: UUID
+    let slotIndex: Int
+    let assetLocalIdentifier: String
+    let statusRaw: String
+}
+
+// Non defini par la specification — definition minimale V1 (contrat Jalon 8).
+extension ProjectStore {
+
+    /// Toutes les associations du projet (§13.3), triées par index de case.
+    ///
+    /// Un enregistrement dont la case n'existe plus (jamais attendu — la
+    /// cascade §10.1 supprime les deux ensemble) est exposé avec
+    /// `slotIndex == -1` plutôt que masqué : aucune association n'est
+    /// silencieusement perdue (§89).
+    func assignments(projectID: UUID) throws -> [AssignmentSummary] {
+        let indexBySlotID = try slotIndexesByID(projectID: projectID)
+        return try fetchAssignments(projectID: projectID)
+            .map { record in
+                AssignmentSummary(
+                    id: record.id,
+                    slotID: record.slotID,
+                    slotIndex: indexBySlotID[record.slotID] ?? -1,
+                    assetLocalIdentifier: record.assetLocalIdentifier,
+                    statusRaw: record.statusRaw
+                )
+            }
+            .sorted { $0.slotIndex < $1.slotIndex }
+    }
+
+    /// §45 « Déjà utilisé au plan 4 » : dictionnaire
+    /// `assetLocalIdentifier → [index de case]` (index TRIÉS croissants).
+    ///
+    /// TOUS les statuts comptent (y compris `unavailable`) : une case en
+    /// échec garde son association (§64) et l'indicateur « déjà utilisé »
+    /// doit continuer de la signaler.
+    func usedAssetSlotIndexes(projectID: UUID) throws -> [String: [Int]] {
+        let indexBySlotID = try slotIndexesByID(projectID: projectID)
+        var used: [String: [Int]] = [:]
+        for record in try fetchAssignments(projectID: projectID) {
+            guard let slotIndex = indexBySlotID[record.slotID] else { continue }
+            used[record.assetLocalIdentifier, default: []].append(slotIndex)
+        }
+        return used.mapValues { $0.sorted() }
+    }
+
+    /// Engage une association sur une case (§13.3, §43) : crée
+    /// l'enregistrement (statut initial `resolving`/`downloading` selon
+    /// l'appelant) et pose `slot.assignmentID`.
+    ///
+    /// Remplacer (§36 : barre inférieure « Remplacer » d'une case remplie) :
+    /// si la case possède déjà une association, l'ancienne est supprimée
+    /// d'abord — une association maximum par case (§10.1).
+    ///
+    /// SAUVEGARDE IMMÉDIATE (§59 : « jamais de debounce pour une
+    /// association critique »).
+    ///
+    /// V1 : `sourceStartTicks` vaut toujours 0 (§13.3) ;
+    /// `observedAssetDurationTicks` vaut 0 tant que la durée réelle n'est
+    /// pas mesurée (`completeAssignment`, §43 validation finale).
+    @discardableResult
+    func beginAssignment(
+        projectID: UUID, slotID: UUID, assetLocalIdentifier: String,
+        requiredDurationTicks: Int64, statusRaw: String
+    ) throws -> UUID {
+        let record = try requireProject(projectID)
+        let slot = try requireSlot(slotID, projectID: projectID)
+        let assignmentID = UUID()
+        do {
+            // Remplacer (§36) : suppression de l'association existante
+            // d'abord — la boucle couvre aussi un enregistrement orphelin
+            // résiduel (état réparé), vide en régime normal §10.1.
+            for existing in try fetchAssignments(slotID: slotID) {
+                modelContext.delete(existing)
+            }
+            modelContext.insert(ClipAssignmentRecord(
+                id: assignmentID,
+                projectID: projectID,
+                slotID: slotID,
+                assetLocalIdentifier: assetLocalIdentifier,
+                sourceStartTicks: 0, // V1 : toujours 0 (§13.3)
+                requiredDurationTicks: requiredDurationTicks,
+                observedAssetDurationTicks: 0, // mesurée à la résolution (§43)
+                statusRaw: statusRaw,
+                assignedAt: .now
+            ))
+            slot.assignmentID = assignmentID
+            try touchAndSave(record) // sauvegarde immédiate (§59)
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+        return assignmentID
+    }
+
+    /// Validation finale réussie (§43) : durée réelle mesurée enregistrée
+    /// et statut `ready` — sauvegarde immédiate (§59).
+    func completeAssignment(_ id: UUID, observedDurationTicks: Int64, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let assignment = try requireAssignment(id, projectID: projectID)
+        assignment.observedAssetDurationTicks = observedDurationTicks
+        assignment.statusRaw = ClipAssignmentStatus.ready.rawValue
+        try touchAndSave(record) // sauvegarde immédiate (§59)
+    }
+
+    /// §44 : découverte iCloud à la RÉSOLUTION — le premier callback de
+    /// progression réseau fait passer la case en `downloading` (la grille
+    /// affiche l'avancement, l'utilisateur continue à assigner d'autres
+    /// cases). UNIQUEMENT depuis `resolving` : si la résolution s'est déjà
+    /// terminée entre-temps (`ready`, `unavailable`, `tooShort`), no-op
+    /// SILENCIEUX — un callback tardif ne doit jamais écraser un état
+    /// final. Sauvegarde immédiate (§59).
+    func markAssignmentDownloading(_ id: UUID, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let assignment = try requireAssignment(id, projectID: projectID)
+        guard assignment.statusRaw == ClipAssignmentStatus.resolving.rawValue else {
+            return // no-op silencieux : statut déjà final (ou déjà en téléchargement)
+        }
+        assignment.statusRaw = ClipAssignmentStatus.downloading.rawValue
+        try touchAndSave(record) // sauvegarde immédiate (§59)
+    }
+
+    /// Échec de résolution : la case GARDE son association en état d'échec
+    /// (`unavailable` — §64 « asset supprimé : case `unavailable` » — ou
+    /// `tooShort`), sauvegarde immédiate (§59).
+    ///
+    /// EXCEPTION documentée : un `tooShort` détecté à la VALIDATION FINALE
+    /// §43 (« ne pas remplir la case ») n'utilise PAS cette méthode —
+    /// l'appelant retire l'association (`removeAssignment`) et la case
+    /// reste VIDE.
+    func failAssignment(_ id: UUID, statusRaw: String, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let assignment = try requireAssignment(id, projectID: projectID)
+        assignment.statusRaw = statusRaw
+        try touchAndSave(record) // sauvegarde immédiate (§59)
+    }
+
+    /// Retire l'association d'une case (§59 : sauvegarder après retrait) :
+    /// enregistrement §13.3 supprimé ET `slot.assignmentID` remis à `nil`
+    /// — la case redevient vide.
+    func removeAssignment(slotID: UUID, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let slot = try requireSlot(slotID, projectID: projectID)
+        do {
+            for assignment in try fetchAssignments(slotID: slotID) {
+                modelContext.delete(assignment)
+            }
+            slot.assignmentID = nil
+            try touchAndSave(record) // sauvegarde immédiate (§59)
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+    }
+
+    /// Retire une association PAR SON IDENTIFIANT, en ne vidant la case que
+    /// si elle référence ENCORE cette association (§59 : sauvegarde après
+    /// retrait). Défense contre les courses PAR CASE : pendant une
+    /// résolution lente, l'utilisateur peut réassigner la même case
+    /// (« Remplacer » §36) — le chemin d'échec de l'ANCIENNE tâche ne doit
+    /// JAMAIS retirer la NOUVELLE association (§64 : jamais de perte
+    /// silencieuse d'une association valide).
+    ///
+    /// - `slot.assignmentID == id` : retrait complet — enregistrement §13.3
+    ///   supprimé ET `slot.assignmentID` remis à `nil`, la case redevient
+    ///   vide (identique à `removeAssignment(slotID:)`) ;
+    /// - sinon : seul l'enregistrement orphelin `id` est supprimé s'il
+    ///   existe encore — l'association COURANTE de la case reste intacte ;
+    /// - ni l'un ni l'autre (tâche périmée déjà nettoyée) : no-op silencieux.
+    func removeAssignmentIfCurrent(_ id: UUID, slotID: UUID, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        let slot = try requireSlot(slotID, projectID: projectID)
+        do {
+            if slot.assignmentID == id {
+                // La boucle couvre aussi un enregistrement orphelin résiduel
+                // (état réparé), vide en régime normal §10.1.
+                for assignment in try fetchAssignments(slotID: slotID) {
+                    modelContext.delete(assignment)
+                }
+                slot.assignmentID = nil
+                try touchAndSave(record) // sauvegarde immédiate (§59)
+            } else if let orphan = try fetchAssignment(id), orphan.projectID == projectID {
+                modelContext.delete(orphan)
+                try touchAndSave(record) // sauvegarde immédiate (§59)
+            }
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+    }
+
+    /// Index des cases SANS association (`assignmentID == nil`), triés
+    /// croissants — entrée de l'avancement automatique §46
+    /// (`AssignmentRules.nextEmptySlotIndex`).
+    func emptySlotIndexes(projectID: UUID) throws -> [Int] {
+        try fetchSlots(projectID: projectID)
+            .filter { $0.assignmentID == nil }
+            .map(\.index)
+            .sorted()
+    }
+
+    /// §41 : « mémoriser le dernier album par projet » (§60 : restauré à la
+    /// réouverture). `nil` efface la mémorisation.
+    func setLastAlbum(_ albumID: String?, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        record.lastAlbumIdentifier = albumID
+        try touchAndSave(record)
+    }
+
+    /// Dernier album mémorisé du projet (§41), ou `nil`.
+    func lastAlbum(projectID: UUID) throws -> String? {
+        try requireProject(projectID).lastAlbumIdentifier
+    }
+
+    // MARK: - Helpers privés (Jalon 8)
+
+    /// Case par identifiant, avec vérification d'appartenance au projet.
+    private func requireSlot(_ slotID: UUID, projectID: UUID) throws -> ProjectSlotRecord {
+        var descriptor = FetchDescriptor<ProjectSlotRecord>(
+            predicate: #Predicate<ProjectSlotRecord> { $0.id == slotID }
+        )
+        descriptor.fetchLimit = 1
+        guard let slot = try modelContext.fetch(descriptor).first,
+              slot.projectID == projectID else {
+            throw ProjectStoreError.slotNotFound(slotID)
+        }
+        return slot
+    }
+
+    /// Association par identifiant, ou `nil` si elle n'existe plus
+    /// (tâche périmée — `removeAssignmentIfCurrent`).
+    private func fetchAssignment(_ id: UUID) throws -> ClipAssignmentRecord? {
+        var descriptor = FetchDescriptor<ClipAssignmentRecord>(
+            predicate: #Predicate<ClipAssignmentRecord> { $0.id == id }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    /// Association par identifiant, avec vérification d'appartenance au
+    /// projet.
+    private func requireAssignment(_ id: UUID, projectID: UUID) throws -> ClipAssignmentRecord {
+        guard let assignment = try fetchAssignment(id),
+              assignment.projectID == projectID else {
+            throw ProjectStoreError.assignmentNotFound(id)
+        }
+        return assignment
+    }
+
+    /// Associations d'une case donnée (au plus une en régime normal §10.1 ;
+    /// la boucle de suppression tolère un état réparé).
+    private func fetchAssignments(slotID: UUID) throws -> [ClipAssignmentRecord] {
+        try modelContext.fetch(FetchDescriptor<ClipAssignmentRecord>(
+            predicate: #Predicate<ClipAssignmentRecord> { $0.slotID == slotID }
+        ))
+    }
+
+    /// Dictionnaire `id de case → index` du projet.
+    private func slotIndexesByID(projectID: UUID) throws -> [UUID: Int] {
+        var indexes: [UUID: Int] = [:]
+        for slot in try fetchSlots(projectID: projectID) {
+            indexes[slot.id] = slot.index
+        }
+        return indexes
+    }
 }

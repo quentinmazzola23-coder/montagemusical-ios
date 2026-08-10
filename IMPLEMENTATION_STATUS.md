@@ -17,8 +17,8 @@
 | 4 — Moteur musical déterministe | ✅ Terminé (CI verte, run 31392520681) |
 | 5 — Générateur de scores | ✅ Terminé (CI verte, run 31398882782) |
 | 6 — Interface analyse / choix rythme | ✅ Terminé (CI verte, run 31419878812) |
-| 7 — Timeline d'assemblage | 🔄 En cours |
-| 8 — PhotoKit | ⬜ Non démarré |
+| 7 — Timeline d'assemblage | ✅ Terminé (CI verte, run 31422818870) |
+| 8 — PhotoKit | 🔄 En cours |
 | 9 — Géométrie et preview | ⬜ Non démarré |
 | 10 — Export | ⬜ Non démarré |
 | 11 — Moteur avancé Core ML | ⬜ Non démarré |
@@ -149,6 +149,17 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 - Pause de fin de passage par observateur 10 Hz : dépassement max ~100 ms (affichage V1) — boundary observer exact envisageable au Jalon 9.
 - Dynamic Type : hauteurs de cartes/carrousel fixes — passage à @ScaledMetric au Jalon 12 (§87 accessibilité).
 
+## Jalon 8 — PhotoKit (10 août 2026)
+
+**Fichiers** : `App/Services/MediaLibrary/MediaLibraryActor.swift` (acteur §8 : autorisations §40 — `.readWrite` seul niveau lecture PhotoKit —, albums ordonnés §41, assets vidéo §42 avec premier filtre §43, résolution AVAsset réelle avec progression iCloud §44, classement des échecs §64), `MediaLibraryError.swift`, `AssignmentRules.swift` (règles pures §43/§46), `ThumbnailProvider.swift` (`PHCachingImageManager` §42 : préchargement ET arrêt par fenêtre — cache borné, fabriques d'options partagées start/stop), `App/Features/ClipPicker/ClipPickerView.swift` (feuille §40–§46 : autorisation à l'ouverture, refus expliqué + Réglages, accès limité avec rechargement à la fermeture du sélecteur système, grille 3 colonnes avec badges et progression, albums + mémorisation par projet §41, réutilisation confirmée §45, avancement automatique §46, « Montage complet »), extensions `ProjectStore` (begin/complete/fail/remove d'association §13.3/§59, `markAssignmentDownloading` §44, `removeAssignmentIfCurrent` anti-courses, `usedAssetSlotIndexes` §45, `emptySlotIndexes` §46, dernier album §41, reprise §8/§64 des associations en cours dans `performStartupMaintenance`), miniatures réelles des cases (`AssemblyModels.swift`, `SlotCardView.swift`, `AssemblyView.swift` §35.1/§35.2), `INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription` ajoutée au pbxproj (§40 : les deux descriptions déclarées), `Tests/Unit/MediaAssignmentTests.swift`.
+
+**Choix** : statut `downloading` DYNAMIQUE à la progression (§44) — l'association démarre TOUJOURS en `resolving` (PhotoKit n'expose pas l'état iCloud par asset) ; le PREMIER callback de progression réseau (fraction < 1) bascule la case en `downloading` et fait avancer la feuille — l'utilisateur continue à assigner d'autres cases —, un asset local suit le chemin normal (complete puis avance). Rebouclage §46 documenté (plus de case vide strictement après → première case vide avant ; aucune → « Montage complet »). Dialogue §45 : la case COURANTE est exclue (remplacer une case par sa propre vidéo n'est pas un doublon). `noVideoTrack` → association retirée, case VIDE (§64, même traitement que la validation finale §43). Courses par ASSOCIATION : chaque tâche de résolution complète/échoue par l'identifiant de SA propre association (`removeAssignmentIfCurrent` ne touche jamais une association de remplacement ; `assignmentNotFound` avalée silencieusement — tâche périmée remplacée, ni alerte ni haptique). Reprise après kill (§8/§64) : associations `resolving`/`downloading` basculées `unavailable` au lancement — la case GARDE son association, le dock propose « Remplacer ».
+
+**Écarts documentés** :
+- **Badge iCloud §42 sous réserve d'API** : PhotoKit n'expose aucune API publique synchrone « asset non téléchargé localement » — `isCloudAsset` vaut `false` en pratique et le badge (code en place) ne s'affichera que si l'API l'expose un jour ; l'état iCloud RÉEL est découvert à la résolution (§44 : progression + statut `downloading` dynamiques).
+- **« Recadrage potentiel » §42 → Jalon 9** : l'indicateur nécessite la géométrie verrouillée du projet (§49), qui n'existe pas encore.
+- **Miniatures du carrousel chargées FENÊTRÉES** (case active ± 2, taille de carte en pixels — approximation stable documentée) — jamais tout le projet ; la zone haute réutilise la même image que la carte.
+
 ## Distribution et vérification (pipeline ClipFlow)
 
 - `.github/workflows/build-ipa.yml` : à chaque push sur `main`, un runner GitHub macOS (Xcode 26) compile en Release sans signature, empaquette `MontageMusical-unsigned.ipa` et la publie en release GitHub (tag `build-N-rM`). Job `tests` parallèle : tests unitaires sur simulateur (informatif, `continue-on-error`).
@@ -163,4 +174,4 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 ## À ne pas oublier (jalons suivants)
 
 - **Jalon 2** — contraintes §10.1 non exprimables en simples champs : unicité logique `(projectID, scoreModeRaw, index)` (`#Unique` SwiftData ou validation dans `ProjectStoreActor`), une association max par case, suppression en cascade cases + associations à la suppression définitive d'un projet.
-- **Jalon 8** — ajouter `INFOPLIST_KEY_NSPhotoLibraryUsageDescription` (lecture) puis `NSPhotoLibraryAddUsageDescription` (écriture, §40) dans les deux configurations de la cible app du pbxproj, sinon crash à la première demande d'autorisation Photos.
+- **Jalon 8** — ✅ fait au Jalon 8 : `INFOPLIST_KEY_NSPhotoLibraryUsageDescription` (lecture) ET `INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription` (écriture, §40) sont déclarées dans les deux configurations de la cible app du pbxproj.

@@ -3,15 +3,16 @@
 //  MontageMusical
 //
 //  Carte d'une case du carrousel d'assemblage — Jalon 7, spec §35.2.
-//  États : vide (« Plan N » + durée + « + »), remplie (placeholder de
-//  miniature neutre + numéro + durée + coche — la vraie miniature arrive
-//  au Jalon 8), téléchargement (§44), indisponible (§64), trop courte,
-//  vérification. Matériaux sobres §37, aucune animation décorative §38,
-//  accessibilité §39 (« Plan 7, durée requise 1 virgule 20 seconde,
-//  rempli »).
+//  États : vide (« Plan N » + durée + « + »), remplie (miniature RÉELLE du
+//  rush fournie par le parent depuis le Jalon 8 — placeholder neutre tant
+//  qu'elle n'est pas chargée + numéro + durée + coche), téléchargement
+//  (§44), indisponible (§64), trop courte, vérification. Matériaux sobres
+//  §37, aucune animation décorative §38, accessibilité §39 (« Plan 7,
+//  durée requise 1 virgule 20 seconde, rempli »).
 //
 
 import SwiftUI
+import UIKit
 
 /// Carte d'une case du carrousel (§35.2). Vue d'AFFICHAGE pure : le toucher
 /// (sélection, ajout de vidéo) est géré par le parent (`AssemblyView`).
@@ -26,6 +27,10 @@ import SwiftUI
 struct SlotCardView: View {
     let item: AssemblySlotItem
     let isActive: Bool
+    /// Miniature RÉELLE du rush (Jalon 8, §35.2) — chargée fenêtrée par le
+    /// parent (`AssemblyView`) via `ThumbnailProvider`. `nil` (défaut :
+    /// previews, chargement en cours, case non prête) → placeholder neutre.
+    var thumbnail: UIImage? = nil
 
     var body: some View {
         content
@@ -64,8 +69,14 @@ struct SlotCardView: View {
 
         case .ready:
             // Ordre spec §35.2 : miniature, numéro, durée, coche.
+            // Miniature RÉELLE du rush si le parent l'a fournie (Jalon 8),
+            // placeholder neutre sinon (chargement en cours, previews).
             VStack(spacing: 8) {
-                thumbnailPlaceholder
+                if let thumbnail {
+                    thumbnailImage(thumbnail)
+                } else {
+                    thumbnailPlaceholder
+                }
                 HStack(spacing: 6) {
                     planText
                     durationText
@@ -120,8 +131,26 @@ struct SlotCardView: View {
 
     // MARK: - Briques communes
 
-    /// Placeholder de miniature neutre (Jalon 7). La vraie miniature PhotoKit
-    /// arrive au Jalon 8 — aucun verre permanent par-dessus (§37).
+    /// Miniature RÉELLE du rush (Jalon 8, §35.2) — `aspectFill` dans le
+    /// MÊME gabarit que le placeholder (coins arrondis 8, hauteur 56),
+    /// aucun verre permanent par-dessus (§37). L'image est posée en
+    /// `overlay` d'un gabarit fixe puis rognée : sa taille intrinsèque
+    /// n'influence jamais la mise en page de la carte.
+    private func thumbnailImage(_ image: UIImage) -> some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(.quaternary)
+            .frame(height: 56)
+            .overlay(
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Placeholder de miniature neutre (Jalon 7) : affiché tant que la
+    /// vraie miniature PhotoKit (Jalon 8) n'est pas chargée — aucun verre
+    /// permanent par-dessus (§37).
     private var thumbnailPlaceholder: some View {
         RoundedRectangle(cornerRadius: 8)
             .fill(.quaternary)

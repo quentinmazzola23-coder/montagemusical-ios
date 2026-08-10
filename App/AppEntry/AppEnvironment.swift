@@ -57,6 +57,15 @@ final class AppEnvironment {
     /// de leur validité §61 — écran du choix du rythme (Jalon 6, §34).
     let scoreLibrary: ScoreLibrary
 
+    /// Accès PhotoKit (Jalon 8, §8 « MediaLibraryActor », §40–§46) :
+    /// autorisations, albums, assets vidéo, résolution AVAsset réelle avec
+    /// progression de téléchargement iCloud.
+    let mediaLibrary: MediaLibraryActor
+
+    /// Miniatures de la grille vidéo (Jalon 8, §42) : `PHCachingImageManager`
+    /// avec préchargement autour de la zone visible — jamais de décodage 4K.
+    let thumbnailProvider: ThumbnailProvider
+
     /// Initialiseur de production : ouvre le conteneur persistant partagé
     /// (Application Support).
     convenience init() {
@@ -95,6 +104,8 @@ final class AppEnvironment {
             fileStore: fileStore
         )
         self.scoreLibrary = ScoreLibrary(fileStore: fileStore)
+        self.mediaLibrary = MediaLibraryActor()
+        self.thumbnailProvider = ThumbnailProvider()
     }
 
     /// Maintenance au lancement (§69A) : brouillons vides résiduels,
