@@ -11,6 +11,20 @@ import Foundation
 
 extension MediaTime {
 
+    /// Durée courte « 1,20 s » (§35.2) : secondes et centièmes d'AFFICHAGE
+    /// (arrondi au centième le plus proche, virgule française), jamais
+    /// réinjectés dans un calcul (§9). Utilisée pour les stats §34
+    /// (moyenne/minimum/maximum des cases).
+    var shortDurationString: String {
+        let centiseconds = max(0, Self.roundedDivision(ticks, dividedBy: 600))
+        let seconds = centiseconds / 100
+        let fraction = centiseconds % 100
+        return "\(seconds),\(fraction < 10 ? "0" : "")\(fraction) s"
+    }
+}
+
+extension MediaTime {
+
     /// Chaîne d'affichage au centième de seconde, format français.
     ///
     /// - `"mm:ss,cc"` en dessous d'une heure (exemple spec : 8,431764 s

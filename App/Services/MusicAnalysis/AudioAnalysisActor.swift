@@ -22,7 +22,6 @@
 //
 
 import AVFoundation
-import CryptoKit
 import Foundation
 
 // Non defini par la specification — definition minimale V1.
@@ -195,7 +194,11 @@ actor AudioAnalysisActor {
             // régénérées à la reprise).
             try Task.checkCancellation()
             try writeScores(scores, projectID: projectID)
-            try writeScoresMeta(configuration: configuration, projectID: projectID)
+            try writeScoresMeta(
+                configuration: configuration,
+                analysisVersion: result.version,
+                projectID: projectID
+            )
 
             // Les deux sauvegardes, dans cet ordre : `saveScores` (champ
             // `scoreVersion` §61, statut inchangé) PUIS `saveAnalysisResult`
@@ -251,14 +254,6 @@ actor AudioAnalysisActor {
         try data.write(to: url, options: .atomic)
     }
 
-    // Non defini par la specification — traçabilité §61 des partitions.
-    /// Métadonnées de validité des partitions (§61) : version du
-    /// générateur + empreinte de la `ScoreConfiguration` utilisée.
-    private struct ScoresMeta: Codable {
-        let generatorVersion: Int
-        let configurationFingerprint: String
-    }
-
     /// Écrit `analysis/scores-meta-v1.json` À CÔTÉ des partitions (§61 :
     /// les critères de validité — version du générateur + configuration —
     /// sont tracés avec le résultat, même approche que
@@ -270,28 +265,22 @@ actor AudioAnalysisActor {
     /// `scores-v1.json` : une méta sans partitions validerait un fichier
     /// absent, l'inverse est inoffensif (méta absente → partitions
     /// considérées périmées).
-    private func writeScoresMeta(configuration: ScoreConfiguration, projectID: UUID) throws {
+    private func writeScoresMeta(
+        configuration: ScoreConfiguration,
+        analysisVersion: Int,
+        projectID: UUID
+    ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
+        // `ScoresMeta` : schéma unique partagé (défini dans ScoreLibrary.swift).
         let meta = ScoresMeta(
             generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
-            configurationFingerprint: try Self.configurationFingerprint(of: configuration)
+            configurationFingerprint: try ScoreConfigurationFingerprint.fingerprint(of: configuration),
+            analysisVersion: analysisVersion
         )
         let data = try encoder.encode(meta)
         let url = fileStore.directory(for: projectID).appending(path: Self.scoresMetaRelativePath)
         try data.write(to: url, options: .atomic)
-    }
-
-    /// Empreinte SHA-256 de la `ScoreConfiguration` ENCODÉE (clés triées
-    /// → encodage déterministe, deux configurations égales donnent la
-    /// même empreinte). Même approche que `configurationFingerprint`
-    /// côté analyse (`AnalysisCache`/`DeterministicMusicAnalyzer`),
-    /// appliquée ici à la configuration des partitions.
-    private static func configurationFingerprint(of configuration: ScoreConfiguration) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(configuration)
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func update(progress: AnalysisProgress, projectID: UUID) {

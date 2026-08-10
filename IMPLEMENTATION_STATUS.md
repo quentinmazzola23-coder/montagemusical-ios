@@ -15,8 +15,8 @@
 | 2 — Projets et persistance | ✅ Terminé (CI verte, run 31382568859) |
 | 3 — Import audio | ✅ Terminé (CI verte, run 31385112438) |
 | 4 — Moteur musical déterministe | ✅ Terminé (CI verte, run 31392520681) |
-| 5 — Générateur de scores | 🔄 En cours |
-| 6 — Interface analyse / choix rythme | ⬜ Non démarré |
+| 5 — Générateur de scores | ✅ Terminé (CI verte, run 31398882782) |
+| 6 — Interface analyse / choix rythme | 🔄 En cours |
 | 7 — Timeline d'assemblage | ⬜ Non démarré |
 | 8 — PhotoKit | ⬜ Non démarré |
 | 9 — Géométrie et preview | ⬜ Non démarré |
@@ -126,6 +126,17 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 - `saveScores(relativePath:)` : chemin non persisté dans `ProjectRecord` (schéma §10 verbatim sans colonne dédiée) — chemin fixe §11 re-dérivable.
 - Projets pré-J5 en `awaitingPaceSelection` sans `scores-v1.json` : pas de régénération silencieuse (§61) — le Jalon 6 proposera la régénération.
 - Perf : ré-évaluation complète des candidats après chaque activation — acceptable ≤ ~6 min de musique, optimisation locale notée.
+
+## Jalon 6 — Interface analyse et choix du rythme (10 août 2026)
+
+**Fichiers** : `App/Services/EditScore/ScoreLibrary.swift` (lecture `scores-v1.json` + validité §61 : `ScoresMeta` schéma unique — generatorVersion + empreinte de config + analysisVersion — partagé écriture/lecture/tests), extensions `ProjectStore` (`selectPace` **transaction unique avec rollback**, `revertToPaceSelection`, `clearSlots`, `hasAssignments`, `slotCount`, `insertSlots` gardé par le verrou, `duplicateForPaceChange` — copie SANS cases ni associations remise au choix du rythme §65), `App/Features/PaceSelection/PaceSelectionView.swift` (écran §34 : **trois cartes comparables** — miniature + plans + moy/min/max « 1,20 s » §35.2 —, sélecteur + CTA « Utiliser ce rythme » au dock §36, recalcul §61 explicite), `MiniTimelineView`, `MediaTime.shortDurationString`, routage `ProjectView` (awaitingPaceSelection → sélection ; assembling → placeholder sobre avec « Changer de rythme »), `Tests/Unit/PaceSelectionStoreTests.swift`.
+
+**Choix** : défaut Équilibré (position centrale §34) ; CTA `ViewThatFits` (« Utiliser ce rythme » / « Valider ») ; seules les cases du mode choisi sont persistées (les 3 partitions restent dans `scores-v1.json`) ; après duplication pour changement de rythme, retour à la liste (navigation directe vers la copie : amélioration future).
+
+**Écarts documentés** :
+- §34 « feuille inférieure » rendue en plein écran routé par statut (choix V1).
+- Matériau `.ultraThinMaterial` au lieu du Liquid Glass natif iOS 26 (§37/§81) — cohérent avec tous les docks existants, migration au Jalon 12.
+- §60 : restauration automatique du dernier projet ouvert au lancement à froid non implémentée (la réouverture manuelle retombe au bon écran via le routage par statut) — report Jalon 12.
 
 ## Distribution et vérification (pipeline ClipFlow)
 

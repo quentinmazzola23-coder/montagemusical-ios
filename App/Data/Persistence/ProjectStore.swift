@@ -19,6 +19,12 @@ enum ProjectStoreError: Error, Equatable {
     case duplicateSlotKey(scoreModeRaw: String, index: Int)
     /// §10.1 : index strictement croissant au sein d'un lot inséré.
     case nonIncreasingSlotIndex(scoreModeRaw: String, index: Int)
+    /// §65 : « changement de rythme après association : proposer duplication,
+    /// pas mutation destructive » — dès qu'une association existe, les cases
+    /// du projet ne peuvent plus être effacées ni remplacées (§81 :
+    /// verrouillage après première association ; §89 : ne jamais perdre les
+    /// associations).
+    case paceLockedByAssignments(UUID)
 }
 
 /// Acteur dédié à la cohérence des écritures projet (spec §8). Toutes les
@@ -124,6 +130,40 @@ actor ProjectStore {
     /// toutes les cases et associations (nouveaux identifiants, références
     /// remappées) et le dossier de fichiers §11 s'il existe.
     func duplicate(projectID: UUID, now: Date = .now) throws -> UUID {
+        try performDuplication(projectID: projectID, now: now, resetPaceInCopy: false)
+    }
+
+    /// Duplication POUR CHANGER DE RYTHME (§65 : « changement de rythme
+    /// après association : proposer duplication, pas mutation destructive »).
+    ///
+    /// Même copie que `duplicate` (enregistrement projet, dossier de
+    /// fichiers §11 — audio, analyse ET partitions) mais SANS les cases ni
+    /// les associations : la copie repart au choix du rythme
+    /// (`awaitingPaceSelection`, rythme désélectionné, case active 0)
+    /// pendant que l'ORIGINAL reste strictement intact. Sans cette
+    /// variante, la copie d'un projet verrouillé serait verrouillée elle
+    /// aussi — « dupliquez pour changer de rythme » serait une impasse.
+    ///
+    /// Les partitions copiées (`analysis/scores-v1.json`, §11) restent
+    /// valides : le choix du rythme relit simplement la famille des trois
+    /// modes, aucun recalcul (§61).
+    func duplicateForPaceChange(projectID: UUID, now: Date = .now) throws -> UUID {
+        try performDuplication(projectID: projectID, now: now, resetPaceInCopy: true)
+    }
+
+    /// Cœur partagé des deux duplications (§65) — un seul chemin de copie,
+    /// jamais deux implémentations qui divergent.
+    ///
+    /// `resetPaceInCopy` :
+    /// - `false` : copie complète — statut, rythme, cases et associations ;
+    /// - `true`  : copie SANS cases ni associations, rythme désélectionné,
+    ///   statut `awaitingPaceSelection`, case active 0 (la copie repart au
+    ///   choix du rythme, §65).
+    private func performDuplication(
+        projectID: UUID,
+        now: Date,
+        resetPaceInCopy: Bool
+    ) throws -> UUID {
         let source = try requireProject(projectID)
         let newProjectID = UUID()
 
@@ -137,13 +177,16 @@ actor ProjectStore {
             customTitle: sourceDisplayTitle + " (copie)",
             createdAt: now,
             updatedAt: now,
-            // La copie reprend l'état fonctionnel de la source (statut,
-            // rythme choisi, case active, dernier album) — cohérent avec
+            // Copie complète : la copie reprend l'état fonctionnel de la
+            // source (statut, rythme choisi, case active) — cohérent avec
             // §65 : dupliquer pour continuer sans mutation destructive.
+            // Copie pour changement de rythme : retour au choix (§65).
             // Non defini par la specification — definition minimale V1.
-            statusRaw: source.statusRaw,
-            selectedPaceRaw: source.selectedPaceRaw,
-            activeSlotIndex: source.activeSlotIndex,
+            statusRaw: resetPaceInCopy
+                ? ProjectStatus.awaitingPaceSelection.rawValue
+                : source.statusRaw,
+            selectedPaceRaw: resetPaceInCopy ? nil : source.selectedPaceRaw,
+            activeSlotIndex: resetPaceInCopy ? 0 : source.activeSlotIndex,
             audioRelativePath: source.audioRelativePath,
             analysisRelativePath: source.analysisRelativePath,
             geometryData: source.geometryData,
@@ -153,45 +196,49 @@ actor ProjectStore {
         )
         modelContext.insert(copy)
 
-        // Copie des cases et associations avec remappage des identifiants.
-        let sourceSlots = try fetchSlots(projectID: projectID)
-        let sourceAssignments = try fetchAssignments(projectID: projectID)
+        // Copie des cases et associations avec remappage des identifiants —
+        // OMISE pour un changement de rythme : la copie repart de zéro, ce
+        // qui la laisse libre d'un nouveau `selectPace` (§65).
+        if !resetPaceInCopy {
+            let sourceSlots = try fetchSlots(projectID: projectID)
+            let sourceAssignments = try fetchAssignments(projectID: projectID)
 
-        var newSlotIDs: [UUID: UUID] = [:] // ancien id de case → nouveau
-        for slot in sourceSlots {
-            newSlotIDs[slot.id] = UUID()
-        }
-        var newAssignmentIDs: [UUID: UUID] = [:] // ancien id d'association → nouveau
-        for assignment in sourceAssignments {
-            newAssignmentIDs[assignment.id] = UUID()
-        }
+            var newSlotIDs: [UUID: UUID] = [:] // ancien id de case → nouveau
+            for slot in sourceSlots {
+                newSlotIDs[slot.id] = UUID()
+            }
+            var newAssignmentIDs: [UUID: UUID] = [:] // ancien id d'association → nouveau
+            for assignment in sourceAssignments {
+                newAssignmentIDs[assignment.id] = UUID()
+            }
 
-        for slot in sourceSlots {
-            modelContext.insert(ProjectSlotRecord(
-                id: newSlotIDs[slot.id] ?? UUID(),
-                projectID: newProjectID,
-                scoreModeRaw: slot.scoreModeRaw,
-                index: slot.index,
-                startTicks: slot.startTicks,
-                endTicks: slot.endTicks,
-                entryAnchorID: slot.entryAnchorID,
-                exitAnchorID: slot.exitAnchorID,
-                gestureID: slot.gestureID,
-                assignmentID: slot.assignmentID.flatMap { newAssignmentIDs[$0] }
-            ))
-        }
-        for assignment in sourceAssignments {
-            modelContext.insert(ClipAssignmentRecord(
-                id: newAssignmentIDs[assignment.id] ?? UUID(),
-                projectID: newProjectID,
-                slotID: newSlotIDs[assignment.slotID] ?? assignment.slotID,
-                assetLocalIdentifier: assignment.assetLocalIdentifier,
-                sourceStartTicks: assignment.sourceStartTicks,
-                requiredDurationTicks: assignment.requiredDurationTicks,
-                observedAssetDurationTicks: assignment.observedAssetDurationTicks,
-                statusRaw: assignment.statusRaw,
-                assignedAt: assignment.assignedAt
-            ))
+            for slot in sourceSlots {
+                modelContext.insert(ProjectSlotRecord(
+                    id: newSlotIDs[slot.id] ?? UUID(),
+                    projectID: newProjectID,
+                    scoreModeRaw: slot.scoreModeRaw,
+                    index: slot.index,
+                    startTicks: slot.startTicks,
+                    endTicks: slot.endTicks,
+                    entryAnchorID: slot.entryAnchorID,
+                    exitAnchorID: slot.exitAnchorID,
+                    gestureID: slot.gestureID,
+                    assignmentID: slot.assignmentID.flatMap { newAssignmentIDs[$0] }
+                ))
+            }
+            for assignment in sourceAssignments {
+                modelContext.insert(ClipAssignmentRecord(
+                    id: newAssignmentIDs[assignment.id] ?? UUID(),
+                    projectID: newProjectID,
+                    slotID: newSlotIDs[assignment.slotID] ?? assignment.slotID,
+                    assetLocalIdentifier: assignment.assetLocalIdentifier,
+                    sourceStartTicks: assignment.sourceStartTicks,
+                    requiredDurationTicks: assignment.requiredDurationTicks,
+                    observedAssetDurationTicks: assignment.observedAssetDurationTicks,
+                    statusRaw: assignment.statusRaw,
+                    assignedAt: assignment.assignedAt
+                ))
+            }
         }
 
         // Copie du dossier de fichiers §11 AVANT la sauvegarde SwiftData :
@@ -402,15 +449,37 @@ actor ProjectStore {
     /// - `endTicks > startTicks` ;
     /// - index strictement croissant au sein du lot.
     ///
-    /// « Une association maximum par case » et le gel des temps après
-    /// verrouillage du rythme relèvent des Jalons 6–8.
+    /// « Une association maximum par case » relève des Jalons 7–8 ; le gel
+    /// des temps après verrouillage est garanti ici par la garde
+    /// `paceLockedByAssignments` (§10.1/§65).
     func insertSlots(
         _ definitions: [EditSlotDefinition],
         scoreMode: PaceMode,
         projectID: UUID
     ) throws {
+        // §10.1/§65 : dès la première association, les temps des cases sont
+        // gelés — aucune insertion possible sans passer par la duplication.
+        guard try !hasAssignments(projectID: projectID) else {
+            throw ProjectStoreError.paceLockedByAssignments(projectID)
+        }
         let record = try requireProject(projectID)
+        do {
+            try insertSlotRecords(definitions, scoreMode: scoreMode, projectID: projectID)
+            try touchAndSave(record)
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+    }
 
+    /// Validation §10.1 + insertion SANS sauvegarde — partagé par
+    /// `insertSlots` et `selectPace` (la transaction — sauvegarde unique et
+    /// rollback — appartient à l'appelant).
+    private func insertSlotRecords(
+        _ definitions: [EditSlotDefinition],
+        scoreMode: PaceMode,
+        projectID: UUID
+    ) throws {
         var keys = Set<SlotKey>()
         for existing in try fetchSlots(projectID: projectID) {
             keys.insert(SlotKey(scoreModeRaw: existing.scoreModeRaw, index: existing.index))
@@ -449,7 +518,6 @@ actor ProjectStore {
                 assignmentID: nil
             ))
         }
-        try touchAndSave(record)
     }
 
     // Non defini par la specification — definition minimale V1 :
@@ -520,5 +588,134 @@ actor ProjectStore {
         try modelContext.fetchCount(FetchDescriptor<ClipAssignmentRecord>(
             predicate: #Predicate<ClipAssignmentRecord> { $0.projectID == projectID }
         ))
+    }
+}
+
+// MARK: - Choix du rythme (Jalon 6)
+
+// Non defini par la specification — definition minimale V1 (contrat Jalon 6).
+extension ProjectStore {
+
+    /// Vrai si le projet possède au moins une association vidéo (§13.3).
+    /// Dès la première association, le rythme est verrouillé (§65, §81 :
+    /// « verrouillage après première association »).
+    func hasAssignments(projectID: UUID) throws -> Bool {
+        try assignmentCount(projectID: projectID) > 0
+    }
+
+    /// Nombre de cases persistées du projet — tous modes confondus (après
+    /// `selectPace`, seules les cases du mode choisi existent en base).
+    func slotCount(projectID: UUID) throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<ProjectSlotRecord>(
+            predicate: #Predicate<ProjectSlotRecord> { $0.projectID == projectID }
+        ))
+    }
+
+    /// Supprime toutes les cases persistées du projet — REFUSÉ si une
+    /// association existe (`paceLockedByAssignments`, §65 : jamais de
+    /// mutation destructive après association ; §89 : ne jamais perdre les
+    /// associations après relance).
+    func clearSlots(projectID: UUID) throws {
+        guard try !hasAssignments(projectID: projectID) else {
+            throw ProjectStoreError.paceLockedByAssignments(projectID)
+        }
+        let record = try requireProject(projectID)
+        for slot in try fetchSlots(projectID: projectID) {
+            modelContext.delete(slot)
+        }
+        try touchAndSave(record) // autosauvegarde (§59)
+    }
+
+    /// Choix du rythme (§34, annexe A) : matérialise en cases persistées
+    /// §10.1 la partition du mode choisi, passe le statut à `assembling`
+    /// et remet la case active à 0 — sauvegardé (§59 : « choix du
+    /// rythme »).
+    ///
+    /// Seules les cases du mode CHOISI sont insérées — les trois partitions
+    /// complètes restent dans `analysis/scores-v1.json` (§11) : revenir au
+    /// choix du rythme ou changer de mode avant association ne recalcule
+    /// rien, la famille est simplement relue.
+    ///
+    /// §65 : interdit dès qu'une association existe
+    /// (`paceLockedByAssignments`) — l'alternative est la duplication.
+    func selectPace(_ mode: PaceMode, from family: EditScoreFamily, projectID: UUID) throws {
+        guard try !hasAssignments(projectID: projectID) else {
+            throw ProjectStoreError.paceLockedByAssignments(projectID)
+        }
+        let record = try requireProject(projectID)
+        let score: EditScore = switch mode {
+        case .fluid: family.fluid
+        case .balanced: family.balanced
+        case .percussive: family.percussive
+        }
+        // TRANSACTION UNIQUE (tout-ou-rien) : suppression des cases
+        // existantes + insertions validées §10.1 + champs du projet, puis
+        // UNE seule sauvegarde. Un `scores-v1.json` corrompu (erreur typée
+        // en cours de lot) laisse la base STRICTEMENT inchangée (rollback) —
+        // jamais d'état intermédiaire persisté.
+        do {
+            for slot in try fetchSlots(projectID: projectID) {
+                modelContext.delete(slot)
+            }
+            try insertSlotRecords(score.slots, scoreMode: mode, projectID: projectID)
+            record.selectedPaceRaw = mode.rawValue
+            record.activeSlotIndex = 0
+            record.statusRaw = ProjectStatus.assembling.rawValue
+            try touchAndSave(record) // autosauvegarde unique (§59)
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+    }
+
+    /// Retour au choix du rythme AVANT toute association (§65 : seule la
+    /// mutation APRÈS association est interdite — avant, changer d'avis est
+    /// libre) : cases effacées, rythme désélectionné, statut
+    /// `awaitingPaceSelection`. Un nouveau `selectPace` reste possible.
+    func revertToPaceSelection(projectID: UUID) throws {
+        guard try !hasAssignments(projectID: projectID) else {
+            throw ProjectStoreError.paceLockedByAssignments(projectID)
+        }
+        let record = try requireProject(projectID)
+        // Transaction unique, même raison que `selectPace`.
+        do {
+            for slot in try fetchSlots(projectID: projectID) {
+                modelContext.delete(slot)
+            }
+            record.selectedPaceRaw = nil
+            record.statusRaw = ProjectStatus.awaitingPaceSelection.rawValue
+            try touchAndSave(record) // autosauvegarde unique (§59)
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+    }
+
+    /// Duplication POUR CHANGER DE RYTHME (§65 : « proposer duplication,
+    /// pas mutation destructive ») : copie du projet SANS cases ni
+    /// associations, remise au choix du rythme — l'ORIGINAL reste
+    /// strictement intact (cases, associations, statut, rythme).
+    ///
+    /// C'est l'issue proposée par l'interface quand le rythme est
+    /// verrouillé (`paceLockedByAssignments`) : la copie repart de
+    /// `awaitingPaceSelection` et `selectPace` y réussit.
+    ///
+    /// Deux sauvegardes s'enchaînent (celle de `duplicate` puis celle-ci) ;
+    /// une interruption entre les deux laisse au pire une copie complète
+    /// ordinaire — jamais d'état corrompu.
+    func duplicateForPaceChange(projectID: UUID, now: Date = .now) throws -> UUID {
+        let newProjectID = try duplicate(projectID: projectID, now: now)
+        let copy = try requireProject(newProjectID)
+        for slot in try fetchSlots(projectID: newProjectID) {
+            modelContext.delete(slot)
+        }
+        for assignment in try fetchAssignments(projectID: newProjectID) {
+            modelContext.delete(assignment)
+        }
+        copy.selectedPaceRaw = nil
+        copy.activeSlotIndex = 0
+        copy.statusRaw = ProjectStatus.awaitingPaceSelection.rawValue
+        try touchAndSave(copy)
+        return newProjectID
     }
 }

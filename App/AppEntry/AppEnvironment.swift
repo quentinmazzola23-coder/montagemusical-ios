@@ -53,6 +53,10 @@ final class AppEnvironment {
     /// progression observable, annulation avec checkpoint conservé (§8.1).
     let audioAnalysisActor: AudioAnalysisActor
 
+    /// Lecture des partitions générées (`analysis/scores-v1.json`, §11) et
+    /// de leur validité §61 — écran du choix du rythme (Jalon 6, §34).
+    let scoreLibrary: ScoreLibrary
+
     /// Initialiseur de production : ouvre le conteneur persistant partagé
     /// (Application Support).
     convenience init() {
@@ -90,6 +94,7 @@ final class AppEnvironment {
             projectStore: projectStore,
             fileStore: fileStore
         )
+        self.scoreLibrary = ScoreLibrary(fileStore: fileStore)
     }
 
     /// Maintenance au lancement (§69A) : brouillons vides résiduels,
