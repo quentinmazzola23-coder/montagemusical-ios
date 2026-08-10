@@ -11,12 +11,34 @@
 //  active restaurée à la réouverture), §65 (« Changer de rythme » →
 //  duplication si verrouillé).
 //
-//  Règle du pouce §30 : toutes les actions ESSENTIELLES (navigation entre
-//  cases, ajout de vidéo, export) vivent dans la moitié basse — carrousel,
-//  mini-timeline et dock. « Changer de rythme » est une action SECONDAIRE
-//  non essentielle au parcours principal : elle vit dans un menu en haut à
-//  droite (écart §30 assumé — la règle vise les contrôles obligatoires du
-//  parcours principal, pas les options rares).
+//  Jalon 9 : §47.1 (aperçu LOCAL — toucher sur la zone haute quand la case
+//  active est prête), §47.2 (aperçu PRINCIPAL du préfixe continu, ZONE
+//  DROITE du dock + entrée de menu), §48 (invalidation du cache de preview
+//  dès qu'une association change), §35.3 (courbe musicale simplifiée passée à
+//  la mini-timeline — écart Jalon 7 résorbé), §49 (rattrapage du verrou de
+//  géométrie si aucune géométrie n'a été posée alors qu'une case est prête).
+//
+//  Règle du pouce §30 / §89 : toutes les actions ESSENTIELLES vivent dans la
+//  moitié basse ou sur le contenu lui-même — navigation entre cases
+//  (carrousel + mini-timeline), ajout/remplacement de vidéo et APERÇU
+//  PRINCIPAL §47.2 (dock §36), APERÇU LOCAL §47.1 (toucher sur la zone
+//  haute). Seul « Changer de rythme » (§65), action rare et non essentielle
+//  au parcours minimal §88, vit dans le menu ellipsis en haut à droite
+//  (écart §30 assumé — la règle vise les contrôles obligatoires).
+//
+//  DÉCISION Jalon 9 — placement de « Prévisualiser » (§88.11, §89, §36) :
+//  « prévisualiser le préfixe rempli » fait partie du parcours MINIMAL
+//  (§88.11) et §89 interdit de placer une action essentielle exclusivement
+//  en haut ; le menu ellipsis ne pouvait donc pas rester son seul accès. Le
+//  dock §36 n'admettant que TROIS zones, la zone DROITE porte
+//  « Prévisualiser » dès qu'un préfixe exportable existe (§51) — l'écran
+//  d'export n'existe pas avant le Jalon 10 (§85), un bouton « Export » actif
+//  ne mènerait nulle part ; sans préfixe, elle garde « Export » DÉSACTIVÉ
+//  avec son hint. L'entrée du menu est CONSERVÉE (accès secondaire
+//  redondant, jamais l'unique).
+//  Au Jalon 10, le dock retrouvera « Export » en zone droite et l'aperçu
+//  principal migrera vers la ligne « Prévisualisation » §36 (ou un accès
+//  équivalent en zone basse) — jamais vers le seul menu du haut.
 //
 //  Matériaux translucides sobres §37 (aucun verre permanent sur l'aperçu),
 //  aucune animation décorative §38, accessibilité §39 complète.
@@ -57,22 +79,39 @@ enum AssemblyViewLogic {
         let right: String
     }
 
-    /// Dérivation §36 : case vide → `[Projets] [+ Vidéo • durée] [Export]` ;
+    /// Dérivation §36 : case vide → `[Projets] [+ Vidéo • durée] [droite]` ;
     /// case remplie (tout état d'association, même non prêt) →
-    /// `[Projets] [Remplacer] [Export]`.
+    /// `[Projets] [Remplacer] [droite]`.
+    ///
+    /// ZONE DROITE — décision Jalon 9 (§88.11/§89) : dès qu'un préfixe
+    /// exportable existe (`isExportEnabled`, §51), elle porte
+    /// « Prévisualiser » — l'aperçu principal §47.2 fait partie du parcours
+    /// MINIMAL (§88.11) et §89 interdit qu'une action essentielle vive
+    /// exclusivement en haut ; l'écran d'export, lui, n'existe pas avant le
+    /// Jalon 10 (§85), donc un bouton « Export » actif ne mènerait nulle
+    /// part. Sans préfixe exportable, la zone garde « Export » DÉSACTIVÉ avec
+    /// son hint (§51 : « export désactivé si le résultat est vide ») : rien
+    /// à prévisualiser non plus, et l'utilisateur voit quelle action attend
+    /// la première case remplie. Le dock reste donc à TROIS zones (§36).
+    ///
+    /// Jalon 10 : le dock retrouvera « Export » en zone droite et l'aperçu
+    /// principal migrera vers la ligne « Prévisualisation » §36 (ou un accès
+    /// équivalent en zone basse) — jamais vers le seul menu du haut (§89).
     static func dockLabels(
         activeState: AssemblySlotState,
-        requiredDuration: MediaTime
+        requiredDuration: MediaTime,
+        isExportEnabled: Bool
     ) -> DockLabels {
+        let right = isExportEnabled ? "Prévisualiser" : "Export"
         switch activeState {
         case .empty:
-            DockLabels(
+            return DockLabels(
                 left: "Projets",
                 center: "+ Vidéo • \(requiredDuration.shortDurationString)",
-                right: "Export"
+                right: right
             )
         case .resolving, .downloading, .ready, .unavailable, .tooShort:
-            DockLabels(left: "Projets", center: "Remplacer", right: "Export")
+            return DockLabels(left: "Projets", center: "Remplacer", right: right)
         }
     }
 
@@ -93,7 +132,7 @@ enum AssemblyViewLogic {
     }
 }
 
-// MARK: - Contexte d'ouverture de la photothèque (Jalon 8)
+// MARK: - Feuilles de l'écran (Jalons 8 et 9)
 
 // Non defini par la specification — definition minimale V1.
 /// Paramètres de la feuille photothèque (§40–§46) : la case visée au moment
@@ -106,23 +145,63 @@ private struct ClipPickerContext: Identifiable {
     let requiredDuration: MediaTime
 }
 
+// Non defini par la specification — definition minimale V1.
+/// Paramètres de la feuille de prévisualisation (§47) : portée + titre
+/// affiché au-dessus du dock « Prévisualisation » (§36).
+private struct PreviewSheetContext {
+    /// Identité STABLE de la feuille (portée) — sert d'`id` à `sheet(item:)`.
+    let id: String
+    let scope: PreviewScope
+    let title: String
+}
+
+// Non defini par la specification — definition minimale V1.
+/// UNE seule feuille à la fois (photothèque §40–§46 OU prévisualisation
+/// §47) : un `sheet(item:)` unique évite les conflits de présentations
+/// concurrentes attachées à la même vue.
+private enum AssemblySheet: Identifiable {
+    case clipPicker(ClipPickerContext)
+    case preview(PreviewSheetContext)
+
+    var id: String {
+        switch self {
+        case .clipPicker(let context): "picker-\(context.id.uuidString)"
+        case .preview(let context): "preview-\(context.id)"
+        }
+    }
+}
+
+// MARK: - Déclencheur d'invalidation du cache (§48, §82)
+
+// Non defini par la specification — definition minimale V1.
+/// Valeur comparée par le `.onChange` d'invalidation du cache de preview
+/// (§48) : nombre d'associations + condensé entier de leur contenu. Deux
+/// entiers, aucune allocation — calculable à chaque passe de `body` sans
+/// coût (§82 : « projet long navigable sans perte de fluidité »).
+private struct AssemblyChangeToken: Equatable {
+    let assignmentCount: Int
+    let digest: UInt64
+}
+
 // MARK: - Écran d'assemblage (§35)
 
 /// Écran affiché par `ProjectView` quand le statut du projet est
 /// `assembling` (Jalon 7 — remplace le placeholder du Jalon 6).
 ///
 /// Structure verticale (§35) :
-/// 1. **Zone haute §35.1** : aperçu (miniature RÉELLE du rush pour une
-///    case prête depuis le Jalon 8 — placeholder neutre 16:9 sinon ; la
-///    preview vidéo §47.1 arrive au Jalon 9) avec lecture par toucher du
-///    PASSAGE MUSICAL de la case, « Plan X sur N », timestamps
-///    début → fin, durée requise ;
+/// 1. **Zone haute §35.1** : aperçu (miniature RÉELLE du rush pour une case
+///    prête — placeholder neutre 16:9 sinon), « Plan X sur N », timestamps
+///    début → fin, durée requise. Toucher : APERÇU LOCAL §47.1 sur une case
+///    prête, sinon lecture du PASSAGE MUSICAL de la case ;
 /// 2. **Carrousel §35.2** : trois cases visibles (précédente, active,
 ///    suivante), cartes à largeur tactile stable, scroll = sélection ;
-/// 3. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées,
-///    toucher/glisser = navigation rapide ;
-/// 4. **Dock contextuel §36** : `[Projets] [+ Vidéo • durée] [Export]` ou
-///    `[Projets] [Remplacer] [Export]`.
+/// 3. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées
+///    avec courbe musicale simplifiée en fond, toucher/glisser = navigation
+///    rapide ;
+/// 4. **Dock contextuel §36** : `[Projets] [+ Vidéo • durée | Remplacer]
+///    [Prévisualiser | Export]` — la zone droite porte l'aperçu principal
+///    §47.2 dès qu'un préfixe exportable existe (§51, §88.11), sinon
+///    « Export » désactivé.
 ///
 /// La case active est persistée avec un debounce ~300 ms (§59 : « debounce
 /// très court uniquement pour les changements fréquents de navigation,
@@ -164,9 +243,10 @@ struct AssemblyView: View {
 
     // MARK: État lecture (§35.1)
 
-    /// Lecture du fichier audio ORIGINAL (§16.1) — passage musical de la
-    /// case par toucher sur l'aperçu (§35.1). Le §47.1 complet
-    /// (vidéo + musique) arrive avec la preview du Jalon 9.
+    /// Lecture du fichier audio ORIGINAL (§16.1) — passage musical d'une
+    /// case NON prête par toucher sur l'aperçu (§35.1). Une case prête ouvre
+    /// l'aperçu complet §47.1 (vidéo + musique) dans `PreviewPlayerView` ;
+    /// ce lecteur est alors arrêté (jamais deux sons simultanés).
     @State private var playerController = AudioPlayerController()
     /// Vrai si `audio/` ne contient aucun fichier lisible (incohérence
     /// disque/base) — la lecture est désactivée, jamais de crash.
@@ -180,10 +260,25 @@ struct AssemblyView: View {
     /// Alerte générique d'échec (jamais silencieux).
     @State private var isPaceChangeErrorPresented = false
 
-    // MARK: État photothèque (Jalon 8, §40–§46)
+    // MARK: État des feuilles (Jalon 8 photothèque, Jalon 9 preview)
 
-    /// Case visée par la feuille photothèque — `nil` : feuille fermée.
-    @State private var pickerContext: ClipPickerContext?
+    /// Feuille présentée — `nil` : aucune (§40–§46 / §47).
+    @State private var activeSheet: AssemblySheet?
+
+    // MARK: État rattrapage de géométrie (Jalon 9, §49)
+
+    /// Vrai dès qu'un rattrapage du verrou §49 a été TENTÉ sur cet écran —
+    /// une seule tentative par ouverture : ni boucle de réessai, ni
+    /// aller-retour PhotoKit répété (l'échec reste journalisé, jamais
+    /// bloquant).
+    @State private var hasAttemptedGeometryLock = false
+
+    // MARK: État courbe musicale (§35.3, écart Jalon 7 résorbé)
+
+    /// Pics normalisés `0...1` du morceau (200 bins, `WaveformExtractor`
+    /// §16.2/§68) — fond de la mini-timeline §35.3. Vide tant que
+    /// l'extraction n'a pas abouti : la mini-timeline se dessine sans fond.
+    @State private var musicCurve: [Float] = []
 
     // MARK: État miniatures (Jalon 8, §35.1/§35.2)
 
@@ -222,12 +317,28 @@ struct AssemblyView: View {
                 assemblyContent(items: items)
             }
         }
-        // « Changer de rythme » (§65) : action SECONDAIRE non essentielle —
-        // menu ellipsis en haut à droite (écart §30 documenté en tête de
-        // fichier : la règle du pouce vise les actions essentielles).
+        // Menu ellipsis : « Changer de rythme » (§65, action rare) et un
+        // accès REDONDANT à l'aperçu principal §47.2 — l'accès de référence
+        // est la zone droite du dock (§88.11/§89, décision en tête de
+        // fichier) ; aucune action essentielle ne vit ici seulement.
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                let items = slotItems
+                // §51/§47.2 : sans préfixe continu prêt, l'aperçu principal
+                // n'a rien à lire — entrée présente mais désactivée (l'état
+                // est annoncé par VoiceOver, jamais deviné par la couleur).
+                let canPreview = AssemblyViewLogic.isExportEnabled(items: items)
                 Menu {
+                    Button("Prévisualiser") {
+                        requestPrefixPreview()
+                    }
+                    .disabled(!canPreview)
+                    .accessibilityHint(
+                        canPreview
+                            ? "Lit le montage jusqu'au premier plan non prêt."
+                            : "Remplissez la première case pour prévisualiser."
+                    )
+
                     Button("Changer de rythme") {
                         changePace()
                     }
@@ -235,7 +346,7 @@ struct AssemblyView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel("Options du projet")
-                .accessibilityHint("Contient l'action Changer de rythme.")
+                .accessibilityHint("Contient les actions Prévisualiser et Changer de rythme.")
             }
         }
         // §65 : jamais de mutation destructive — proposer la duplication.
@@ -257,19 +368,31 @@ struct AssemblyView: View {
         // DERRIÈRE la feuille à chaque avancement automatique. Les états
         // resolving/downloading/ready/unavailable des cartes se mettent à
         // jour automatiquement via les @Query (associations §13.3).
-        .sheet(item: $pickerContext) { context in
-            ClipPickerView(
-                projectID: projectID,
-                slotID: context.id,
-                slotIndex: context.slotIndex,
-                requiredDuration: context.requiredDuration,
-                onSlotChanged: { index in
-                    select(index, in: slotItems)
-                }
-            )
+        // La feuille de prévisualisation (§47) partage le MÊME point de
+        // présentation : une seule feuille à la fois.
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .clipPicker(let context):
+                ClipPickerView(
+                    projectID: projectID,
+                    slotID: context.id,
+                    slotIndex: context.slotIndex,
+                    requiredDuration: context.requiredDuration,
+                    onSlotChanged: { index in
+                        select(index, in: slotItems)
+                    }
+                )
+            case .preview(let context):
+                PreviewPlayerView(
+                    projectID: projectID,
+                    scope: context.scope,
+                    title: context.title
+                )
+            }
         }
         .task(id: projectID) {
             loadAudio()
+            await loadMusicCurve()
         }
         // §60 : restauration de la case active dès que les cases sont
         // visibles — une seule fois, valeur CLAMPÉE aux bornes.
@@ -287,6 +410,25 @@ struct AssemblyView: View {
         .onChange(of: carouselPosition) { _, newValue in
             guard let newValue, newValue != activeIndex else { return }
             selectionDidChange(to: newValue)
+        }
+        // §48 : « invalider le cache si une association change ». L'écran
+        // d'assemblage est le SEUL endroit toujours vivant pendant qu'une
+        // association bouge (il reste monté derrière la photothèque §83) :
+        // il porte donc l'invalidation pour tout le projet. Le verrouillage
+        // de géométrie (§48, second cas) invalide de son côté depuis
+        // `ClipPickerView` et depuis le rattrapage §49 ci-dessous.
+        // Déclencheur BON MARCHÉ (§82) — voir `assemblyChangeToken`.
+        .onChange(of: assemblyChangeToken) { _, _ in
+            environment.previewCache.invalidateAll(projectID: projectID)
+        }
+        // §49 (rattrapage) : une case peut être PRÊTE sans que la géométrie
+        // ait été posée (échec transitoire de `videoGeometry` au moment de
+        // l'association). Sans rattrapage, aucun chemin ne la reposerait et
+        // les aperçus retomberaient sur un repli DIFFÉRENT selon la portée,
+        // alors que §52.1 impose « toujours celle du projet ». Tenté à
+        // l'ouverture de l'écran et dès qu'une première case devient prête.
+        .task(id: hasReadyAssignment) {
+            await lockGeometryIfMissing()
         }
         // Miniatures réelles (Jalon 8, §35.1/§35.2) : chargées FENÊTRÉES —
         // les cases prêtes autour de la case active (± 2) uniquement, la
@@ -331,34 +473,52 @@ struct AssemblyView: View {
         }
     }
 
-    /// Snapshots `ProjectSlot` pour le préfixe exportable §51 — le MÊME
-    /// type et le MÊME algorithme (`contiguousReadyPrefix`) que la preview
-    /// (Jalon 9) et l'export (Jalon 10).
-    private var exportSnapshots: [ProjectSlot] {
-        let assignmentsByID = Dictionary(
-            assignmentRecords.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        return slotRecords.map { record in
-            let snapshot: ClipAssignmentSnapshot? = record.assignmentID
-                .flatMap { assignmentsByID[$0] }
-                .flatMap { assignment in
-                    ClipAssignmentStatus(rawValue: assignment.statusRaw).map { status in
-                        ClipAssignmentSnapshot(
-                            id: assignment.id,
-                            assetLocalIdentifier: assignment.assetLocalIdentifier,
-                            status: status
-                        )
-                    }
-                }
-            return ProjectSlot(
-                id: record.id,
-                index: record.index,
-                start: MediaTime(ticks: record.startTicks),
-                end: MediaTime(ticks: record.endTicks),
-                assignment: snapshot
-            )
+    // Non defini par la specification — definition minimale V1.
+    /// Déclencheur BON MARCHÉ d'invalidation du cache de preview (§48, §82).
+    ///
+    /// Une propriété calculée alimentant un `.onChange` est évaluée à CHAQUE
+    /// passe de `body` : elle doit rester O(N) en opérations ENTIÈRES, sans
+    /// allocation. Ce condensé ne construit donc aucune chaîne et ne
+    /// matérialise aucun instantané — contrairement à
+    /// `PreviewCacheKey.fingerprint`, qui compose ~120 caractères par case
+    /// (~35 Ko à 300 cases) et reste réservé à la CLÉ de cache, calculée une
+    /// fois par ouverture d'aperçu dans `PreviewPlayerView`.
+    ///
+    /// Couverture §48 — « invalider si une association change » :
+    /// - `count` attrape toute création ou suppression d'association
+    ///   (`beginAssignment`, `removeAssignment(IfCurrent)`) ;
+    /// - `digest` combine, pour chaque association, son identifiant, sa case
+    ///   et son statut : un REMPLACEMENT (§36 — même case, nouvel
+    ///   identifiant) et tout changement de statut (`resolving` →
+    ///   `downloading` §44 → `ready`, ou → `unavailable` §64 « un asset
+    ///   devient indisponible ») changent la valeur.
+    ///   La combinaison est un OU-exclusif — donc INDÉPENDANTE de l'ordre de
+    ///   la `@Query` (aucun `sort` sur les associations) : seul un vrai
+    ///   changement de contenu déclenche, jamais un simple réordonnancement.
+    ///
+    /// Les deux autres causes §48 sont couvertes AILLEURS, sans coût ici :
+    /// la géométrie du premier rush invalide depuis `ClipPickerView` et
+    /// depuis le rattrapage §49 de cet écran ; « le rythme change avant
+    /// verrouillage » détruit cet écran (retour au choix du rythme §34) ou
+    /// crée un autre projet (duplication §65).
+    ///
+    /// `updatedAt` du projet n'est volontairement PAS utilisé : le store le
+    /// touche à CHAQUE mutation (§59), y compris `setActiveSlot` — une simple
+    /// navigation dans le carrousel jetterait alors les compositions en
+    /// cache, exactement ce que §48 demande de conserver.
+    private var assemblyChangeToken: AssemblyChangeToken {
+        var digest: UInt64 = 0
+        for assignment in assignmentRecords {
+            // Mélange par association (entiers uniquement, aucune
+            // allocation) ; XOR final = indépendant de l'ordre.
+            var mixed = UInt64(bitPattern: Int64(assignment.id.hashValue))
+            mixed = mixed &* 0x0000_0100_0000_01B3
+            mixed ^= UInt64(bitPattern: Int64(assignment.slotID.hashValue))
+            mixed = mixed &* 0x0000_0100_0000_01B3
+            mixed ^= UInt64(bitPattern: Int64(assignment.statusRaw.hashValue))
+            digest ^= mixed
         }
+        return AssemblyChangeToken(assignmentCount: assignmentRecords.count, digest: digest)
     }
 
     // MARK: - État transitoire sans cases
@@ -413,6 +573,9 @@ struct AssemblyView: View {
                     activeIndex: active,
                     slotCount: items.count
                 ),
+                // §35.3 : courbe musicale simplifiée en fond (écart Jalon 7
+                // résorbé) — vide tant que l'extraction n'a pas abouti.
+                musicCurve: musicCurve,
                 onSelect: { index in
                     select(index, in: items)
                 }
@@ -432,23 +595,33 @@ struct AssemblyView: View {
     ///
     /// L'aperçu affiche la miniature RÉELLE du rush pour une case PRÊTE
     /// (Jalon 8, §35.1 — même image que sa carte du carrousel), un
-    /// placeholder neutre 16:9 sinon ; la preview vidéo arrive au Jalon 9
-    /// (§47.1). Le toucher lit le PASSAGE MUSICAL de la case (§35.1
-    /// « lecture par toucher sur l'aperçu ») — fichier original §16.1,
-    /// pause automatique à la fin de la case.
+    /// placeholder neutre 16:9 sinon.
+    ///
+    /// Toucher (§35.1 « lecture par toucher sur l'aperçu ») :
+    /// - case PRÊTE → APERÇU LOCAL §47.1 (vidéo de la case + passage musical
+    ///   correspondant, uniquement la plage de la case) en feuille ;
+    /// - case non prête (vide, en cours, indisponible) → lecture du PASSAGE
+    ///   MUSICAL seul, comme au Jalon 7 (fichier original §16.1, pause
+    ///   automatique à la fin de la case) : il n'y a pas encore de vidéo à
+    ///   montrer, mais l'utilisateur doit pouvoir entendre ce qu'il remplit.
     private func topZone(item: AssemblySlotItem, count: Int) -> some View {
         VStack(spacing: 8) {
             Button {
-                togglePassagePlayback(item: item)
+                topZoneTapped(item: item, count: count)
             } label: {
+                // Case prête : le toucher OUVRE l'aperçu §47.1 — l'icône est
+                // donc toujours « lecture », jamais l'état du lecteur audio.
+                let opensPreview = item.state == .ready
+                let playIconName = (opensPreview || !playerController.isPlaying)
+                    ? "play.fill"
+                    : "pause.fill"
                 ZStack {
                     if let image = thumbnail(for: item) {
                         // Jalon 8 (§35.1) : miniature RÉELLE du rush de la
                         // case active prête — MÊME image que sa carte du
-                        // carrousel ; remplace le placeholder neutre 16:9
-                        // (l'aperçu VIDÉO §47.1 arrive au Jalon 9). Posée en
-                        // overlay d'un gabarit fixe puis rognée : sa taille
-                        // intrinsèque n'influence pas la mise en page.
+                        // carrousel ; remplace le placeholder neutre 16:9.
+                        // Posée en overlay d'un gabarit fixe puis rognée : sa
+                        // taille intrinsèque n'influence pas la mise en page.
                         RoundedRectangle(cornerRadius: 12)
                             .fill(.quaternary)
                             .overlay(
@@ -462,7 +635,7 @@ struct AssemblyView: View {
                         // badges de la photothèque §42) — contraste garanti,
                         // l'état est AUSSI porté par `accessibilityValue`
                         // (§39, jamais la seule apparence).
-                        Image(systemName: playerController.isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: playIconName)
                             .font(.title2)
                             .foregroundStyle(.white)
                             .padding(14)
@@ -473,10 +646,10 @@ struct AssemblyView: View {
                         RoundedRectangle(cornerRadius: 12)
                             .fill(.quaternary)
                         VStack(spacing: 6) {
-                            Image(systemName: playerController.isPlaying ? "pause.fill" : "play.fill")
+                            Image(systemName: playIconName)
                                 .font(.title2)
                                 .foregroundStyle(.secondary)
-                            Text("Passage musical")
+                            Text(opensPreview ? "Aperçu du plan" : "Passage musical")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -485,15 +658,27 @@ struct AssemblyView: View {
                 .aspectRatio(16 / 9, contentMode: .fit)
             }
             .buttonStyle(.plain)
-            .disabled(isMediaUnavailable)
+            // §64 : seule la lecture du PASSAGE MUSICAL dépend du fichier
+            // audio — une case PRÊTE garde son aperçu §47.1 accessible même
+            // sans musique lisible (le lecteur expliquera l'échec, §64 :
+            // jamais un toucher sans effet).
+            .disabled(isMediaUnavailable && item.state != .ready)
             .padding(.horizontal, 24)
             .accessibilityLabel(
                 "Plan \(item.index + 1) sur \(count), "
                     + "durée requise \(item.duration.spokenString), "
                     + spokenState(item.state)
             )
-            .accessibilityValue(playerController.isPlaying ? "Lecture en cours" : "En pause")
-            .accessibilityHint("Touchez pour écouter le passage musical de ce plan.")
+            // §39 : l'état de lecture n'a de sens que pour le passage
+            // musical — une case prête ouvre un aperçu vidéo (§47.1).
+            .accessibilityValue(
+                item.state == .ready
+                    ? ""
+                    : (playerController.isPlaying ? "Lecture en cours" : "En pause")
+            )
+            .accessibilityHint(
+                previewHint(for: item)
+            )
 
             // « Plan X sur N » (§35.1) — index HUMAIN (1-based).
             Text("Plan \(item.index + 1) sur \(count)")
@@ -563,22 +748,29 @@ struct AssemblyView: View {
 
     // MARK: - Dock contextuel (§36)
 
-    /// `[Projets] [+ Vidéo • durée] [Export]` (case vide) ou
-    /// `[Projets] [Remplacer] [Export]` (case remplie). Libellés dérivés
-    /// par la logique pure `AssemblyViewLogic.dockLabels` (testée).
+    /// `[Projets] [+ Vidéo • durée] [Prévisualiser | Export]` (case vide) ou
+    /// `[Projets] [Remplacer] [Prévisualiser | Export]` (case remplie).
+    /// Libellés dérivés par la logique pure `AssemblyViewLogic.dockLabels`
+    /// (testée).
     ///
-    /// Export : DÉSACTIVÉ tant que le préfixe exportable §51 est vide —
-    /// état RÉEL calculé par `contiguousReadyPrefix`, pas un stub. Sans
-    /// association (Jalon 7), le préfixe est toujours vide : le bouton
-    /// s'activera dès la première case remplie prête (Jalon 8).
+    /// Zone droite (§88.11/§89, décision Jalon 9 documentée sur
+    /// `dockLabels`) :
+    /// - préfixe exportable §51 NON vide → « Prévisualiser », qui ouvre
+    ///   l'aperçu principal §47.2 — action du parcours minimal §88.11, donc
+    ///   accessible en ZONE BASSE et pas seulement dans le menu du haut
+    ///   (§89) ;
+    /// - préfixe vide → « Export » DÉSACTIVÉ avec son hint (§51 : « export
+    ///   désactivé si le résultat est vide ») — état RÉEL calculé par
+    ///   `contiguousReadyPrefix`, pas un stub.
     private func contextualDock(activeItem: AssemblySlotItem, items: [AssemblySlotItem]) -> some View {
-        let labels = AssemblyViewLogic.dockLabels(
-            activeState: activeItem.state,
-            requiredDuration: activeItem.duration
-        )
         // O(1) sur les items déjà matérialisés (§82 : rien de recalculé
         // pendant un glisser sur la mini-timeline) — équivalent §51 strict.
         let isExportEnabled = AssemblyViewLogic.isExportEnabled(items: items)
+        let labels = AssemblyViewLogic.dockLabels(
+            activeState: activeItem.state,
+            requiredDuration: activeItem.duration,
+            isExportEnabled: isExportEnabled
+        )
         return HStack(spacing: 8) {
             dockSecondaryButton(
                 title: labels.left,
@@ -608,10 +800,17 @@ struct AssemblyView: View {
             )
             .accessibilityHint("Ouvre la photothèque pour choisir une vidéo.")
 
-            // Droite : Export (§51) — l'écran d'export est le Jalon 10 ;
-            // l'état actif/inactif est déjà le vrai (§51).
+            // Droite : « Prévisualiser » (aperçu principal §47.2, parcours
+            // minimal §88.11) dès qu'un préfixe exportable existe ; sinon
+            // « Export » désactivé (§51). L'écran d'export arrive au
+            // Jalon 10 — le bouton ne promet donc jamais une action qui
+            // n'existe pas.
             Button {
-                requestExport()
+                if isExportEnabled {
+                    requestPrefixPreview()
+                } else {
+                    requestExport()
+                }
             } label: {
                 Text(labels.right)
                     .font(.body.weight(.medium))
@@ -626,10 +825,10 @@ struct AssemblyView: View {
             // (trait « estompé » automatique + hint) — jamais par la seule
             // couleur (§39).
             .opacity(isExportEnabled ? 1 : 0.4)
-            .accessibilityLabel("Export")
+            .accessibilityLabel(labels.right)
             .accessibilityHint(
                 isExportEnabled
-                    ? "Exporte le montage jusqu'au premier plan vide."
+                    ? "Lit le montage jusqu'au premier plan non prêt."
                     : "Remplissez la première case pour exporter."
             )
         }
@@ -694,15 +893,124 @@ struct AssemblyView: View {
         playerController.load(url: url)
     }
 
-    /// Toucher sur l'aperçu (§35.1) : lit le passage musical de la case
-    /// (`start → end`, pause automatique à `end`), ou l'arrête s'il est
-    /// déjà en cours. §47.1 complet (vidéo + musique) : Jalon 9.
+    /// Toucher sur la zone haute (§35.1) — aiguillage Jalon 9 :
+    /// - case PRÊTE → APERÇU LOCAL §47.1 (feuille `PreviewPlayerView`,
+    ///   portée `.slot`) : « disponible pour toute case remplie, même après
+    ///   un trou » ;
+    /// - sinon → passage musical seul (comportement Jalon 7).
+    private func topZoneTapped(item: AssemblySlotItem, count: Int) {
+        guard item.state == .ready else {
+            // Seule la LECTURE DU PASSAGE MUSICAL exige le fichier audio :
+            // sans lui, le bouton est déjà désactivé pour une case non prête
+            // (§39 : état annoncé) — garde de défense en profondeur.
+            guard !isMediaUnavailable else { return }
+            togglePassagePlayback(item: item)
+            return
+        }
+        // §64 : une case PRÊTE ouvre son aperçu MÊME si la musique du projet
+        // est introuvable — jamais d'échec muet. Le constructeur lèvera
+        // `missingAudio` et `PreviewPlayerView` affichera le message français
+        // prévu, ce qui explique le problème au lieu de ne rien faire.
+        // La musique de l'écran s'arrête : le lecteur de l'aperçu prend le
+        // relais (jamais deux sons simultanés).
+        playerController.stopSegment()
+        activeSheet = .preview(PreviewSheetContext(
+            id: "slot-\(item.id.uuidString)",
+            scope: .slot(item.id),
+            title: "Plan \(item.index + 1) sur \(count)"
+        ))
+    }
+
+    /// Lecture du passage musical de la case (`start → end`, pause
+    /// automatique à `end`), ou arrêt s'il est déjà en cours.
     private func togglePassagePlayback(item: AssemblySlotItem) {
         guard !isMediaUnavailable else { return }
         if playerController.isPlaying {
             playerController.stopSegment()
         } else {
             playerController.playSegment(from: item.start, to: item.end)
+        }
+    }
+
+    /// §47.2 « Aperçu principal » : commence au début et s'arrête avant la
+    /// première case non prête (`contiguousPrefix`). DEUX déclencheurs — la
+    /// zone droite du dock (accès de référence, zone basse §88.11/§89) et
+    /// l'entrée redondante du menu ; les deux sont inactifs quand le préfixe
+    /// est vide (§51), ce chemin n'est donc atteint qu'avec au moins une case
+    /// prête.
+    private func requestPrefixPreview() {
+        playerController.stopSegment()
+        activeSheet = .preview(PreviewSheetContext(
+            id: "prefix",
+            scope: .contiguousPrefix,
+            title: "Montage jusqu'au premier plan non prêt"
+        ))
+    }
+
+    // MARK: - Rattrapage du verrou de géométrie (§49, §52.1)
+
+    /// Vrai si au moins une association est PRÊTE — clé du `.task` de
+    /// rattrapage. Comparaisons de chaînes courtes sans allocation :
+    /// évaluable à chaque passe de `body` (§82).
+    private var hasReadyAssignment: Bool {
+        assignmentRecords.contains { $0.statusRaw == ClipAssignmentStatus.ready.rawValue }
+    }
+
+    /// §49 « Au premier rush prêt … enregistrer la géométrie » — RATTRAPAGE.
+    ///
+    /// Le chemin nominal verrouille depuis `ClipPickerView` juste après
+    /// `completeAssignment`. Si `videoGeometry` y a échoué (asset repassé sur
+    /// iCloud, lecture momentanément impossible) et que l'utilisateur ne
+    /// refait aucune association, le projet resterait SANS géométrie avec des
+    /// cases prêtes : chaque aperçu retomberait alors sur un repli propre à sa
+    /// portée, en contradiction avec §52.1 (« la géométrie est TOUJOURS celle
+    /// du projet »).
+    ///
+    /// Même méthode que le picker : `MediaLibraryActor.videoGeometry` puis
+    /// `ProjectStore.lockGeometry` — déjà NO-OP si une géométrie existe
+    /// (verrou définitif §49/§65), la lecture préalable évite simplement un
+    /// aller-retour PhotoKit inutile. Le rush retenu est celui de la
+    /// PREMIÈRE case prête (ordre des cases), au plus près de « premier rush »
+    /// §49. Erreur → journal seulement, JAMAIS bloquant (aucune alerte : rien
+    /// n'est cassé du point de vue de l'utilisateur).
+    private func lockGeometryIfMissing() async {
+        guard !hasAttemptedGeometryLock else { return }
+        guard let firstReady = slotItems.first(where: { $0.state == .ready }),
+              let assetID = firstReady.assetLocalIdentifier else {
+            return // aucune case prête : rien à verrouiller (§49)
+        }
+        hasAttemptedGeometryLock = true
+        let store = environment.projectStore
+        do {
+            let existing = try await store.geometry(projectID: projectID)
+            guard existing == nil else {
+                return // déjà verrouillée : rien à faire (§49)
+            }
+            let geometry = try await environment.mediaLibrary.videoGeometry(id: assetID)
+            try await store.lockGeometry(geometry, projectID: projectID)
+            environment.previewCache.invalidateAll(projectID: projectID) // §48
+        } catch {
+            environment.logger.error(
+                "Rattrapage du verrouillage de géométrie impossible : \(error.localizedDescription)"
+            )
+        }
+    }
+
+    // MARK: - Courbe musicale de la mini-timeline (§35.3)
+
+    /// Extrait 200 bins du fichier audio ORIGINAL (§16.1) — même service et
+    /// même résolution que la forme d'onde de `ProjectView` (§16.2, lecture
+    /// par blocs §68). Échec ou annulation : la courbe reste vide, la
+    /// mini-timeline se dessine sans fond (jamais bloquant).
+    private func loadMusicCurve() async {
+        guard musicCurve.isEmpty,
+              let url = environment.fileStore.audioFileURL(projectID: projectID) else { return }
+        do {
+            musicCurve = try await environment.waveformExtractor.waveform(for: url, binCount: 200)
+        } catch is CancellationError {
+            return // écran quitté pendant l'extraction : nouvelle tentative au retour
+        } catch {
+            environment.logger.error("Courbe musicale indisponible : \(error.localizedDescription)")
         }
     }
 
@@ -768,11 +1076,11 @@ struct AssemblyView: View {
     /// cours est arrêté (§35.1).
     private func requestVideoSelection(for item: AssemblySlotItem) {
         playerController.stopSegment()
-        pickerContext = ClipPickerContext(
+        activeSheet = .clipPicker(ClipPickerContext(
             id: item.id,
             slotIndex: item.index,
             requiredDuration: item.duration
-        )
+        ))
     }
 
     /// // Jalon 10 : export — le bouton n'est actif que si le préfixe §51
@@ -821,6 +1129,19 @@ struct AssemblyView: View {
     }
 
     // MARK: - Helpers accessibilité (§39)
+
+    /// Indication vocale de la zone haute (§39) — trois cas seulement :
+    /// aperçu du plan (case prête §47.1), passage musical (case non prête),
+    /// musique introuvable (§64 : la raison est DITE, jamais un bouton muet).
+    private func previewHint(for item: AssemblySlotItem) -> String {
+        if item.state == .ready {
+            return "Touchez pour voir l'aperçu de ce plan."
+        }
+        if isMediaUnavailable {
+            return "La musique du projet est introuvable : lecture impossible."
+        }
+        return "Touchez pour écouter le passage musical de ce plan."
+    }
 
     /// Forme parlée de l'état d'une case — source UNIQUE partagée avec
     /// `SlotCardView` (§39 : même vocabulaire partout sur l'écran).

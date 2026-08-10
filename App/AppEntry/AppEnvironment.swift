@@ -9,8 +9,9 @@ import SwiftData
 /// (`WaveformExtractor`) en plus de la persistance (Jalon 2) et du logger.
 /// Les services des jalons suivants s'y brancheront :
 /// - Jalon 4+ : analyse musicale (`MusicAnalyzing`), génération de scores
-///   (`EditScoreGenerating`), photothèque (`MediaLibraryBrowsing`),
-///   preview (`PreviewBuilding`), export (`ProjectExporting`).
+///   (`EditScoreGenerating`), photothèque (`MediaLibraryBrowsing`) ;
+/// - Jalon 9 : prévisualisation (`PreviewBuilder` + cache §48) ;
+/// - Jalon 10 : export (`ProjectExporting`).
 ///
 /// `@Observable` pour permettre l'injection via `.environment(_:)` et la
 /// lecture via `@Environment(AppEnvironment.self)` dans les vues.
@@ -66,6 +67,23 @@ final class AppEnvironment {
     /// avec préchargement autour de la zone visible — jamais de décodage 4K.
     let thumbnailProvider: ThumbnailProvider
 
+    /// Construction des compositions de prévisualisation (Jalon 9, §48) :
+    /// musique de zéro à la fin de la portée, plages vidéo successives sans
+    /// l'audio des rushs, transformations géométriques appliquées (§49, §50).
+    /// Type concret `@MainActor` — il porte la signature §7
+    /// `makePreview(for:scope:)` sans déclarer la conformance (le résultat
+    /// `AVPlayerItem` n'est pas `Sendable` ; voir PreviewBuilder.swift).
+    let previewBuilder: PreviewBuilder
+
+    /// Cache des COMPOSITIONS de prévisualisation (Jalon 9, §48 : « mettre en
+    /// cache la composition tant que les associations ne changent pas »).
+    /// Le cache conserve un couple immuable composition/videoComposition —
+    /// jamais un `AVPlayerItem`, qui ne peut être rattaché qu'à un seul
+    /// lecteur : l'item est reconstruit à chaque présentation. Invalidé par
+    /// `invalidateAll(projectID:)` dès qu'une association ou la géométrie
+    /// change.
+    let previewCache: PreviewCache
+
     /// Initialiseur de production : ouvre le conteneur persistant partagé
     /// (Application Support).
     convenience init() {
@@ -104,8 +122,11 @@ final class AppEnvironment {
             fileStore: fileStore
         )
         self.scoreLibrary = ScoreLibrary(fileStore: fileStore)
-        self.mediaLibrary = MediaLibraryActor()
+        let mediaLibrary = MediaLibraryActor()
+        self.mediaLibrary = mediaLibrary
         self.thumbnailProvider = ThumbnailProvider()
+        self.previewBuilder = PreviewBuilder(fileStore: fileStore, mediaLibrary: mediaLibrary)
+        self.previewCache = PreviewCache()
     }
 
     /// Maintenance au lancement (§69A) : brouillons vides résiduels,

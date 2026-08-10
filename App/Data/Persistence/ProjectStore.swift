@@ -153,6 +153,10 @@ actor ProjectStore {
     /// Les partitions copiées (`analysis/scores-v1.json`, §11) restent
     /// valides : le choix du rythme relit simplement la famille des trois
     /// modes, aucun recalcul (§61).
+    ///
+    /// La GÉOMÉTRIE n'est PAS copiée (§49) : sans case ni association, la
+    /// copie n'a pas de « premier rush » — c'est le sien qui fixera sa
+    /// géométrie.
     func duplicateForPaceChange(projectID: UUID, now: Date = .now) throws -> UUID {
         try performDuplication(projectID: projectID, now: now, resetPaceInCopy: true)
     }
@@ -162,9 +166,9 @@ actor ProjectStore {
     ///
     /// `resetPaceInCopy` :
     /// - `false` : copie complète — statut, rythme, cases et associations ;
-    /// - `true`  : copie SANS cases ni associations, rythme désélectionné,
-    ///   statut `awaitingPaceSelection`, case active 0 (la copie repart au
-    ///   choix du rythme, §65).
+    /// - `true`  : copie SANS cases ni associations NI géométrie, rythme
+    ///   désélectionné, statut `awaitingPaceSelection`, case active 0 (la
+    ///   copie repart au choix du rythme, §65).
     private func performDuplication(
         projectID: UUID,
         now: Date,
@@ -195,7 +199,15 @@ actor ProjectStore {
             activeSlotIndex: resetPaceInCopy ? 0 : source.activeSlotIndex,
             audioRelativePath: source.audioRelativePath,
             analysisRelativePath: source.analysisRelativePath,
-            geometryData: source.geometryData,
+            // §49 « le premier rush valide fixe la géométrie » : une copie
+            // POUR CHANGER DE RYTHME repart sans cases ni associations —
+            // elle ne peut donc pas hériter d'un verrou posé par un rush
+            // qu'elle n'utilise pas (sinon son propre premier rush ne
+            // fixerait JAMAIS sa géométrie, et §52.1 « toujours celle du
+            // projet » s'appliquerait à un rapport étranger). Copie
+            // complète : le verrou suit ses associations (§65 : « toutes
+            // les cases retirées : conserver la géométrie »).
+            geometryData: resetPaceInCopy ? nil : source.geometryData,
             lastAlbumIdentifier: source.lastAlbumIdentifier,
             analysisVersion: source.analysisVersion,
             scoreVersion: source.scoreVersion
@@ -991,5 +1003,111 @@ extension ProjectStore {
             indexes[slot.id] = slot.index
         }
         return indexes
+    }
+}
+
+// MARK: - Géométrie et instantané de projet (Jalon 9)
+
+// Non defini par la specification — definition minimale V1 (contrat Jalon 9).
+extension ProjectStore {
+
+    /// Géométrie verrouillée du projet (§14), ou `nil` tant qu'aucun rush
+    /// prêt ne l'a fixée (§49).
+    ///
+    /// La géométrie est persistée en JSON dans `ProjectRecord.geometryData`
+    /// (schéma §10 verbatim : une colonne `Data?`, aucune colonne dédiée par
+    /// champ). Une donnée illisible n'est PAS masquée par un `nil` : l'erreur
+    /// de décodage remonte à l'appelant — un `nil` silencieux ferait croire à
+    /// un projet non verrouillé alors que `lockGeometry` refuse d'écrire par
+    /// dessus (verrou définitif §49).
+    func geometry(projectID: UUID) throws -> ProjectGeometry? {
+        guard let data = try requireProject(projectID).geometryData else { return nil }
+        return try JSONDecoder().decode(ProjectGeometry.self, from: data)
+    }
+
+    /// Verrouille la géométrie du projet au premier rush prêt (§49 étapes 4
+    /// et 5 : « enregistrer la géométrie », « ne plus jamais la modifier
+    /// automatiquement »).
+    ///
+    /// **NO-OP si une géométrie existe déjà** — le verrou est DÉFINITIF :
+    /// - §14/§49 : « Le premier rush valide fixe la géométrie. Elle ne change
+    ///   plus ensuite, même si un rush plus défini est ajouté » ;
+    /// - §65 : « premier rush supprimé après verrouillage : conserver la
+    ///   géométrie » et « toutes les cases retirées : conserver la géométrie
+    ///   pour éviter un basculement inattendu ».
+    ///
+    /// Le test porte sur `geometryData != nil` (présence de l'octet), jamais
+    /// sur le décodage : même illisible, une géométrie enregistrée reste un
+    /// verrou — jamais de re-verrouillage silencieux par un rush suivant.
+    ///
+    /// Un appel sur un projet déjà verrouillé ne touche donc NI la géométrie
+    /// NI `updatedAt` : aucun effet de bord observable.
+    func lockGeometry(_ geometry: ProjectGeometry, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        guard record.geometryData == nil else { return } // verrou définitif (§49, §65)
+        record.geometryData = try JSONEncoder().encode(geometry)
+        try touchAndSave(record) // autosauvegarde immédiate (§59)
+    }
+
+    /// Instantané `Sendable` complet du projet (§51) : cases TRIÉES par
+    /// index, association de chaque case, géométrie verrouillée.
+    ///
+    /// Seule forme du projet qui traverse la frontière de l'acteur (§8) :
+    /// aucun `PersistentModel` n'en sort. C'est l'entrée du préfixe
+    /// exportable (`contiguousReadyPrefix`, §51), de la prévisualisation
+    /// (§47) et de l'export (§7 `ProjectExporting`).
+    ///
+    /// Cases retenues : celles du rythme CHOISI (après §34, `selectPace`
+    /// n'en persiste pas d'autres — le filtre est une simple ceinture de
+    /// sécurité).
+    ///
+    /// AUCUN rythme choisi → instantané SANS cases : aucun montage n'est en
+    /// cours, donc aucun préfixe exportable (§51 — export et aperçu principal
+    /// désactivés). Renvoyer toutes les cases mélangerait les cases de
+    /// plusieurs modes dans un même instantané (indices en doublon, temps qui
+    /// se chevauchent) — un « montage » que l'utilisateur n'a jamais demandé.
+    ///
+    /// Statut d'association illisible (base corrompue, jamais attendu) →
+    /// `unavailable` : le repli ne peut JAMAIS valoir `ready`, donc une
+    /// donnée douteuse n'entre jamais dans un préfixe exportable (§51).
+    func projectSnapshot(projectID: UUID) throws -> ProjectSnapshot {
+        let project = try requireProject(projectID)
+
+        var slots: [ProjectSlot] = []
+        // Aucun rythme choisi (§34 pas encore franchi) → aucune case dans
+        // l'instantané : aucun montage en cours, donc aucun préfixe
+        // exportable (§51). La géométrie, elle, reste rapportée : le verrou
+        // §49 survit à un retour au choix du rythme.
+        if let selectedModeRaw = project.selectedPaceRaw {
+            var assignmentsBySlotID: [UUID: ClipAssignmentRecord] = [:]
+            for assignment in try fetchAssignments(projectID: projectID) {
+                assignmentsBySlotID[assignment.slotID] = assignment
+            }
+
+            slots = try fetchSlots(projectID: projectID)
+                .filter { $0.scoreModeRaw == selectedModeRaw }
+                .sorted { $0.index < $1.index }
+                .map { slotRecord in
+                    ProjectSlot(
+                        id: slotRecord.id,
+                        index: slotRecord.index,
+                        start: MediaTime(ticks: slotRecord.startTicks),
+                        end: MediaTime(ticks: slotRecord.endTicks),
+                        assignment: assignmentsBySlotID[slotRecord.id].map { assignment in
+                            ClipAssignmentSnapshot(
+                                id: assignment.id,
+                                assetLocalIdentifier: assignment.assetLocalIdentifier,
+                                status: ClipAssignmentStatus(rawValue: assignment.statusRaw) ?? .unavailable
+                            )
+                        }
+                    )
+                }
+        }
+
+        let geometry = try project.geometryData.map {
+            try JSONDecoder().decode(ProjectGeometry.self, from: $0)
+        }
+
+        return ProjectSnapshot(projectID: projectID, slots: slots, geometry: geometry)
     }
 }

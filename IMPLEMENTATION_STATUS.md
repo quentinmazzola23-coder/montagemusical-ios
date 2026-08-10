@@ -18,8 +18,8 @@
 | 5 — Générateur de scores | ✅ Terminé (CI verte, run 31398882782) |
 | 6 — Interface analyse / choix rythme | ✅ Terminé (CI verte, run 31419878812) |
 | 7 — Timeline d'assemblage | ✅ Terminé (CI verte, run 31422818870) |
-| 8 — PhotoKit | 🔄 En cours |
-| 9 — Géométrie et preview | ⬜ Non démarré |
+| 8 — PhotoKit | ✅ Terminé (CI verte, run 31428288550) |
+| 9 — Géométrie et preview | 🔄 En cours |
 | 10 — Export | ⬜ Non démarré |
 | 11 — Moteur avancé Core ML | ⬜ Non démarré |
 | 12 — Polissage | ⬜ Non démarré |
@@ -143,8 +143,8 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 **Fichiers** : `App/Features/ProjectTimeline/AssemblyModels.swift` (états de case §13.3/§44/§64 avec forme parlée unique §39, géométrie durée-proportionnelle testable), `SlotCardView.swift` (cartes §35.2 : vide « Plan 8 / 1,20 s / + », remplie miniature+numéro+durée+coche, downloading/unavailable/tooShort/resolving distincts sans seule couleur), `AssemblyMiniTimelineView.swift` (§35.3 : segments proportionnels précalculés, position courante, fenêtre carrousel, limite d'export §51, tap+drag, fluide à 300+ cases §82), `AssemblyView.swift` (écran §35 complet : zone haute avec Plan X sur N + timestamps + durée requise + lecture du passage musical au toucher, carrousel 3 cases à 55 % scroll+tap, dock contextuel §36 avec Export à l'état réel §51, debounce navigation 300 ms §59, case active restaurée §60), `AudioPlayerController.playSegment/stopSegment`, routage `ProjectView`, 2 fichiers de tests logique.
 
 **Écarts documentés (résorption prévue)** :
-- §35.1 : aperçu = placeholder 16:9 + lecture du passage **musical** seul — miniature vidéo au Jalon 8, aperçu vidéo+musique §47.1 au Jalon 9.
-- §35.3 : « courbe musicale simplifiée » non dessinée dans la mini-timeline — résorption au Jalon 9 (la waveform 200 bins est déjà disponible).
+- §35.1 : aperçu = placeholder 16:9 + lecture du passage **musical** seul — **résorbé** : miniature vidéo au Jalon 8, aperçu vidéo+musique §47.1 au Jalon 9.
+- §35.3 : « courbe musicale simplifiée » non dessinée dans la mini-timeline — **résorbé au Jalon 9** : `AssemblyView` extrait 200 bins (`WaveformExtractor`) et les passe en fond à `AssemblyMiniTimelineView`.
 - §30 : « Changer de rythme » (action secondaire §65) dans un Menu ellipsis en haut à droite — hors zone pouce, assumé pour une action non essentielle ; réexamen au Jalon 12.
 - Pause de fin de passage par observateur 10 Hz : dépassement max ~100 ms (affichage V1) — boundary observer exact envisageable au Jalon 9.
 - Dynamic Type : hauteurs de cartes/carrousel fixes — passage à @ScaledMetric au Jalon 12 (§87 accessibilité).
@@ -157,8 +157,28 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 
 **Écarts documentés** :
 - **Badge iCloud §42 sous réserve d'API** : PhotoKit n'expose aucune API publique synchrone « asset non téléchargé localement » — `isCloudAsset` vaut `false` en pratique et le badge (code en place) ne s'affichera que si l'API l'expose un jour ; l'état iCloud RÉEL est découvert à la résolution (§44 : progression + statut `downloading` dynamiques).
-- **« Recadrage potentiel » §42 → Jalon 9** : l'indicateur nécessite la géométrie verrouillée du projet (§49), qui n'existe pas encore.
+- **« Recadrage potentiel » §42 → Jalon 9** : ~~l'indicateur nécessite la géométrie verrouillée du projet (§49), qui n'existe pas encore~~ — **résorbé au Jalon 9** : le badge compare la FORME du rush (`max/min` des pixels encodés) à celle de la géométrie verrouillée, et la cellule montre l'aperçu du crop réel §50. Limite résiduelle documentée au Jalon 9 (orientation absente des métadonnées PhotoKit).
 - **Miniatures du carrousel chargées FENÊTRÉES** (case active ± 2, taille de carte en pixels — approximation stable documentée) — jamais tout le projet ; la zone haute réutilise la même image que la carte.
+
+## Jalon 9 — Géométrie et preview (10 août 2026)
+
+**Fichiers** : `App/Services/Preview/GeometryLock.swift` (calculs PURS §49/§50 : dimensions orientées via `preferredTransform`, rapport simplifié par PGCD, `renderSize` à dimensions paires, `cropToFillTransform` centré `scale = max(...)`), `App/Services/Preview/PreviewBuilder.swift` (§48 : `AVMutableComposition` — musique de zéro à la fin de la portée, plages vidéo successives, **aucun audio de rush**, transformations géométriques, `AVPlayerItem`), `App/Services/Preview/PreviewCache.swift` (§48/§69 : clé `projectID + portée + empreinte des cases/associations/géométrie`, LRU borné, `invalidateAll(projectID:)`), `App/Features/Preview/PreviewPlayerView.swift` (feuille §47 : portées `.slot`/`.contiguousPrefix`, dock §36 ligne « Prévisualisation », erreurs françaises §64), extensions `ProjectStore` (`geometry`, `lockGeometry` **no-op définitif**, `projectSnapshot` §51), `App/Features/ClipPicker/ClipPickerView.swift` (verrouillage §49 après la première association prête, badge « recadrage » §42, aperçu du crop réel §50 dans la grille, « Montage complet » → Prévisualiser §46), `App/Features/ProjectTimeline/AssemblyView.swift` (aperçu local §47.1 par toucher sur la zone haute, aperçu principal §47.2 au dock, invalidation §48, courbe musicale §35.3, rattrapage du verrou §49), `App/Services/MediaLibrary/MediaLibraryActor.videoGeometry`. Tests : `GeometryLockTests`, `GeometryLockStoreTests`, `ClipPickerCropLogicTests`, compléments `AssemblyViewLogicTests`.
+
+**Choix** :
+- **Zone droite du dock §36 = « Prévisualiser »** dès qu'un préfixe exportable existe (§51), « Export » désactivé sinon. Raison : §88.11 (« prévisualiser le préfixe rempli ») appartient au parcours minimal et §89 interdit de placer une action essentielle **exclusivement en haut** — le menu ellipsis ne pouvait donc pas rester son seul accès ; l'écran d'export n'existant pas avant le Jalon 10, un bouton « Export » actif ne mènerait nulle part. Le dock garde **trois zones** (§36). L'entrée « Prévisualiser » du menu est conservée comme accès redondant. **Au Jalon 10**, le dock retrouvera « Export » en zone droite et l'aperçu principal migrera vers la ligne « Prévisualisation » §36 (ou un accès équivalent en zone basse).
+- **Badge « recadrage » §42 : comparaison de FORMES**, pas de rapports orientés. `PHAsset.pixelWidth/pixelHeight` sont les dimensions **encodées** (un rush portrait iPhone est annoncé 1920×1080) alors que la géométrie §14 est orientée : la comparaison naïve marquait « recadrage » **tous** les rushs d'un projet 9:16. Le badge compare désormais `max/min` de chaque côté, avec une tolérance relative de 1 %.
+- **Aperçu du crop réel §50 dans la grille** : la miniature **déjà chargée** est rendue dans un cadre au rapport de la géométrie verrouillée, `scaledToFill` + `clipped` (crop-to-fill centré, identique à la composition). Aucun décodage supplémentaire (§42 : jamais de décodage 4K pour la grille) ; cellule carrée conservée tant qu'aucune géométrie n'est verrouillée.
+- **Déclencheur d'invalidation §48 bon marché** (§82) : le `.onChange` de `AssemblyView` compare `(nombre d'associations, condensé entier XOR de id + case + statut)` — que des entiers, aucune allocation, indépendant de l'ordre de la `@Query`. L'empreinte textuelle `PreviewCacheKey.fingerprint` (~120 caractères par case, ~35 Ko à 300 cases) reste réservée à la **clé de cache**, calculée une fois par ouverture d'aperçu. `ProjectRecord.updatedAt` **écarté** comme déclencheur : le store le touche à chaque mutation (§59), y compris `setActiveSlot` — une simple navigation dans le carrousel jetterait les compositions que §48 demande de conserver.
+- **Rattrapage du verrou §49** : si `videoGeometry` échoue au moment de l'association, aucun chemin ne reposerait la géométrie et les aperçus retomberaient sur un repli différent selon la portée (contraire à §52.1). À l'ouverture d'`AssemblyView`, une géométrie absente + une case prête déclenchent une tentative unique (même méthode que le picker, `lockGeometry` déjà no-op si verrouillée) ; erreur → journal seulement, jamais bloquant.
+- **Aperçu d'une case prête sans musique lisible** : le toucher ouvre quand même l'aperçu (§64) — le constructeur lève `missingAudio` et l'écran affiche le message français prévu, au lieu d'un toucher sans effet. Seule la lecture du passage musical reste conditionnée au fichier audio.
+- **Duplication et géométrie (§49/§65)** : `duplicateForPaceChange` ne copie **pas** `geometryData` — la copie repart sans cases ni associations, son propre premier rush fixera sa géométrie ; la duplication complète, elle, conserve le verrou avec ses associations.
+- **`projectSnapshot` sans rythme choisi** : instantané **sans cases** — aucun montage en cours, donc aucun préfixe exportable (§51). Renvoyer toutes les cases mélangeait les modes (indices en doublon, temps qui se chevauchent).
+
+**Écarts documentés (Jalon 9)** :
+- **§52 profil maître → Jalon 10** : `projectSnapshot` fournit déjà la matière (préfixe §51 + géométrie), mais la sélection de résolution/cadence/HDR (§52.2–§52.4) appartient à l'export. La preview rend dans la géométrie verrouillée (§52.1), sans choisir de clip maître.
+- **Limite du badge « recadrage » §42** : deux cadrages de même forme mais d'orientation opposée (paysage 16:9 dans un projet 9:16) ne portent pas le badge, alors qu'ils seront recadrés. L'orientation réelle exigerait de décoder la vidéo, ce que §42 interdit pour la grille ; le cas est montré **visuellement** par l'aperçu du crop réel de la cellule.
+- **« Export » désactivé au dock de prévisualisation** : `PreviewPlayerView` affiche les trois zones §36 (`[Retour] [Lecture/Pause] [Export]`) mais la zone droite est inactive — l'export arrive au Jalon 10 (§85), avec un hint VoiceOver explicite plutôt qu'une promesse non tenue.
+- Vérification Mac (⌘B/⌘U) toujours requise : projet généré sous Windows.
 
 ## Distribution et vérification (pipeline ClipFlow)
 

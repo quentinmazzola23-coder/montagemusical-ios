@@ -26,10 +26,31 @@
 //  Présentée en sheet par `AssemblyView` ; `onSlotChanged` recentre le
 //  carrousel derrière la feuille à chaque avancement §46.
 //
-//  Écarts documentés (Jalon 8) :
-//  - « recadrage potentiel » §42 : REPORTÉ au Jalon 9 — l'indicateur de
-//    recadrage dépend de la géométrie verrouillée du projet (§49), qui
-//    n'existe pas encore ;
+//  Jalon 9 (§49, §50, §42) :
+//  - VERROUILLAGE DE GÉOMÉTRIE : après la PREMIÈRE association réellement
+//    prête (`completeAssignment`), la géométrie du projet est lue sur le rush
+//    (`MediaLibraryActor.videoGeometry` → `GeometryLock`, §49) et verrouillée
+//    (`ProjectStore.lockGeometry`, NO-OP si elle existe déjà — verrou
+//    définitif §49/§65). Jamais bloquant : un échec laisse l'association
+//    valide et la prochaine association réussie retentera le verrouillage ;
+//  - badge « recadrage » §42 : les cellules dont la FORME (`max/min` des
+//    pixels encodés — indépendante de l'orientation, cf.
+//    `ClipPickerCropLogic`) diffère de celle de la géométrie verrouillée
+//    portent un indicateur (§50 : ces rushs restent AUTORISÉS —
+//    crop-to-fill centré) ;
+//  - §50 « aperçu du crop réel » : la miniature de chaque cellule est rendue
+//    dans le RAPPORT de la géométrie verrouillée, remplie et centrée comme le
+//    crop-to-fill de la composition — aucun décodage supplémentaire, seul le
+//    cadre de rendu change (§42 : jamais de décodage 4K pour la grille). Sans
+//    géométrie verrouillée, la cellule garde son rendu carré.
+//
+//  Écarts documentés :
+//  - badge « recadrage » §42, limite d'orientation : `PHAsset.pixelWidth/
+//    pixelHeight` sont les dimensions ENCODÉES (un rush portrait iPhone est
+//    annoncé 1920×1080). La comparaison porte donc sur des FORMES : un
+//    paysage 16:9 dans un projet 9:16 a la même forme et NE porte pas le
+//    badge, alors qu'il sera recadré — c'est l'aperçu du crop réel de la
+//    cellule qui le montre visuellement ;
 //  - badge iCloud §42 : le code du badge (`cloudBadge`) est en place mais
 //    PhotoKit n'expose AUCUNE API publique « asset non téléchargé
 //    localement » — `VideoAssetSummary.isCloudAsset` vaut donc `false` en
@@ -144,6 +165,95 @@ private final class MainActorRelay {
     }
 }
 
+// MARK: - Recadrage potentiel (§42, §50)
+
+// Non defini par la specification — definition minimale V1.
+/// Logique PURE de la grille face à la géométrie verrouillée : badge
+/// « recadrage » §42 (un rush de cadrage différent sera recadré en
+/// crop-to-fill centré §50 — il reste parfaitement AUTORISÉ, l'indicateur est
+/// informatif) et cadre d'aperçu du crop réel §50.
+///
+/// Comparaison sur les métadonnées PhotoKit `pixelWidth`/`pixelHeight`
+/// (§42 : jamais de décodage 4K pour afficher la grille) contre
+/// `aspectWidth`/`aspectHeight` du projet. Tolérance RELATIVE de 1 % : deux
+/// tournages « 16:9 » réels (1920×1080, 3840×2160, 1918×1080…) ne doivent pas
+/// déclencher un faux badge à cause d'un pixel d'arrondi.
+///
+/// **Comparaison de FORMES, pas de rapports orientés.**
+/// `PHAsset.pixelWidth/pixelHeight` sont les dimensions ENCODÉES, sans
+/// orientation appliquée : un rush filmé en portrait sur iPhone est annoncé
+/// 1920×1080 alors qu'il s'affiche 1080×1920. La géométrie du projet §14,
+/// elle, porte un rapport ORIENTÉ (`GeometryLock.geometry` applique
+/// `preferredTransform`). Comparer les deux directement marquerait
+/// « recadrage » TOUS les rushs d'un projet 9:16 — y compris ceux du même
+/// cadrage. On compare donc des formes indépendantes de l'orientation :
+/// `max/min` de chaque côté (1,777… pour 16:9 comme pour 9:16).
+///
+/// LIMITE RESTANTE assumée : deux cadrages de même forme mais d'orientation
+/// opposée (un paysage 16:9 dans un projet 9:16) ne portent PAS le badge,
+/// alors qu'ils seront bel et bien recadrés (§50). Sans l'orientation réelle
+/// du rush, l'affirmer serait deviner — et §42 interdit de décoder la vidéo
+/// pour afficher la grille. Ce cas est montré VISUELLEMENT par l'aperçu du
+/// crop réel de la cellule (`previewSize`, §50) : la miniature y est rendue
+/// dans le rapport du projet, bords rognés compris. Le badge reste un
+/// indice, jamais une décision : il n'interdit rien et n'entre dans aucun
+/// calcul — le recadrage RÉEL est calculé à la composition
+/// (`GeometryLock.cropToFillTransform`, §50) sur `naturalSize` +
+/// `preferredTransform`.
+enum ClipPickerCropLogic {
+
+    /// Tolérance relative sur la forme (1 %).
+    static let ratioTolerance = 0.01
+
+    /// Forme d'un cadrage, indépendante de l'orientation : `max/min` — 16:9
+    /// et 9:16 partagent la même valeur (1,777…), 1:1 vaut 1.
+    static func shape(width: Int, height: Int) -> Double {
+        Double(max(width, height)) / Double(min(width, height))
+    }
+
+    static func requiresCrop(
+        assetPixelWidth: Int,
+        assetPixelHeight: Int,
+        geometry: ProjectGeometry?
+    ) -> Bool {
+        // Aucune géométrie (aucune case remplie §49) → aucun badge.
+        guard let geometry else { return false }
+        guard assetPixelWidth > 0, assetPixelHeight > 0,
+              geometry.aspectWidth > 0, geometry.aspectHeight > 0 else {
+            return false // métadonnée absente : ne rien affirmer
+        }
+        let assetShape = shape(width: assetPixelWidth, height: assetPixelHeight)
+        let projectShape = shape(width: geometry.aspectWidth, height: geometry.aspectHeight)
+        return abs(assetShape - projectShape) > ratioTolerance * projectShape
+    }
+
+    /// §50 « Afficher dans la grille un aperçu du crop réel » : taille du
+    /// cadre de rendu d'une miniature dans une cellule carrée de côté `side`.
+    ///
+    /// Le cadre prend le RAPPORT de la géométrie verrouillée (§14/§49) et
+    /// s'inscrit dans la cellule (la plus grande dimension occupe tout le
+    /// côté). Combiné à `scaledToFill` + `clipped`, il reproduit exactement
+    /// le crop-to-fill CENTRÉ de §50 : la miniature déjà chargée est
+    /// simplement rognée à l'affichage — aucun décodage supplémentaire, la
+    /// grille reste dans le contrat §42/§67.
+    ///
+    /// Sans géométrie verrouillée (aucune case remplie §49), rien à
+    /// simuler : la cellule garde son rendu CARRÉ.
+    static func previewSize(side: CGFloat, geometry: ProjectGeometry?) -> CGSize {
+        guard let geometry,
+              geometry.aspectWidth > 0, geometry.aspectHeight > 0 else {
+            return CGSize(width: side, height: side)
+        }
+        let ratio = CGFloat(geometry.aspectWidth) / CGFloat(geometry.aspectHeight)
+        if ratio >= 1 {
+            // Paysage ou carré : largeur pleine, hauteur réduite.
+            return CGSize(width: side, height: side / ratio)
+        }
+        // Portrait : hauteur pleine, largeur réduite.
+        return CGSize(width: side * ratio, height: side)
+    }
+}
+
 // MARK: - Badge de durée de la grille (§42)
 
 private extension MediaTime {
@@ -226,6 +336,19 @@ struct ClipPickerView: View {
     @State private var activeAlert: PickerAlert?
     @State private var retrySelection: PendingSelection?
 
+    // MARK: État géométrie (Jalon 9, §49, §42)
+
+    /// Géométrie VERROUILLÉE du projet (§49) — `nil` tant qu'aucune case
+    /// n'est prête : dans ce cas aucune cellule ne porte le badge
+    /// « recadrage » (§42, rien à comparer).
+    @State private var lockedGeometry: ProjectGeometry?
+
+    // MARK: État prévisualisation (Jalon 9, §46, §47.2)
+
+    /// §46 : « Montage complet » → Fermer / Prévisualiser — l'aperçu
+    /// principal (§47.2) s'ouvre au-dessus de la feuille photothèque.
+    @State private var isPreviewPresented = false
+
     // MARK: Préchargement des miniatures (§42)
 
     @State private var prefetchedIDs: Set<String> = []
@@ -243,6 +366,9 @@ struct ClipPickerView: View {
     private let previewAuthorization: MediaLibraryAuthorization
     private let previewAssets: [VideoAssetSummary]
     private let previewUsed: [String: [Int]]
+    /// Géométrie synthétique des previews SwiftUI (badge §42 visible sans
+    /// PhotoKit ni persistance).
+    private let previewGeometry: ProjectGeometry?
 
     // MARK: - Initialisation (contrat Jalon 8)
 
@@ -262,6 +388,7 @@ struct ClipPickerView: View {
         self.previewAuthorization = .full
         self.previewAssets = []
         self.previewUsed = [:]
+        self.previewGeometry = nil
         _currentSlotIndex = State(initialValue: slotIndex)
         _slotRecords = Query(
             filter: #Predicate<ProjectSlotRecord> { slot in
@@ -281,7 +408,8 @@ struct ClipPickerView: View {
         previewPhase: Phase,
         previewAuthorization: MediaLibraryAuthorization = .full,
         previewAssets: [VideoAssetSummary] = [],
-        previewUsed: [String: [Int]] = [:]
+        previewUsed: [String: [Int]] = [:],
+        previewGeometry: ProjectGeometry? = nil
     ) {
         self.projectID = projectID
         self.initialSlotID = slotID
@@ -292,6 +420,7 @@ struct ClipPickerView: View {
         self.previewAuthorization = previewAuthorization
         self.previewAssets = previewAssets
         self.previewUsed = previewUsed
+        self.previewGeometry = previewGeometry
         _currentSlotIndex = State(initialValue: slotIndex)
         _slotRecords = Query(
             filter: #Predicate<ProjectSlotRecord> { slot in
@@ -591,12 +720,20 @@ struct ClipPickerView: View {
         )
         let slot = currentSlot
         let requiredTicks = slot.requiredDuration.ticks
+        // Miniature demandée au format CARRÉ de la cellule (§42, jamais de
+        // décodage 4K) : le cadre d'aperçu §50 ne dépasse jamais `side` dans
+        // l'une ou l'autre dimension — l'image reste donc assez définie sans
+        // décodage supplémentaire.
         let pixelSize = CGSize(width: side * displayScale, height: side * displayScale)
+        // §50 « aperçu du crop réel » : cadre au rapport de la géométrie
+        // verrouillée (§49), carré tant qu'aucune case n'est remplie.
+        let previewSize = ClipPickerCropLogic.previewSize(side: side, geometry: lockedGeometry)
         return LazyVGrid(columns: columns, spacing: spacing) {
             ForEach(assets, id: \.localIdentifier) { summary in
                 ClipPickerCellView(
                     summary: summary,
                     side: side,
+                    previewSize: previewSize,
                     pixelSize: pixelSize,
                     // §43 : premier filtre sur PHAsset.duration — une cellule
                     // trop courte est grisée et INTERDITE à la sélection.
@@ -606,6 +743,15 @@ struct ClipPickerView: View {
                     ),
                     usedIndexes: usedIndexesByAsset[summary.localIdentifier] ?? [],
                     downloadFraction: progressModel.fractionByAssetID[summary.localIdentifier],
+                    // §42 « recadrage potentiel » (Jalon 9) : FORME
+                    // différente de celle de la géométrie verrouillée §49 —
+                    // informatif, le rush reste autorisé (§50 crop-to-fill
+                    // centré).
+                    requiresCrop: ClipPickerCropLogic.requiresCrop(
+                        assetPixelWidth: summary.pixelWidth,
+                        assetPixelHeight: summary.pixelHeight,
+                        geometry: lockedGeometry
+                    ),
                     isPreview: previewPhase != nil,
                     onTap: {
                         assetTapped(summary)
@@ -671,11 +817,6 @@ struct ClipPickerView: View {
             Text("Toutes les cases sont remplies.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("La prévisualisation arrive dans une prochaine version.")
-                .font(.footnote)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
             Spacer(minLength: 0)
             Spacer(minLength: 0)
         }
@@ -690,12 +831,12 @@ struct ClipPickerView: View {
                 ) {
                     dismiss()
                 }
-                // // Jalon 9 : preview — stub journalisé (contrat Jalon 8).
+                // §46 : « proposer Fermer/Prévisualiser » — l'aperçu
+                // principal §47.2 s'ouvre AU-DESSUS de la photothèque
+                // (Jalon 9) ; la feuille reste donc en place derrière et
+                // « Fermer » ramène toujours au montage.
                 Button {
-                    environment.logger.info(
-                        "Prévisualisation demandée — la preview arrive au Jalon 9."
-                    )
-                    dismiss()
+                    isPreviewPresented = true
                 } label: {
                     Text("Prévisualiser")
                         .font(.body.weight(.semibold))
@@ -705,11 +846,20 @@ struct ClipPickerView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Prévisualiser")
-                .accessibilityHint("La prévisualisation arrive dans une prochaine version.")
+                .accessibilityHint("Lit le montage depuis le début.")
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 12)
+        }
+        // Feuille attachée à la SEULE phase « Montage complet » : aucun
+        // conflit avec la feuille des albums §41 présentée par le corps.
+        .sheet(isPresented: $isPreviewPresented) {
+            PreviewPlayerView(
+                projectID: projectID,
+                scope: .contiguousPrefix, // §47.2 : préfixe continu prêt
+                title: "Montage complet"
+            )
         }
     }
 
@@ -790,6 +940,7 @@ struct ClipPickerView: View {
             selectedAlbumTitle = "Récents"
             assets = previewAssets
             usedIndexesByAsset = previewUsed
+            lockedGeometry = previewGeometry
             phase = previewPhase
             return
         }
@@ -799,6 +950,10 @@ struct ClipPickerView: View {
         switch auth {
         case .full, .limited:
             phase = .browsing
+            // §42/§49 : la géométrie verrouillée pilote le badge
+            // « recadrage » des cellules — chargée AVANT la grille pour que
+            // les badges soient corrects dès le premier affichage.
+            await loadGeometry()
             await loadLibrary()
         case .denied, .notDetermined:
             // `notDetermined` après une demande est anormal : traité comme
@@ -1018,6 +1173,12 @@ struct ClipPickerView: View {
                         observedDurationTicks: resolved.duration.ticks,
                         projectID: projectID
                     )
+                    // §49 (Jalon 9) : la case vient de devenir PRÊTE — si le
+                    // projet n'a pas encore de géométrie, ce rush la
+                    // verrouille définitivement. Jamais bloquant (§46
+                    // continue quoi qu'il arrive), no-op côté store si une
+                    // géométrie existe déjà.
+                    await lockGeometryIfNeeded(assetLocalIdentifier: assetID)
                     // e. §46 : haptique LÉGÈRE puis avancement automatique
                     // — sauf si la feuille a DÉJÀ avancé au premier callback
                     // réseau (§44 : jamais deux avances pour une sélection).
@@ -1237,6 +1398,56 @@ struct ClipPickerView: View {
         }
     }
 
+    // MARK: - Géométrie verrouillée (Jalon 9, §49, §42, §48)
+
+    /// Lit la géométrie déjà verrouillée du projet (§49) pour alimenter le
+    /// badge « recadrage » §42. Échec non bloquant : sans géométrie, aucune
+    /// cellule n'est badgée — jamais de badge faux.
+    private func loadGeometry() async {
+        do {
+            lockedGeometry = try await environment.projectStore.geometry(projectID: projectID)
+        } catch {
+            environment.logger.error("Lecture de la géométrie impossible : \(error.localizedDescription)")
+        }
+    }
+
+    /// §49 « Géométrie verrouillée par le premier rush ».
+    ///
+    /// Appelée après CHAQUE association devenue prête. Décisions :
+    /// 1. **Lecture d'abord** : si une géométrie existe déjà, on sort
+    ///    immédiatement — `lockGeometry` serait de toute façon un NO-OP
+    ///    (verrou définitif §49, conservé même si le premier rush est
+    ///    supprimé §65), mais on évite un aller-retour PhotoKit inutile ;
+    /// 2. **Mesure sur le rush** : `MediaLibraryActor.videoGeometry(id:)` lit
+    ///    `naturalSize` + `preferredTransform` DANS le rappel PhotoKit et ne
+    ///    renvoie qu'un `ProjectGeometry` `Sendable` (`GeometryLock`, §49) ;
+    /// 3. **Jamais bloquant** : un échec (asset repassé sur iCloud, lecture
+    ///    impossible) est journalisé sans alerte — l'association reste
+    ///    valide, l'avancement §46 se poursuit et la prochaine association
+    ///    prête retentera le verrouillage ;
+    /// 4. **Invalidation §48** : « la géométrie change lors du premier
+    ///    rush » → tout item de prévisualisation en cache pour ce projet est
+    ///    jeté.
+    private func lockGeometryIfNeeded(assetLocalIdentifier: String) async {
+        let store = environment.projectStore
+        do {
+            if let existing = try await store.geometry(projectID: projectID) {
+                lockedGeometry = existing
+                return
+            }
+            let geometry = try await environment.mediaLibrary.videoGeometry(id: assetLocalIdentifier)
+            try await store.lockGeometry(geometry, projectID: projectID)
+            // Relecture : la source de vérité reste le store — si un autre
+            // chemin avait verrouillé entre-temps, c'est SA géométrie qui
+            // compte (le verrou est définitif §49).
+            let stored = try await store.geometry(projectID: projectID)
+            lockedGeometry = stored ?? geometry
+            environment.previewCache.invalidateAll(projectID: projectID) // §48
+        } catch {
+            environment.logger.error("Verrouillage de la géométrie impossible : \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Préchargement des miniatures (§42)
 
     /// Apparition d'une cellule : préchargement PAR LOTS autour de la zone
@@ -1375,19 +1586,30 @@ struct ClipPickerView: View {
 
 // MARK: - Cellule de la grille (§42)
 
-/// Cellule carrée : miniature (jamais de décodage 4K — `ThumbnailProvider`),
-/// badge de durée, badge iCloud, badge « déjà utilisé », progression de
-/// téléchargement (§44). Incompatible §43 : grisée à 0,35 et DÉSACTIVÉE —
-/// « incompatible, trop courte » annoncé à VoiceOver (§39).
+/// Cellule carrée (gabarit de grille STABLE) contenant l'APERÇU DU CROP RÉEL
+/// §50 : la miniature (jamais de décodage 4K — `ThumbnailProvider`) est rendue
+/// dans un cadre au rapport de la géométrie verrouillée §49, remplie et
+/// centrée — exactement le crop-to-fill de §50. Sans géométrie, le cadre
+/// reste carré. Autour : badge de durée, badge iCloud, badge « déjà utilisé »,
+/// badge « recadrage » §42, progression de téléchargement (§44).
+/// Incompatible §43 : grisée à 0,35 et DÉSACTIVÉE — « incompatible, trop
+/// courte » annoncé à VoiceOver (§39).
 private struct ClipPickerCellView: View {
     @Environment(AppEnvironment.self) private var environment
 
     let summary: VideoAssetSummary
+    /// Côté de la cellule carrée — gabarit de grille et cible tactile (§39).
     let side: CGFloat
+    /// §50 : taille du cadre d'aperçu (rapport de la géométrie §49), inscrite
+    /// dans la cellule. Égale à `side × side` sans géométrie verrouillée.
+    let previewSize: CGSize
     let pixelSize: CGSize
     let isCompatible: Bool
     let usedIndexes: [Int]
     let downloadFraction: Double?
+    /// §42 « recadrage potentiel » : FORME différente de celle de la
+    /// géométrie verrouillée §49 — le rush reste autorisé (§50).
+    let requiresCrop: Bool
     let isPreview: Bool
     let onTap: () -> Void
     let onAppeared: () -> Void
@@ -1399,31 +1621,12 @@ private struct ClipPickerCellView: View {
 
     var body: some View {
         Button(action: onTap) {
+            // Gabarit CARRÉ conservé (largeur de colonne stable, cible
+            // tactile ≥ 44 pt §39) ; l'aperçu §50 s'inscrit dedans.
             ZStack {
-                Rectangle()
-                    .fill(.quaternary)
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Image(systemName: "video")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
+                cropPreview
             }
             .frame(width: side, height: side)
-            .clipped()
-            .overlay(alignment: .bottomLeading) { durationBadge }
-            .overlay(alignment: .topTrailing) {
-                if summary.isCloudAsset { cloudBadge }
-            }
-            .overlay(alignment: .topLeading) {
-                if !usedIndexes.isEmpty { usedBadge }
-            }
-            .overlay {
-                if let downloadFraction { progressOverlay(downloadFraction) }
-            }
             // §43 : cellule trop courte grisée — l'état est AUSSI porté par
             // le libellé VoiceOver et la désactivation, jamais la seule
             // apparence (§39).
@@ -1445,6 +1648,48 @@ private struct ClipPickerCellView: View {
         .accessibilityHint(isCompatible ? "Associe cette vidéo au plan courant." : "")
     }
 
+    // MARK: Aperçu du crop réel (§50)
+
+    /// §50 « Afficher dans la grille un aperçu du crop réel » : la miniature
+    /// est rendue dans le RAPPORT de la géométrie verrouillée (§49) avec le
+    /// MÊME centrage que le crop-to-fill de la composition — `scaledToFill`
+    /// remplit le cadre, `clipped` rogne les bords qui débordent, le contenu
+    /// reste centré. Aucun décodage supplémentaire : c'est la miniature déjà
+    /// chargée, seul le cadre de rendu change (§42/§67).
+    ///
+    /// Les badges suivent le cadre d'aperçu (et non la cellule) : ils restent
+    /// posés sur l'image montrée, jamais dans les marges vides.
+    private var cropPreview: some View {
+        ZStack {
+            Rectangle()
+                .fill(.quaternary)
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "video")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: previewSize.width, height: previewSize.height)
+        .clipped()
+        .overlay(alignment: .bottomLeading) { durationBadge }
+        .overlay(alignment: .topTrailing) {
+            if summary.isCloudAsset { cloudBadge }
+        }
+        .overlay(alignment: .topLeading) {
+            if !usedIndexes.isEmpty { usedBadge }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if requiresCrop { cropBadge }
+        }
+        .overlay {
+            if let downloadFraction { progressOverlay(downloadFraction) }
+        }
+    }
+
     // MARK: Badges
 
     /// Badge « m:ss » (§42) — fond sombre constant pour rester lisible sur
@@ -1462,6 +1707,19 @@ private struct ClipPickerCellView: View {
 
     private var cloudBadge: some View {
         Image(systemName: "icloud")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(4)
+            .background(.black.opacity(0.55), in: Circle())
+            .padding(4)
+            .accessibilityHidden(true)
+    }
+
+    /// Badge « recadrage potentiel » (§42) — icône, jamais la seule couleur
+    /// (§39) ; l'information est AUSSI dans le libellé VoiceOver. Le rush
+    /// reste sélectionnable : V1 recadre en crop-to-fill centré (§50).
+    private var cropBadge: some View {
+        Image(systemName: "crop")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(.white)
             .padding(4)
@@ -1510,6 +1768,11 @@ private struct ClipPickerCellView: View {
         if let first = usedIndexes.first {
             label += ", déjà utilisée au plan \(first + 1)"
         }
+        if requiresCrop {
+            // §42 « recadrage potentiel » : informatif, la vidéo reste
+            // sélectionnable (§50 : crop-to-fill centré).
+            label += ", format différent, sera recadrée"
+        }
         if let downloadFraction {
             label += ", téléchargement \(Int((min(max(downloadFraction, 0), 1) * 100).rounded())) pour cent"
         }
@@ -1529,12 +1792,23 @@ private func makePreviewSummaries() -> [VideoAssetSummary] {
         75_000, 60_000, 660_000, 48_000, 180_000, 96_000
     ]
     return durations.enumerated().map { index, ticks in
-        VideoAssetSummary(
+        // Trois formes mélangées face à un projet verrouillé en 16:9 (§49) :
+        // - 16:9 encodé paysage (forme 1,78) → aucun badge ;
+        // - 16:9 encodé portrait (forme 1,78 elle aussi) → aucun badge non
+        //   plus : c'est la LIMITE documentée du badge §42, que l'aperçu du
+        //   crop réel (§50) montre visuellement ;
+        // - 4:3 (forme 1,33) → badge « recadrage » §42.
+        let pixels: (width: Int, height: Int) = switch index % 3 {
+        case 1: (width: 1080, height: 1920) // portrait 9:16 (métadonnée encodée)
+        case 2: (width: 1440, height: 1080) // 4:3 — forme réellement différente
+        default: (width: 1920, height: 1080) // 16:9 paysage
+        }
+        return VideoAssetSummary(
             localIdentifier: "preview-\(index)",
             duration: MediaTime(ticks: ticks),
             isCloudAsset: index % 4 == 2,
-            pixelWidth: 1920,
-            pixelHeight: 1080
+            pixelWidth: pixels.width,
+            pixelHeight: pixels.height
         )
     }
 }
@@ -1543,7 +1817,10 @@ private func makePreviewSummaries() -> [VideoAssetSummary] {
     let container = try! ModelContainerFactory.makeInMemory()
     let environment = AppEnvironment(modelContainer: container)
     // Durée requise 1,20 s : les assets de 0,75 s et 0,50 s apparaissent
-    // grisés (§43), « preview-1 » porte le badge déjà utilisé (§45).
+    // grisés (§43), « preview-1 » porte le badge déjà utilisé (§45), les
+    // rushs 4:3 portent le badge « recadrage » (§42) face à une géométrie
+    // verrouillée en 16:9 (§49) et toutes les cellules montrent l'aperçu du
+    // crop réel en 16:9 (§50).
     return ClipPickerView(
         projectID: UUID(),
         slotID: UUID(),
@@ -1551,7 +1828,13 @@ private func makePreviewSummaries() -> [VideoAssetSummary] {
         requiredDuration: MediaTime(ticks: 72_000),
         previewPhase: .browsing,
         previewAssets: makePreviewSummaries(),
-        previewUsed: ["preview-1": [0, 4]]
+        previewUsed: ["preview-1": [0, 4]],
+        previewGeometry: ProjectGeometry(
+            aspectWidth: 16,
+            aspectHeight: 9,
+            orientation: .landscape,
+            lockedByAssetIdentifier: "preview-0"
+        )
     )
     .environment(environment)
     .modelContainer(container)

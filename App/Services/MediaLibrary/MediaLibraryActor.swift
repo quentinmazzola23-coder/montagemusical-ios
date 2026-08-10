@@ -212,6 +212,78 @@ actor MediaLibraryActor {
         )
     }
 
+    // MARK: - Géométrie du projet (§49, Jalon 9)
+
+    /// Géométrie que ce rush IMPOSE au projet (§49 : « au premier rush
+    /// prêt… ») — appelée après une association devenue `ready`, puis
+    /// verrouillée par `ProjectStore.lockGeometry` (NO-OP si une géométrie
+    /// existe déjà : le verrou est définitif §49/§65).
+    ///
+    /// `naturalSize` et `preferredTransform` sont lus DANS le rappel
+    /// PhotoKit, comme `resolvedVideoAsset` : l'`AVAsset` (non-`Sendable`)
+    /// ne traverse JAMAIS la frontière de l'acteur — seul le
+    /// `ProjectGeometry` (`Sendable`) en sort, calculé par le type PUR
+    /// `GeometryLock` (dimensions orientées + rapport simplifié §49).
+    ///
+    /// `isNetworkAccessAllowed = false` : le rush vient d'être résolu pour
+    /// remplir la case (§43/§44), il est donc local — relancer un
+    /// téléchargement iCloud pour relire deux métadonnées serait coûteux et
+    /// inutile. Si l'asset est malgré tout indisponible, l'erreur remonte
+    /// (`icloudUnavailable`/`assetNotFound`) et l'appelant laisse la
+    /// géométrie non verrouillée : la prochaine association prête réessaiera.
+    func videoGeometry(id: String) async throws -> ProjectGeometry {
+        try requireReadAccess()
+
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        guard let phAsset = fetched.firstObject else {
+            throw MediaLibraryError.assetNotFound // §64 : asset supprimé
+        }
+        guard phAsset.mediaType == .video else {
+            throw MediaLibraryError.noVideoTrack
+        }
+
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = false
+        options.deliveryMode = .highQualityFormat
+
+        let guardBox = SingleResumeGuard()
+        return try await withCheckedThrowingContinuation { continuation in
+            PHImageManager.default().requestAVAsset(
+                forVideo: phAsset,
+                options: options
+            ) { avAsset, _, info in
+                guard guardBox.beginResume() else { return }
+                guard let avAsset else {
+                    continuation.resume(throwing: Self.resolutionError(info: info))
+                    return
+                }
+                // Même contrat d'usage que `resolvedVideoAsset` : l'asset
+                // n'est lu QUE dans cette Task (lectures AVFoundation
+                // thread-safe), jamais partagé ni muté ailleurs.
+                let assetBox = UncheckedSendableBox(value: avAsset)
+                Task {
+                    let avAsset = assetBox.value
+                    do {
+                        let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
+                        guard let videoTrack = videoTracks.first else {
+                            throw MediaLibraryError.noVideoTrack // §64
+                        }
+                        let naturalSize = try await videoTrack.load(.naturalSize)
+                        let preferredTransform = try await videoTrack.load(.preferredTransform)
+                        continuation.resume(returning: GeometryLock.geometry(
+                            naturalWidth: Int(naturalSize.width.rounded()),
+                            naturalHeight: Int(naturalSize.height.rounded()),
+                            preferredTransform: preferredTransform,
+                            assetIdentifier: id
+                        ))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+
     /// Requête `PHImageManager.requestAVAsset(forVideo:)` pontée en async,
     /// avec TOUTES les lectures AVFoundation effectuées DANS le rappel
     /// PhotoKit : l'`AVAsset` (non-`Sendable`) reste dans la région du
@@ -297,6 +369,76 @@ actor MediaLibraryActor {
                         continuation.resume(throwing: error)
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: - URL locale du rush (Jalon 9 — prévisualisation §47/§48)
+
+    /// URL du FICHIER local d'un rush, pour construire la composition de
+    /// prévisualisation (§48) et d'export (§54).
+    ///
+    /// Pourquoi une URL et non un `AVAsset` : un `AVAsset` n'est pas
+    /// `Sendable` et ne traverse JAMAIS la frontière de l'acteur (§8, règle
+    /// de frontière du fichier). Une `URL` est `Sendable` : elle est extraite
+    /// DANS le rappel PhotoKit (`avAsset as? AVURLAsset`) et c'est la seule
+    /// valeur qui en sort. L'appelant reconstruit son propre `AVURLAsset`
+    /// dans SON domaine d'isolation, sans partage d'objet.
+    ///
+    /// Aucune boîte `@unchecked Sendable` n'est nécessaire ici, contrairement
+    /// à `resolvedVideoAsset` : la lecture est SYNCHRONE dans le rappel
+    /// (aucune `Task` capturant l'asset).
+    ///
+    /// Continuation UNIQUE garantie par `SingleResumeGuard` (PhotoKit peut
+    /// rappeler son handler : versions dégradées, annulation).
+    ///
+    /// Limite V1 documentée : un asset PhotoKit sans fichier unique
+    /// (ralenti/timelapse recomposé, montage iCloud) est livré comme
+    /// `AVComposition` et non comme `AVURLAsset` → `assetNotFound`. La
+    /// prévisualisation refuse alors ce rush (l'appelant le traduit en
+    /// « asset indisponible ») plutôt que d'afficher une image fausse ;
+    /// l'export du Jalon 10 pourra passer par un `AVAssetExportSession`
+    /// PhotoKit pour ces cas.
+    ///
+    /// - Parameters:
+    ///   - id: identifiant local PhotoKit du rush.
+    ///   - allowNetwork: autorise le téléchargement iCloud à la demande
+    ///     (§44). Une case `ready` a déjà été résolue : la prévisualisation
+    ///     passe `false` pour ne jamais déclencher un téléchargement
+    ///     surprise pendant une lecture.
+    func videoAssetURL(id: String, allowNetwork: Bool) async throws -> URL {
+        try requireReadAccess()
+
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        guard let phAsset = fetched.firstObject else {
+            throw MediaLibraryError.assetNotFound // §64 : asset supprimé
+        }
+        guard phAsset.mediaType == .video else {
+            throw MediaLibraryError.noVideoTrack // §64 : refuser sans piste vidéo
+        }
+
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = allowNetwork // §44 : à la demande
+        options.deliveryMode = .highQualityFormat
+
+        let guardBox = SingleResumeGuard()
+        return try await withCheckedThrowingContinuation { continuation in
+            PHImageManager.default().requestAVAsset(
+                forVideo: phAsset,
+                options: options
+            ) { avAsset, _, info in
+                guard guardBox.beginResume() else { return }
+                guard let avAsset else {
+                    continuation.resume(throwing: Self.resolutionError(info: info))
+                    return
+                }
+                // Seule l'URL (`Sendable`) sort du rappel — l'`AVAsset` reste
+                // dans la région du rappel PhotoKit (§8).
+                guard let urlAsset = avAsset as? AVURLAsset else {
+                    continuation.resume(throwing: MediaLibraryError.assetNotFound)
+                    return
+                }
+                continuation.resume(returning: urlAsset.url)
             }
         }
     }

@@ -3,12 +3,13 @@
 //  MontageMusical
 //
 //  Mini-timeline de l'écran d'assemblage — Jalon 7, spec §35.3 :
-//  largeur proportionnelle aux durées, cases remplies/vides distinguées,
-//  position courante, fenêtre du carrousel, limite d'export partiel (§51).
+//  largeur proportionnelle aux durées, courbe musicale simplifiée, cases
+//  remplies/vides distinguées, position courante, fenêtre du carrousel,
+//  limite d'export partiel (§51).
 //  Toucher déplace la sélection ; glisser permet une navigation rapide.
-//  ÉCART documenté (IMPLEMENTATION_STATUS.md) : la « courbe musicale
-//  simplifiée » §35.3 n'est pas encore dessinée — résorption au Jalon 9
-//  (waveform 200 bins déjà disponible).
+//  Jalon 9 : l'écart §35.3 est RÉSORBÉ — la courbe musicale simplifiée
+//  (200 bins de `WaveformExtractor`, §16.2/§68) est dessinée EN FOND, très
+//  discrète, sous les segments.
 //
 //  Canvas pur, O(N) par frame, fluide à 300+ cases (§67, §82) : les
 //  segments sont précalculés à la construction (aucun tri, aucune
@@ -39,6 +40,17 @@ struct AssemblyMiniTimelineView: View {
     let activeIndex: Int
     /// Fenêtre du carrousel (§35.3) : indices des cases visibles.
     let windowRange: ClosedRange<Int>
+    /// Courbe musicale simplifiée (§35.3) : pics normalisés `0...1`
+    /// (`WaveformExtractor`, 200 bins). Vide par défaut — les tests et les
+    /// previews antérieurs au Jalon 9 continuent de compiler et la vue se
+    /// dessine simplement sans fond.
+    ///
+    /// La courbe est ÉTIRÉE sur toute la largeur de la mini-timeline, qui
+    /// représente la durée cumulée des cases. C'est exact quand la partition
+    /// couvre le morceau (cas normal §13/§28) et reste une approximation
+    /// d'AFFICHAGE sinon : rien n'en est dérivé, aucun calcul temporel (§9)
+    /// ne la consulte.
+    var musicCurve: [Float] = []
     /// Toucher/glisser déplace la sélection (§35.3).
     let onSelect: (Int) -> Void
 
@@ -63,11 +75,13 @@ struct AssemblyMiniTimelineView: View {
         slots: [AssemblySlotItem],
         activeIndex: Int,
         windowRange: ClosedRange<Int>,
+        musicCurve: [Float] = [],
         onSelect: @escaping (Int) -> Void
     ) {
         self.slots = slots
         self.activeIndex = activeIndex
         self.windowRange = windowRange
+        self.musicCurve = musicCurve
         self.onSelect = onSelect
 
         // Précalcul O(N) : positions par ticks CUMULÉS entiers, une seule
@@ -137,6 +151,14 @@ struct AssemblyMiniTimelineView: View {
         let trackBottom = size.height - underlineHeight - 2
         let trackHeight = trackBottom - trackTop
         guard trackHeight > 0 else { return }
+
+        // Courbe musicale simplifiée (§35.3) — dessinée EN PREMIER : elle
+        // reste sous les segments, très discrète (le contenu prioritaire
+        // reste l'état des cases, §37).
+        drawMusicCurve(
+            in: context,
+            rect: CGRect(x: 0, y: trackTop, width: width, height: trackHeight)
+        )
 
         // Un chemin par classe visuelle : nombre de commandes de dessin
         // constant, coût O(N) uniquement dans la construction des rects.
@@ -231,6 +253,45 @@ struct AssemblyMiniTimelineView: View {
         }
     }
 
+    /// Courbe musicale simplifiée §35.3 : enveloppe symétrique remplie,
+    /// opacité très faible — un repère de structure (couplets/refrains,
+    /// silences) sous les segments, JAMAIS un élément interactif.
+    ///
+    /// Un seul chemin fermé (aller par le haut, retour par le bas) : coût
+    /// O(bins) avec ~200 bins, négligeable devant les segments (§67, §82).
+    /// `.secondary` très atténuée : lisible en clair comme en sombre, et
+    /// l'information de la mini-timeline ne dépend jamais de cette teinte
+    /// (§39).
+    private func drawMusicCurve(in context: GraphicsContext, rect: CGRect) {
+        guard musicCurve.count > 1, rect.width > 0, rect.height > 0 else { return }
+        let midY = rect.midY
+        let amplitude = rect.height / 2
+        let step = rect.width / CGFloat(musicCurve.count - 1)
+
+        var envelope = Path()
+        for (index, sample) in musicCurve.enumerated() {
+            // Défense en profondeur : le contrat garantit 0...1, un bin hors
+            // bornes ne doit jamais casser le dessin (même règle que
+            // `WaveformView`).
+            let clamped = CGFloat(min(max(sample, 0), 1))
+            let point = CGPoint(x: rect.minX + CGFloat(index) * step, y: midY - clamped * amplitude)
+            if index == 0 {
+                envelope.move(to: point)
+            } else {
+                envelope.addLine(to: point)
+            }
+        }
+        for index in stride(from: musicCurve.count - 1, through: 0, by: -1) {
+            let clamped = CGFloat(min(max(musicCurve[index], 0), 1))
+            envelope.addLine(to: CGPoint(
+                x: rect.minX + CGFloat(index) * step,
+                y: midY + clamped * amplitude
+            ))
+        }
+        envelope.closeSubpath()
+        context.fill(envelope, with: .color(.secondary.opacity(0.18)))
+    }
+
     // MARK: - Gestes (§35.3 : toucher déplace, glisser navigue vite)
 
     /// `DragGesture(minimumDistance: 0)` couvre le tap (un seul événement)
@@ -305,10 +366,29 @@ private func makePreviewItems() -> [AssemblySlotItem] {
 }
 
 #Preview("Mini-timeline") {
+    // Sans courbe musicale : forme d'appel antérieure au Jalon 9 (paramètre
+    // `musicCurve` omis — valeur par défaut vide).
     AssemblyMiniTimelineView(
         slots: makePreviewItems(),
         activeIndex: 3,
         windowRange: 2...4,
+        onSelect: { _ in }
+    )
+    .frame(height: 44)
+    .padding()
+}
+
+#Preview("Mini-timeline — courbe musicale (§35.3)") {
+    AssemblyMiniTimelineView(
+        slots: makePreviewItems(),
+        activeIndex: 3,
+        windowRange: 2...4,
+        musicCurve: (0..<200).map { index in
+            // Structure synthétique : intro calme, montée, drop, break.
+            let phase = Double(index) / 200
+            let envelope = phase < 0.15 ? 0.25 : (phase < 0.45 ? 0.55 : (phase < 0.75 ? 0.95 : 0.4))
+            return Float(envelope * (0.7 + 0.3 * abs(sin(Double(index) * 0.35))))
+        },
         onSelect: { _ in }
     )
     .frame(height: 44)
