@@ -691,31 +691,6 @@ extension ProjectStore {
         }
     }
 
-    /// Duplication POUR CHANGER DE RYTHME (§65 : « proposer duplication,
-    /// pas mutation destructive ») : copie du projet SANS cases ni
-    /// associations, remise au choix du rythme — l'ORIGINAL reste
-    /// strictement intact (cases, associations, statut, rythme).
-    ///
-    /// C'est l'issue proposée par l'interface quand le rythme est
-    /// verrouillé (`paceLockedByAssignments`) : la copie repart de
-    /// `awaitingPaceSelection` et `selectPace` y réussit.
-    ///
-    /// Deux sauvegardes s'enchaînent (celle de `duplicate` puis celle-ci) ;
-    /// une interruption entre les deux laisse au pire une copie complète
-    /// ordinaire — jamais d'état corrompu.
-    func duplicateForPaceChange(projectID: UUID, now: Date = .now) throws -> UUID {
-        let newProjectID = try duplicate(projectID: projectID, now: now)
-        let copy = try requireProject(newProjectID)
-        for slot in try fetchSlots(projectID: newProjectID) {
-            modelContext.delete(slot)
-        }
-        for assignment in try fetchAssignments(projectID: newProjectID) {
-            modelContext.delete(assignment)
-        }
-        copy.selectedPaceRaw = nil
-        copy.activeSlotIndex = 0
-        copy.statusRaw = ProjectStatus.awaitingPaceSelection.rawValue
-        try touchAndSave(copy)
-        return newProjectID
-    }
+    // `duplicateForPaceChange` (§65) est définie plus haut, à côté de
+    // `duplicate` — les deux partagent `performDuplication(resetPaceInCopy:)`.
 }
