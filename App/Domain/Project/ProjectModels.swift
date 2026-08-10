@@ -88,16 +88,20 @@ final class ProjectRecord {
 /// Enregistrement SwiftData d'une case de montage.
 ///
 /// Contraintes de base de données (spec §10.1) :
-/// - unicité logique de `(projectID, scoreModeRaw, index)` ;
-/// - index strictement croissant ;
-/// - `endTicks > startTicks` ;
+/// - unicité logique de `(projectID, scoreModeRaw, index)` — exprimée par
+///   `#Unique` ci-dessous ET validée par `ProjectStore.insertSlots` (erreurs
+///   typées récupérables) ;
+/// - index strictement croissant — validé par `ProjectStore.insertSlots` ;
+/// - `endTicks > startTicks` — validé par `ProjectStore.insertSlots` ;
 /// - une association maximum par case ;
 /// - suppression en cascade des cases et associations lors de la suppression
-///   définitive d'un projet ;
+///   définitive d'un projet — cascade manuelle dans `ProjectStore.delete` ;
 /// - aucun changement des temps après verrouillage du rythme, sauf migration
 ///   explicite ou duplication.
 @Model
 final class ProjectSlotRecord {
+    #Unique<ProjectSlotRecord>([\.projectID, \.scoreModeRaw, \.index])
+
     var id: UUID
     var projectID: UUID
     var scoreModeRaw: String

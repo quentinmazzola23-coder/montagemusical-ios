@@ -12,7 +12,7 @@
 |---|---|
 | 0 — Bootstrap | ✅ Terminé (build CI vert) |
 | 1 — Temps et domaine | ✅ Terminé (tests CI verts) |
-| 2 — Projets et persistance | ⬜ Non démarré |
+| 2 — Projets et persistance | 🔄 Implémenté, CI en attente |
 | 3 — Import audio | ⬜ Non démarré |
 | 4 — Moteur musical déterministe | ⬜ Non démarré |
 | 5 — Générateur de scores | ⬜ Non démarré |
@@ -83,6 +83,14 @@
 ## Revue adversariale (10 août 2026)
 
 Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation Swift 6/pbxproj, qualité des tests) : 17 findings, 0 bloqueur, 1 majeur, 16 mineurs. Corrigés dans la foulée : règle d'arrondi unifiée « ,5 supérieur » (`init(seconds:)` aligné sur `roundedDivision`), `roundedDivision` réécrite sans multiplication (zéro débordement possible), `init?(cmTime:)` failable + PGCD, catalogue d'assets créé, assertions tautologiques des tests remplacées par des égalités complètes de structs (`Equatable` ajouté à `ProjectSlot`/`ClipAssignmentSnapshot`), cas `.resolving`/`.tooShort` ajoutés aux tests de préfixe, documentation de suivi corrigée.
+
+## Jalon 2 — Projets et persistance (10 août 2026)
+
+**Fichiers ajoutés/réécrits** : `App/Data/Persistence/ModelContainerFactory.swift`, `App/Data/Persistence/ProjectStore.swift` (@ModelActor §8), `App/Data/ProjectFiles/ProjectFileStore.swift` (arbre §11), `App/Domain/Project/ProjectSummary.swift`, `App/Domain/Project/AutomaticTitle.swift` (titre §10), `App/Features/ProjectList/ProjectListView.swift` (accueil §31 complet), `App/Features/ProjectTimeline/ProjectView.swift` (projet vide §32, dock §36), `App/AppEntry/*` (wiring), `Tests/Unit/AutomaticTitleTests.swift`, `Tests/Unit/ProjectStoreTests.swift`.
+
+**Choix techniques** : cascade §10.1 manuelle (schéma verbatim sans relations SwiftData) + `#Unique<ProjectSlotRecord>` sur `(projectID, scoreModeRaw, index)` ; contraintes §10.1 validées dans `insertSlots` par erreurs typées (`ProjectStoreError`), signature Sendable (`[EditSlotDefinition]`, records construits dans l'acteur) ; ordre fichiers-avant-save partout (jamais d'enregistrement fantôme : createDraft, duplicate avec rollback) ; maintenance au lancement §69A (brouillons vides résiduels, dossiers orphelins, vidage `temp/`) + balayage à l'apparition de l'accueil ; anti double-tap sur `+` ; titre de duplication « … (copie) » (non spécifié, choix V1) ; protection fichiers `completeUntilFirstUserAuthentication` (choix V1).
+
+**Écart/risque connu** : la liste (@Query mainContext) dépend de la propagation inter-contextes SwiftData depuis le contexte de l'acteur — à vérifier sur simulateur/appareil ; repli documenté dans le code (ProjectView re-vérifie auprès du store avant tout retour).
 
 ## Distribution et vérification (pipeline ClipFlow)
 
