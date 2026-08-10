@@ -203,7 +203,9 @@ struct ProjectListView: View {
         switch status {
         case .draft: return "Brouillon"
         case .importingAudio: return "Import de la musique"
-        case .analyzing: return "Analyse en cours"
+        // Jalon 3 : le moteur d'analyse n'existe pas encore (Jalon 4) —
+        // libellé honnête, jamais de fausse activité en cours (§33).
+        case .analyzing: return "En attente d'analyse"
         case .awaitingPaceSelection: return "Choix du rythme"
         case .assembling: return "Montage"
         case .partiallyPreviewable: return "Montage partiel"
@@ -347,6 +349,12 @@ struct ProjectListView: View {
                 }
             } catch {
                 environment.logger.error("Nettoyage du brouillon vide impossible : \(error.localizedDescription)")
+            }
+            // Retour à l'accueil : re-balayage complet — couvre un brouillon
+            // redevenu `draft` APRÈS le premier nettoyage (import échoué en
+            // arrière-plan, §62).
+            if newPath.isEmpty {
+                await sweepEmptyDrafts()
             }
         }
     }

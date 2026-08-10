@@ -12,8 +12,8 @@
 |---|---|
 | 0 — Bootstrap | ✅ Terminé (build CI vert) |
 | 1 — Temps et domaine | ✅ Terminé (tests CI verts) |
-| 2 — Projets et persistance | 🔄 Implémenté, CI en attente |
-| 3 — Import audio | ⬜ Non démarré |
+| 2 — Projets et persistance | ✅ Terminé (CI verte, run 31382568859) |
+| 3 — Import audio | 🔄 Implémenté, CI en attente |
 | 4 — Moteur musical déterministe | ⬜ Non démarré |
 | 5 — Générateur de scores | ⬜ Non démarré |
 | 6 — Interface analyse / choix rythme | ⬜ Non démarré |
@@ -91,6 +91,14 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 **Choix techniques** : cascade §10.1 manuelle (schéma verbatim sans relations SwiftData) + `#Unique<ProjectSlotRecord>` sur `(projectID, scoreModeRaw, index)` ; contraintes §10.1 validées dans `insertSlots` par erreurs typées (`ProjectStoreError`), signature Sendable (`[EditSlotDefinition]`, records construits dans l'acteur) ; ordre fichiers-avant-save partout (jamais d'enregistrement fantôme : createDraft, duplicate avec rollback) ; maintenance au lancement §69A (brouillons vides résiduels, dossiers orphelins, vidage `temp/`) + balayage à l'apparition de l'accueil ; anti double-tap sur `+` ; titre de duplication « … (copie) » (non spécifié, choix V1) ; protection fichiers `completeUntilFirstUserAuthentication` (choix V1).
 
 **Écart/risque connu** : la liste (@Query mainContext) dépend de la propagation inter-contextes SwiftData depuis le contexte de l'acteur — à vérifier sur simulateur/appareil ; repli documenté dans le code (ProjectView re-vérifie auprès du store avant tout retour).
+
+## Jalon 3 — Import audio (10 août 2026)
+
+**Fichiers** : `App/Services/AudioImport/AudioImporter.swift` (+`AudioImportError.swift`), `App/Services/AudioImport/WaveformExtractor.swift`, ajouts `ProjectStore` (`attachAudio`, `audioRelativePath`, reprise post-crash des imports bloqués) et `ProjectFileStore` (`audioFileURL`), `ProjectView` réécrit (3 états : vide/import/musique, fileImporter, waveform, lecture), `WaveformView.swift`, `AudioPlayerController.swift`, `Tests/Unit/AudioImporterTests.swift` (WAV généré en pur Swift), `Tests/Unit/WaveformExtractorTests.swift`.
+
+**Choix techniques** : validation §62 réelle (UTType + taille + DRM + piste **décodable** `load(.isDecodable)` + durée) ; copie atomique temp/ → staging dans audio/ → suppression ancien → renommage (jamais d'état « ancien perdu, nouveau absent ») ; statuts annexe A (`importingAudio` → `analyzing` par `attachAudio`) ; waveform par blocs, canaux natifs entrelacés (AVAssetReaderTrackOutput refuse `AVNumberOfChannelsKey`), recalage VBR, `Task.yield()` par bloc ; aucun faux pourcentage (§33) — libellés « En attente d'analyse » / « Analyse musicale à venir » jusqu'au Jalon 4.
+
+**Limites documentées (V1, à traiter plus tard)** : fichier iCloud Drive non matérialisé → erreur générique (pas de NSFileCoordinator/téléchargement, à améliorer) ; pas d'annulation UI de l'import en cours (§8 — copie généralement courte) ; cas DRM non testé unitairement (aucun fichier protégé synthétisable) ; erreur d'import survenue après avoir quitté l'écran : alerte non visible, projet proprement rendu à `draft` puis balayé.
 
 ## Distribution et vérification (pipeline ClipFlow)
 

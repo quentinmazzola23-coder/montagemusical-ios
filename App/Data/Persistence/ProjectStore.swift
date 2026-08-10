@@ -284,6 +284,22 @@ actor ProjectStore {
     ///    sauvegarde SwiftData et la suppression du dossier ;
     /// 3. vidage des `temp/` de chaque projet existant.
     func performStartupMaintenance() throws {
+        // §8 : reprise propre après relance — une app tuée pendant l'import
+        // laisse un projet bloqué en `importingAudio` sans audio. Retour à
+        // `draft` (le balayage §31 ci-dessous le supprime ensuite comme
+        // brouillon vide).
+        let importingRaw = ProjectStatus.importingAudio.rawValue
+        let stuckImports = try modelContext.fetch(FetchDescriptor<ProjectRecord>(
+            predicate: #Predicate<ProjectRecord> {
+                $0.statusRaw == importingRaw && $0.audioRelativePath == nil
+            }
+        ))
+        if !stuckImports.isEmpty {
+            for record in stuckImports {
+                record.statusRaw = ProjectStatus.draft.rawValue
+            }
+            try modelContext.save()
+        }
         try deleteAllEmptyDrafts()
         let knownIDs = Set(try modelContext.fetch(FetchDescriptor<ProjectRecord>()).map(\.id))
         for orphanID in fileStore.projectDirectoryIDs() where !knownIDs.contains(orphanID) {
@@ -309,6 +325,28 @@ actor ProjectStore {
         let record = try requireProject(projectID)
         record.activeSlotIndex = index
         try touchAndSave(record)
+    }
+
+    // MARK: - Audio (Jalon 3)
+
+    /// Rattache un audio importé au projet (spec §11, §59 : sauvegarder
+    /// après import audio ; annexe A `importMusic`).
+    ///
+    /// Pose `audioRelativePath` (chemin relatif au dossier du projet,
+    /// `audio/original.<ext>` — §11, aucune URL externe conservée §78) et
+    /// passe le statut à `.analyzing` : l'analyse réelle démarre au
+    /// Jalon 4 ; le statut suit déjà l'annexe A.
+    func attachAudio(_ imported: ImportedAudio, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        record.audioRelativePath = imported.relativePath
+        record.statusRaw = ProjectStatus.analyzing.rawValue
+        try touchAndSave(record) // updatedAt + autosauvegarde (§59)
+    }
+
+    /// Chemin relatif de l'audio du projet (`audio/original.<ext>`, §11),
+    /// ou `nil` si aucune musique n'a encore été importée.
+    func audioRelativePath(projectID: UUID) throws -> String? {
+        try requireProject(projectID).audioRelativePath
     }
 
     // MARK: - Cases (point d'insertion Jalon 6)

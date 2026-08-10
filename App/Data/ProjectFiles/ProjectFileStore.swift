@@ -102,6 +102,26 @@ struct ProjectFileStore: Sendable {
         hasFiles(in: .audio, projectID: projectID)
     }
 
+    /// URL du fichier audio du projet : premier fichier de `audio/` trié
+    /// par nom, `nil` si le dossier est vide ou absent.
+    ///
+    /// §11 : V1 n'a qu'un seul original (`audio/original.<extension>`) ;
+    /// le tri par nom rend le choix déterministe si un résidu inattendu
+    /// subsistait.
+    func audioFileURL(projectID: UUID) -> URL? {
+        let audioDirectory = subdirectoryURL(.audio, for: projectID)
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: audioDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        return contents
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .first
+    }
+
     /// Vrai si `exports/` contient au moins un fichier — utilisé pour la
     /// confirmation avant suppression (spec §31 : « … une musique, des
     /// associations ou un export »).
