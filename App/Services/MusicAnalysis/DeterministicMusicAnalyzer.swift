@@ -33,7 +33,17 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
 
     /// Version du moteur déterministe (§61, §69) — incrémenter à chaque
     /// changement de comportement d'analyse.
-    static let engineVersion = 1
+    /// v2 : garde `minimumOnsetsForTempo` (§63) — un signal quasi vide
+    /// n'engendre plus d'hypothèse rythmique fantôme.
+    static let engineVersion = 2
+
+    /// Nombre minimal d'onsets détectés (§18) pour tenter une estimation de
+    /// tempo (§19.1). Une périodicité exige plusieurs événements réels ;
+    /// en dessous, aucune hypothèse (§63 : « rythme très faible → partition
+    /// structurelle seulement », §0.7 : jamais de contenu inventé). Aligné
+    /// sur `BeatSyncFeatureExtractor.minimumBeatsForGrid` (4) : moins de
+    /// 4 beats ne formeraient de toute façon jamais de grille alignée.
+    static let minimumOnsetsForTempo = 4
 
     /// Identifiant sentinelle quand AUCUNE hypothèse rythmique n'existe
     /// (§63 : rythme très faible/non métrique). `selectedRhythmHypothesisID`
@@ -156,10 +166,26 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             bars = restored.bars
             downbeatConfidence = restored.downbeatConfidence
         } else {
-            let hypotheses = TempoEstimator().estimate(
-                envelope: envelope,
-                envelopeRate: features.frameRate
-            )
+            // Garde §63/§0.7 : un unique événement ne définit AUCUNE
+            // pulsation. Sans elle, sur « silence + impact isolé » (§12.4,
+            // test h), le détendançage de l'enveloppe creuse un piédestal
+            // négatif autour de l'impact dont l'autocorrélation présente un
+            // pic parasite minuscule (≈ 0,02, vérifié numériquement) :
+            // l'estimateur en tirait une hypothèse fantôme (~109 BPM,
+            // probabilité 1), le suivi §19.1.5 propageait des beats fantômes
+            // depuis l'impact sur le silence (pénalité quasi nulle à la
+            // période exacte), la grille de spans commençait donc À l'impact
+            // et celui-ci tombait dans le span 0 — invisible pour
+            // `detectImpacts`, qui exige un span précédent pour mesurer la
+            // montée. Avec moins de `minimumOnsetsForTempo` onsets : aucune
+            // hypothèse, la grille de repli 0,5 s couvre le morceau entier
+            // et l'impact réel est détecté (§12.4).
+            let hypotheses = onsets.count >= Self.minimumOnsetsForTempo
+                ? TempoEstimator().estimate(
+                    envelope: envelope,
+                    envelopeRate: features.frameRate
+                )
+                : []
             if let best = hypotheses.first {
                 let tracked = BeatTracker().track(
                     hypothesis: best,
