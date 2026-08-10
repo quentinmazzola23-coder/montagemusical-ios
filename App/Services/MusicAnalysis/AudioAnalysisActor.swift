@@ -265,6 +265,13 @@ actor AudioAnalysisActor {
     /// `scores-v1.json` : une méta sans partitions validerait un fichier
     /// absent, l'inverse est inoffensif (méta absente → partitions
     /// considérées périmées).
+    ///
+    /// §61 « Conserver : […] version du modèle Core ML » : la version est
+    /// demandée au registre (`CoreMLModelRegistry`, source unique) et écrite
+    /// telle quelle dans la méta — `nil` tant qu'aucun modèle n'est embarqué
+    /// (§29A/§86). Une méta écrite AVANT l'ajout de ce champ reste valide
+    /// (décodage tolérant, `ScoresMeta.init(from:)`) : aucun projet existant
+    /// n'est périmé par ce seul ajout.
     private func writeScoresMeta(
         configuration: ScoreConfiguration,
         analysisVersion: Int,
@@ -276,7 +283,12 @@ actor AudioAnalysisActor {
         let meta = ScoresMeta(
             generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
             configurationFingerprint: try ScoreConfigurationFingerprint.fingerprint(of: configuration),
-            analysisVersion: analysisVersion
+            analysisVersion: analysisVersion,
+            // §61 « version du modèle Core ML » — source UNIQUE : le registre.
+            // `nil` aujourd'hui (aucun modèle embarqué, §29A/§86), et c'est
+            // exactement la trace exigée : ces partitions viennent du moteur
+            // déterministe seul. Cet acteur n'invente aucune version.
+            coreMLModelVersion: CoreMLModelRegistry.beatActivationModelVersion()
         )
         let data = try encoder.encode(meta)
         let url = fileStore.directory(for: projectID).appending(path: Self.scoresMetaRelativePath)

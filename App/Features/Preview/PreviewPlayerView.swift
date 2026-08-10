@@ -100,6 +100,11 @@ struct PreviewPlayerView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // §38 : le passage préparation → lecture (ou → erreur §64) n'est pas
+        // animé — choix §38, rappelé ci-dessous à la fin de lecture. La garde
+        // neutralise toute animation implicite héritée quand « Réduire les
+        // animations » est actif.
+        .reduceMotionSafe()
         .safeAreaInset(edge: .bottom) { previewDock }
         // Jalon 10 (§36 zone droite, §56) : le résumé avant export se présente
         // PAR-DESSUS l'aperçu — la portée lue reste intacte derrière, et
@@ -321,7 +326,10 @@ struct PreviewPlayerView: View {
             return
         } catch {
             environment.logger.error("Lecture du projet impossible pour l'aperçu : \(error.localizedDescription)")
-            errorMessage = "Le projet n'a pas pu être lu. Réessayez."
+            // §87 : « Réessayez » ne désignait aucun geste — cet écran ne
+            // porte pas de bouton de relance. Le message nomme celui qui
+            // existe (le dock §36 « Retour »).
+            errorMessage = "Le projet n'a pas pu être lu. Fermez l'aperçu, puis rouvrez-le."
             return
         }
 
@@ -346,7 +354,7 @@ struct PreviewPlayerView: View {
             errorMessage = Self.message(for: error)
         } catch {
             environment.logger.error("Construction de l'aperçu impossible : \(error.localizedDescription)")
-            errorMessage = "L'aperçu n'a pas pu être préparé. Réessayez."
+            errorMessage = "L'aperçu n'a pas pu être préparé. Fermez l'aperçu, puis rouvrez-le."
         }
     }
 

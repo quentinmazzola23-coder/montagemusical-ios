@@ -67,6 +67,15 @@ struct ScoreLibrary: Sendable {
     /// L'empreinte du fichier audio (§61) n'est pas dupliquée ici : elle est
     /// déjà la clé du cache d'analyse (§69) — un audio différent invalide
     /// l'analyse, donc les partitions, par ce chemin.
+    ///
+    /// `coreMLModelVersion` (§61) est CONSERVÉ mais ne participe PAS à ce
+    /// verdict : aucun modèle n'est embarqué aujourd'hui (§29A/§86), la
+    /// valeur est donc `nil` partout et la comparer ne trancherait rien. Le
+    /// jour où un modèle sera livré, décider s'il périme les partitions
+    /// existantes sera un choix EXPLICITE (§61 : « ne pas modifier
+    /// automatiquement un projet terminé ; proposer de recalculer seulement
+    /// dans une copie ou après confirmation ») — la trace nécessaire à cette
+    /// décision est déjà écrite dans la méta.
     func scoresAreCurrent(projectID: UUID) -> Bool {
         let url = fileStore.directory(for: projectID)
             .appending(path: AudioAnalysisActor.scoresMetaRelativePath)
@@ -95,4 +104,50 @@ struct ScoresMeta: Codable {
     /// Version du moteur d'analyse dont provient le `MusicAnalysisResult`
     /// source (§61 : un moteur d'analyse qui évolue périme les partitions).
     let analysisVersion: Int
+    /// §61 « Conserver : […] version du modèle Core ML ».
+    ///
+    /// `nil` quand l'analyse n'a utilisé AUCUN modèle Core ML — c'est le cas
+    /// aujourd'hui pour toutes les analyses (§29A/§86 : aucun modèle n'est
+    /// embarqué, `CoreMLModelRegistry.beatActivationModelVersion()` rend
+    /// `nil`). L'absence de version est justement la TRACE exigée : elle dit
+    /// que ces partitions viennent du moteur déterministe seul. Inventer une
+    /// chaîne (« aucun », « v0 ») rendrait le versionnement §61 mensonger.
+    ///
+    /// Champ OPTIONNEL et décodé avec `decodeIfPresent` : une méta écrite
+    /// avant ce champ reste valide et ne provoque AUCUNE régénération
+    /// (§61 : jamais de recalcul non demandé d'un projet terminé).
+    let coreMLModelVersion: String?
+
+    /// Initialiseur explicite — la valeur par défaut `nil` permet d'écrire
+    /// une méta sans modèle sans répéter le champ partout.
+    init(
+        generatorVersion: Int,
+        configurationFingerprint: String,
+        analysisVersion: Int,
+        coreMLModelVersion: String? = nil
+    ) {
+        self.generatorVersion = generatorVersion
+        self.configurationFingerprint = configurationFingerprint
+        self.analysisVersion = analysisVersion
+        self.coreMLModelVersion = coreMLModelVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case generatorVersion
+        case configurationFingerprint
+        case analysisVersion
+        case coreMLModelVersion
+    }
+
+    /// Décodage TOLÉRANT au champ ajouté : `decodeIfPresent` explicite plutôt
+    /// que la synthèse, pour que la garantie soit écrite et ne dépende pas
+    /// d'un détail de génération. Les trois autres champs restent
+    /// OBLIGATOIRES : une méta amputée est illisible, donc périmée (§61).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generatorVersion = try container.decode(Int.self, forKey: .generatorVersion)
+        configurationFingerprint = try container.decode(String.self, forKey: .configurationFingerprint)
+        analysisVersion = try container.decode(Int.self, forKey: .analysisVersion)
+        coreMLModelVersion = try container.decodeIfPresent(String.self, forKey: .coreMLModelVersion)
+    }
 }

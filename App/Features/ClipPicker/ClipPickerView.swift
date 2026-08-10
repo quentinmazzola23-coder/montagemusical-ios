@@ -539,6 +539,13 @@ struct ClipPickerView: View {
                 completeContent
             }
         }
+        // §38 : les changements de phase de la feuille (autorisation →
+        // grille → « Montage complet ») ne sont pas animés — choix §38, au
+        // même titre que l'avancement automatique §46, qui recentre la case
+        // sans transition. La garde neutralise toute animation implicite
+        // héritée quand « Réduire les animations » est actif ; l'haptique
+        // §38 ci-dessus, elle, reste active (ce n'est pas une animation).
+        .reduceMotionSafe()
         .task { await start() }
         .onDisappear {
             // §42 : cache de miniatures relâché à la fermeture.

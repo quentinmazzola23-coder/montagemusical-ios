@@ -13,7 +13,11 @@
 //    restent INTACTES (§65, §89 : jamais de mutation destructive) ;
 //  - `ScoreLibrary` : round-trip `analysis/scores-v1.json` + validité §61
 //    via `scores-meta-v1.json` (version du générateur + empreinte de
-//    configuration partagée `ScoreConfigurationFingerprint`).
+//    configuration partagée `ScoreConfigurationFingerprint`) ;
+//  - §61 « version du modèle Core ML » : champ `coreMLModelVersion` tracé,
+//    absent du JSON quand il vaut `nil` (aucun modèle embarqué §29A), et
+//    décodage TOLÉRANT d'une méta écrite avant l'ajout du champ — un projet
+//    existant ne devient pas périmé pour cette seule raison.
 //
 //  Conteneur SwiftData en mémoire + racine de fichiers dans un dossier
 //  temporaire unique par test (pattern `ProjectStoreTests`) ; helpers
@@ -276,6 +280,83 @@ final class PaceSelectionStoreTests: XCTestCase {
         )
     }
 
+    // MARK: - §61 : version du modèle Core ML tracée
+
+    func testScoresMetaKeepsCoreMLModelVersionAndStaysReadableWithoutIt() throws {
+        // 1. Aujourd'hui, aucun modèle n'est embarqué (§29A/§86) : le registre
+        //    rend `nil` et la méta l'écrit tel quel — l'ABSENCE de version est
+        //    la trace exigée par §61, jamais une chaîne inventée.
+        XCTAssertNil(
+            CoreMLModelRegistry.beatActivationModelVersion(),
+            "Aucun modèle embarqué → aucune version (§29A)"
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let withoutModel = ScoresMeta(
+            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            configurationFingerprint: "empreinte",
+            analysisVersion: DeterministicMusicAnalyzer.engineVersion,
+            coreMLModelVersion: CoreMLModelRegistry.beatActivationModelVersion()
+        )
+        let encodedWithoutModel = try encoder.encode(withoutModel)
+        // Une version absente n'écrit AUCUNE clé : les métas déjà sur disque
+        // gardent exactement la même forme (§61 : rien n'est périmé par cet
+        // ajout de champ).
+        XCTAssertFalse(
+            String(decoding: encodedWithoutModel, as: UTF8.self).contains("coreMLModelVersion"),
+            "Version nulle → clé absente du JSON"
+        )
+        XCTAssertNil(try JSONDecoder().decode(ScoresMeta.self, from: encodedWithoutModel).coreMLModelVersion)
+
+        // 2. Aller-retour d'une version RÉELLE (le jour où un modèle sera livré).
+        let withModel = ScoresMeta(
+            generatorVersion: 3,
+            configurationFingerprint: "empreinte",
+            analysisVersion: 2,
+            coreMLModelVersion: "beat-activation-1.2.0"
+        )
+        let redecoded = try JSONDecoder().decode(ScoresMeta.self, from: encoder.encode(withModel))
+        XCTAssertEqual(redecoded.coreMLModelVersion, "beat-activation-1.2.0")
+        XCTAssertEqual(redecoded.generatorVersion, 3)
+        XCTAssertEqual(redecoded.analysisVersion, 2)
+
+        // 3. TOLÉRANCE : une méta écrite AVANT l'ajout du champ (JSON sans la
+        //    clé) reste décodable — sinon toutes les partitions existantes
+        //    passeraient périmées et seraient proposées au recalcul sans
+        //    raison (§61 : jamais de recalcul non justifié).
+        let legacyJSON = """
+        {"analysisVersion":\(DeterministicMusicAnalyzer.engineVersion),\
+        "configurationFingerprint":"empreinte",\
+        "generatorVersion":\(DeterministicEditScoreGenerator.generatorVersion)}
+        """
+        let legacy = try JSONDecoder().decode(ScoresMeta.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.coreMLModelVersion, "Champ absent → nil, jamais une erreur de décodage")
+        XCTAssertEqual(legacy.generatorVersion, DeterministicEditScoreGenerator.generatorVersion)
+    }
+
+    func testScoresAreCurrentIgnoresCoreMLModelVersion() throws {
+        // §61 : la version du modèle est CONSERVÉE mais ne tranche pas la
+        // validité aujourd'hui (aucun modèle embarqué). Une méta cohérente
+        // portant une version reste donc « à jour » : ce test fige ce choix,
+        // pour qu'un changement de règle soit délibéré et non subi.
+        let projectID = UUID()
+        try fileStore.createDirectories(for: projectID)
+        try writeScores(makeFamily(), projectID: projectID)
+        try writeMeta(
+            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
+            projectID: projectID,
+            coreMLModelVersion: "beat-activation-1.2.0"
+        )
+
+        let library = ScoreLibrary(fileStore: fileStore)
+        XCTAssertTrue(
+            library.scoresAreCurrent(projectID: projectID),
+            "Version de modèle tracée mais non discriminante (§61)"
+        )
+    }
+
     // MARK: - §65 : duplication pour changer de rythme
 
     func testDuplicateForPaceChangeUnlocksCopyAndKeepsOriginalIntact() async throws {
@@ -471,14 +552,16 @@ final class PaceSelectionStoreTests: XCTestCase {
         generatorVersion: Int,
         configurationFingerprint: String,
         analysisVersion: Int = DeterministicMusicAnalyzer.engineVersion,
-        projectID: UUID
+        projectID: UUID,
+        coreMLModelVersion: String? = nil
     ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(ScoresMeta(
             generatorVersion: generatorVersion,
             configurationFingerprint: configurationFingerprint,
-            analysisVersion: analysisVersion
+            analysisVersion: analysisVersion,
+            coreMLModelVersion: coreMLModelVersion
         ))
         let url = fileStore.directory(for: projectID)
             .appending(path: AudioAnalysisActor.scoresMetaRelativePath)

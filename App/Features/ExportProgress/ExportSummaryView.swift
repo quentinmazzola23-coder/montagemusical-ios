@@ -55,10 +55,71 @@
 //  Type, libellés parlés, cibles ≥ 44 pt, état jamais porté par la seule
 //  couleur).
 //
+//  Jalon 12 (§38) — HAPTIQUE DE L'ISSUE. §38 demande « haptique légère lors
+//  d'une association réussie » et « haptique d'erreur pour un asset
+//  invalide » ; la photothèque les portait déjà (`ClipPickerView`), mais
+//  l'export — le geste le plus long et le plus engageant du parcours — ne
+//  disait rien au doigt. Une issue d'export est désormais confirmée par le
+//  même vocabulaire : LÉGER pour un succès (fichier écrit, puis
+//  enregistrement dans Photos), ERREUR pour un échec (interruption §66,
+//  espace insuffisant §57, fichier conservé faute d'accès Photos §66).
+//  Une annulation demandée par l'utilisateur (§58) ne déclenche RIEN : elle
+//  n'est ni un succès, ni une panne. L'haptique reste active sous « Réduire
+//  les animations » (§38 : ce n'est pas une animation).
+//
+//  Jalon 12 (§38) — l'écran change de PHASE (résumé → progression → issue)
+//  sans jamais animer la transition : choix §38. `reduceMotionSafe()`
+//  neutralise toute animation implicite héritée lorsque « Réduire les
+//  animations » est actif.
+//
+//  Revue finale (§60) — DERNIER EXPORT RÉUSSI RESTAURÉ.
+//  §60 demande de restaurer « le dernier export réussi ». L'infrastructure
+//  existait déjà (`ProjectFileStore.lastExportURL` §11 + `ExportActor.
+//  lastOutcome`, qui reconstruit un `ExportOutcome` depuis `exports/` après
+//  relance), mais CETTE VUE ne l'interrogeait jamais : après relance,
+//  l'écran repartait sur le résumé §56 comme si aucun export n'avait eu
+//  lieu, et le fichier conservé n'était plus atteignable (ni partage §66,
+//  ni enregistrement dans Photos §40/§55). `load()` interroge désormais
+//  `lastOutcome` en l'absence d'export en cours et présente la phase
+//  `ready`.
+//  Un résultat RESTAURÉ (`isRestored`, session précédente) est DISTINGUÉ
+//  d'un export qui vient de se terminer : titre, icône et message diffèrent,
+//  et AUCUNE haptique de succès n'est jouée — §8.1 interdit d'annoncer un
+//  succès qui n'a pas eu lieu maintenant. Sa durée et son nombre de plans
+//  valent zéro (le fichier est la seule trace §10/§11) : ils ne sont donc
+//  jamais affichés comme des mesures.
+//
+//  Revue finale (§39) — DOCKS AUX TAILLES D'ACCESSIBILITÉ.
+//  Les rangées de deux ou trois capsules comprimaient leurs libellés
+//  (`lineLimit(1)` + `minimumScaleFactor(0.8)`) : à AX3+, « Enregistrer dans
+//  Photos » devenait illisible. Aux tailles d'accessibilité
+//  (`dynamicTypeSize.isAccessibilitySize`), les boutons s'EMPILENT
+//  (`dockLayout`) et la compression est retirée — même règle que
+//  `SlotCardView`/`AssemblyView` au Jalon 12.
+//
 
 import Foundation
 import SwiftUI
 import UIKit
+
+// MARK: - Haptiques d'issue d'export (§38)
+
+// Non defini par la specification — definition minimale V1.
+/// Haptiques via UIKit, sans dépendance (§38) — MÊME vocabulaire que la
+/// photothèque (`ClipPickerView.PickerHaptics`) : impact LÉGER pour une
+/// réussite, notification d'ERREUR pour un échec. Volontairement limité à
+/// l'issue de l'export : §38 ne demande pas de retour tactile ailleurs, et en
+/// ajouter partout le rendrait insignifiant.
+@MainActor
+private enum ExportHaptics {
+    static func success() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    static func error() {
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+    }
+}
 
 // MARK: - Logique pure d'affichage (§56, §57, §58, §66)
 
@@ -247,6 +308,40 @@ enum ExportSummaryLogic {
     static let genericInterruptionMessage =
         "Votre montage est intact. Vous pouvez recommencer l'export."
 
+    // MARK: Fichier disponible (§55, §60)
+
+    /// Titre de la phase `ready` quand l'encodage vient de se terminer.
+    static let freshReadyTitle = "Montage prêt"
+
+    /// Message correspondant : le fichier existe, Photos reste un geste
+    /// explicite (§40/§55).
+    static let freshReadyMessage =
+        "Votre montage est exporté. Enregistrez-le dans Photos, ou partagez-le."
+
+    /// §60 : titre de la phase `ready` REMONTÉE d'`exports/` après relance —
+    /// volontairement différent de `freshReadyTitle`. « Montage prêt » y ferait
+    /// croire qu'un export vient d'aboutir (§8.1).
+    static let restoredReadyTitle = "Montage déjà exporté"
+
+    /// §60 : message correspondant. Il DIT que l'export date d'avant, ne
+    /// promet aucune mesure (durée et nombre de plans sont inconnus pour un
+    /// résultat restauré) et nomme les gestes possibles.
+    static let restoredReadyMessage =
+        "Un export de ce montage est conservé sur cet iPhone depuis une session précédente. "
+        + "Partagez-le, enregistrez-le dans Photos, ou lancez un nouvel export."
+
+    /// Titre de la phase `ready` selon l'ORIGINE du fichier (§60) — un export
+    /// qui vient d'aboutir et un export retrouvé après relance ne s'annoncent
+    /// jamais avec les mêmes mots (§8.1).
+    static func readyTitle(isRestored: Bool) -> String {
+        isRestored ? restoredReadyTitle : freshReadyTitle
+    }
+
+    /// Message de la phase `ready` selon l'origine du fichier (§60).
+    static func readyMessage(isRestored: Bool) -> String {
+        isRestored ? restoredReadyMessage : freshReadyMessage
+    }
+
     // MARK: - Phases de l'écran (§57, §58, §66)
 
     // Non defini par la specification — definition minimale V1.
@@ -265,13 +360,22 @@ enum ExportSummaryLogic {
         case starting
         /// Encodage en cours (§58) — progression + annulation.
         case exporting
-        /// §55 : encodage terminé, fichier écrit et CONFIRMÉ. L'enregistrement
-        /// dans Photos est une action utilisateur distincte (§40) : partage et
-        /// enregistrement sont proposés, rien n'est fait dans le dos.
-        case ready(url: URL)
+        /// §55 : fichier d'export écrit et CONFIRMÉ, disponible à l'URL
+        /// donnée. L'enregistrement dans Photos est une action utilisateur
+        /// distincte (§40) : partage et enregistrement sont proposés, rien
+        /// n'est fait dans le dos.
+        ///
+        /// `isRestored` (§60) distingue les deux origines possibles :
+        /// - `false` — l'encodage vient de se terminer DANS cette session ;
+        /// - `true` — le fichier vient d'`exports/` (§11), retrouvé après
+        ///   relance de l'application. Rien ne s'est produit maintenant :
+        ///   §8.1 interdit d'annoncer un succès qui n'a pas eu lieu, donc ni
+        ///   le même message, ni l'haptique de réussite.
+        case ready(url: URL, isRestored: Bool)
         /// Enregistrement dans Photos en cours (§55) — déclenché par
-        /// l'utilisateur depuis `ready`.
-        case saving(url: URL)
+        /// l'utilisateur depuis `ready`. `isRestored` est TRANSPORTÉ pour que
+        /// le retour éventuel à `ready` ne change pas de discours (§60).
+        case saving(url: URL, isRestored: Bool)
         /// Enregistré dans Photos (§55).
         case succeeded
         /// §66 : le fichier existe et est CONSERVÉ, mais n'a pas rejoint
@@ -400,6 +504,9 @@ struct ExportSummaryView: View {
     /// §8.1 : un passage en arrière-plan pendant l'encodage est une
     /// INTERRUPTION annoncée, jamais un succès silencieux.
     @Environment(\.scenePhase) private var scenePhase
+    /// §39 : aux tailles d'accessibilité, les rangées de boutons du dock
+    /// s'empilent au lieu de comprimer leurs libellés (voir `dockLayout`).
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private typealias ExportPhase = ExportSummaryLogic.ExportPhase
     private typealias FileKeptReason = ExportSummaryLogic.FileKeptReason
@@ -443,6 +550,15 @@ struct ExportSummaryView: View {
     /// Vrai si l'utilisateur a demandé l'annulation (§58) — distingue
     /// « annulé » de « interrompu » dans le message final (§66).
     @State private var didRequestCancel = false
+    /// Vrai si la phase `failed` courante vient d'un passage en ARRIÈRE-PLAN
+    /// pendant l'encodage (§8.1), et non d'une panne.
+    ///
+    /// Même rôle que `didRequestCancel` : mémoriser l'ORIGINE d'une phase
+    /// terminale. §38 réserve l'haptique d'erreur à un vrai échec (« asset
+    /// invalide ») ; une mise en arrière-plan est une interruption NORMALE,
+    /// provoquée par l'utilisateur lui-même — la faire vibrer comme une
+    /// panne serait un mensonge tactile. Le message §8.1, lui, reste affiché.
+    @State private var didInterruptForBackground = false
 
     init(projectID: UUID) {
         self.projectID = projectID
@@ -483,12 +599,23 @@ struct ExportSummaryView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // §38 : aucune animation sur les changements de phase (choix
+        // documenté en tête de fichier) — garde « Réduire les animations ».
+        .reduceMotionSafe()
         .safeAreaInset(edge: .bottom) { dock }
         .task { await load() }
         // §8.1 : iOS peut suspendre le processus — l'écran ne promet rien et
         // annonce l'interruption dès le passage en arrière-plan.
         .onChange(of: scenePhase) { _, newPhase in
             handleScenePhase(newPhase)
+        }
+        // §38 : l'ISSUE de l'export est confirmée au doigt — un seul point
+        // d'entrée, quel que soit le chemin qui a mené à cette phase
+        // (démarrage refusé, encodage terminé, arrière-plan §8.1,
+        // enregistrement Photos). L'haptique n'est PAS une animation : elle
+        // reste active sous « Réduire les animations ».
+        .onChange(of: phase) { _, newPhase in
+            playHaptic(for: newPhase)
         }
         .onDisappear {
             // Seul le SUIVI est arrêté : un encodage en cours continue dans
@@ -507,13 +634,16 @@ struct ExportSummaryView: View {
         switch phase {
         case .summary, .starting, .exporting:
             summaryContent
-        case .ready, .saving:
+        case .ready(_, let isRestored), .saving(_, let isRestored):
             // §55 : le fichier est écrit et CONFIRMÉ ; rien n'est encore dans
             // Photos — l'enregistrement est un geste explicite (§40).
+            // §60/§8.1 : un fichier RETROUVÉ après relance ne s'annonce pas
+            // comme un export qui vient d'aboutir — autre icône, autre titre,
+            // autre message.
             messageContent(
-                systemImage: "checkmark.circle",
-                title: "Montage prêt",
-                message: "Votre montage est exporté. Enregistrez-le dans Photos, ou partagez-le."
+                systemImage: isRestored ? "clock.arrow.circlepath" : "checkmark.circle",
+                title: ExportSummaryLogic.readyTitle(isRestored: isRestored),
+                message: ExportSummaryLogic.readyMessage(isRestored: isRestored)
             )
         case .succeeded:
             // §55 : l'asset Photos n'existe qu'après un succès complet.
@@ -644,8 +774,9 @@ struct ExportSummaryView: View {
             // §52 : information indisponible (rush reparti dans iCloud, accès
             // photothèque refusé, géométrie jamais verrouillée) — l'exportateur
             // refuse alors de livrer un profil PARTIEL, et cet écran n'invente
-            // rien. L'export reste possible : c'est lui qui tranchera.
-            Text("Profil technique indisponible pour l'instant.")
+            // rien. L'export reste possible : c'est lui qui tranchera — et le
+            // message le DIT, sinon la ligne ressemblait à un blocage (§87).
+            Text("Profil technique indisponible pour l'instant. Vous pouvez quand même lancer l'export.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -702,7 +833,7 @@ struct ExportSummaryView: View {
             case .saving:
                 savingRow
             case .summary:
-                HStack(spacing: 8) {
+                dockLayout {
                     dockSecondaryButton(
                         title: "Fermer",
                         accessibilityHint: "Ferme l'export et revient au montage."
@@ -711,8 +842,8 @@ struct ExportSummaryView: View {
                     }
                     exportButton(title: "Exporter")
                 }
-            case .ready(let url):
-                readyDock(url: url)
+            case .ready(let url, let isRestored):
+                readyDock(url: url, isRestored: isRestored)
             case .succeeded:
                 HStack(spacing: 8) {
                     dockPrimaryButton(
@@ -726,7 +857,7 @@ struct ExportSummaryView: View {
             case .fileKept(let reason, let url):
                 fileKeptDock(reason: reason, url: url)
             case .insufficientStorage:
-                HStack(spacing: 8) {
+                dockLayout {
                     dockSecondaryButton(
                         title: "Fermer",
                         accessibilityHint: "Ferme l'export et revient au montage."
@@ -736,7 +867,7 @@ struct ExportSummaryView: View {
                     exportButton(title: "Réessayer")
                 }
             case .failed, .cancelled:
-                HStack(spacing: 8) {
+                dockLayout {
                     dockSecondaryButton(
                         title: "Fermer",
                         accessibilityHint: "Ferme l'export et revient au montage."
@@ -808,31 +939,68 @@ struct ExportSummaryView: View {
     /// [Partager] [Enregistrer dans Photos] : l'enregistrement est une action
     /// utilisateur explicite, c'est elle qui déclenche (au premier usage) la
     /// demande d'autorisation d'écriture §40.
-    private func readyDock(url: URL) -> some View {
-        HStack(spacing: 8) {
-            dockSecondaryButton(
-                title: "Fermer",
-                accessibilityHint: "Ferme l'export et revient au montage. Le fichier est conservé."
-            ) {
-                dismiss()
+    ///
+    /// §60 — RÉSULTAT RESTAURÉ : les trois mêmes zones, plus une rangée
+    /// SECONDAIRE au-dessus (« Exporter à nouveau »). Sans elle, l'écran
+    /// serait un cul-de-sac : après relance, `lastOutcome` retrouve toujours
+    /// le fichier d'`exports/`, le CTA §56 ne réapparaîtrait donc JAMAIS et
+    /// plus aucun export ne serait possible — régression bien pire que
+    /// l'ajout d'une action secondaire. La rangée du bas garde les trois
+    /// zones importantes §36 ; celle du haut est délibérément discrète (même
+    /// forme que la rangée « Annuler » de la phase `exporting`). Elle
+    /// n'existe PAS après un export qui vient d'aboutir : y proposer
+    /// immédiatement un ré-export n'aurait aucun sens.
+    private func readyDock(url: URL, isRestored: Bool) -> some View {
+        VStack(spacing: 8) {
+            if isRestored {
+                let canExportAgain = hasExportablePrefix && loadErrorMessage == nil
+                HStack(spacing: 8) {
+                    dockSecondaryButton(
+                        title: "Exporter à nouveau",
+                        accessibilityHint: canExportAgain
+                            ? "Relance un export du montage. Le fichier précédent sera remplacé."
+                            : "Remplissez la première case pour exporter."
+                    ) {
+                        startExport()
+                    }
+                    .disabled(!canExportAgain)
+                    // §39 : l'état désactivé est porté par l'opacité ET par
+                    // VoiceOver (trait « estompé » + hint), jamais par la
+                    // seule couleur.
+                    .opacity(canExportAgain ? 1 : 0.4)
+                    Spacer(minLength: 0)
+                }
             }
 
-            shareButton(url: url)
+            dockLayout {
+                dockSecondaryButton(
+                    title: "Fermer",
+                    accessibilityHint: "Ferme l'export et revient au montage. Le fichier est conservé."
+                ) {
+                    dismiss()
+                }
 
-            Button {
-                saveToPhotos(url: url)
-            } label: {
-                Text("Enregistrer dans Photos")
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .frame(maxWidth: .infinity, minHeight: 52) // ≥ 44 pt (§39)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
+                shareButton(url: url)
+
+                Button {
+                    saveToPhotos()
+                } label: {
+                    Text("Enregistrer dans Photos")
+                        // §39 : aux tailles d'accessibilité, la rangée est
+                        // EMPILÉE — le libellé s'affiche en entier au lieu
+                        // d'être écrasé à 80 % sur une ligne.
+                        .lineLimit(isStackedDock ? nil : 1)
+                        .minimumScaleFactor(isStackedDock ? 1 : 0.8)
+                        .multilineTextAlignment(.center)
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 52) // ≥ 44 pt (§39)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Enregistrer dans Photos")
+                .accessibilityHint("Ajoute le montage exporté à l'application Photos.")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Enregistrer dans Photos")
-            .accessibilityHint("Ajoute le montage exporté à l'application Photos.")
         }
     }
 
@@ -840,7 +1008,7 @@ struct ExportSummaryView: View {
     /// (feuille système) toujours proposé ; Réglages seulement si la cause
     /// est une autorisation refusée (§40).
     private func fileKeptDock(reason: FileKeptReason, url: URL) -> some View {
-        HStack(spacing: 8) {
+        dockLayout {
             dockSecondaryButton(
                 title: "Fermer",
                 accessibilityHint: "Ferme l'export et revient au montage. Le fichier est conservé."
@@ -859,6 +1027,24 @@ struct ExportSummaryView: View {
                 }
             }
         }
+    }
+
+    // MARK: Disposition des rangées de dock (§39)
+
+    /// Vrai quand les rangées de boutons du dock doivent être EMPILÉES :
+    /// aux tailles d'accessibilité (§39), deux ou trois capsules côte à côte
+    /// n'ont plus la place d'afficher leur libellé entier.
+    private var isStackedDock: Bool {
+        dynamicTypeSize.isAccessibilitySize
+    }
+    /// Rangée d'actions du dock : horizontale aux tailles courantes (les
+    /// zones §36 restent côte à côte), VERTICALE aux tailles d'accessibilité
+    /// (§39). Même bascule que `SlotCardView`/`AssemblyView` au Jalon 12 :
+    /// mieux vaut un dock plus haut qu'un libellé écrasé.
+    private var dockLayout: AnyLayout {
+        isStackedDock
+            ? AnyLayout(VStackLayout(spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
     }
 
     /// Partage du fichier exporté par la feuille système (§66) — même
@@ -926,6 +1112,10 @@ struct ExportSummaryView: View {
 
     /// Bouton secondaire de dock — même style que `AssemblyView`,
     /// `ClipPickerView`, `PaceSelectionView` et `PreviewPlayerView`.
+    ///
+    /// §39 : en rangée EMPILÉE (tailles d'accessibilité), il prend toute la
+    /// largeur — un bouton qui n'épouserait que son texte laisserait une
+    /// cible ridicule au milieu du dock.
     private func dockSecondaryButton(
         title: String,
         accessibilityHint: String,
@@ -934,8 +1124,13 @@ struct ExportSummaryView: View {
         Button(action: action) {
             Text(title)
                 .font(.body.weight(.medium))
+                .multilineTextAlignment(.center)
                 .padding(.horizontal, 14)
-                .frame(minHeight: 52) // cible ≥ 44 pt (§39)
+                .frame(
+                    minWidth: 44, // cible ≥ 44 pt (§39)
+                    maxWidth: isStackedDock ? CGFloat.infinity : nil,
+                    minHeight: 52
+                )
                 .background(.ultraThinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
         }
@@ -964,7 +1159,9 @@ struct ExportSummaryView: View {
             environment.logger.error(
                 "Lecture du projet impossible pour l'export : \(error.localizedDescription)"
             )
-            loadErrorMessage = "Le projet n'a pas pu être lu. Réessayez."
+            // §87 : « Réessayez » ne désignait aucun geste — cet écran n'a pas
+            // de bouton de relecture. Le message nomme celui qui existe.
+            loadErrorMessage = "Le projet n'a pas pu être lu. Fermez cet écran, puis rouvrez l'export."
             isLoadingSummary = false
             isLoadingProfile = false
             return
@@ -987,6 +1184,8 @@ struct ExportSummaryView: View {
             progress = current
             phase = .exporting
             monitorExport(startsNewExport: false)
+        } else {
+            await restoreLastOutcome()
         }
 
         guard !prefix.isEmpty else {
@@ -994,6 +1193,37 @@ struct ExportSummaryView: View {
             return // §66 : rien à profiler
         }
         await loadProfile(snapshot: snapshot)
+    }
+
+    /// §60 « Restaurer : […] dernier export réussi ».
+    ///
+    /// Appelée UNIQUEMENT en l'absence d'export en cours (un export qui tourne
+    /// a sa propre issue à venir : afficher celle d'avant la ferait passer
+    /// pour la sienne — §8.1). `ExportActor.lastOutcome` rend soit le
+    /// résultat de la session courante (`isRestored == false` : l'écran a été
+    /// fermé puis rouvert après un export réussi), soit le fichier le plus
+    /// récent d'`exports/` (§11) retrouvé après relance
+    /// (`isRestored == true`). Les deux cas mènent à la phase `ready` — le
+    /// fichier est réellement là, donc partageable (§66) et enregistrable
+    /// dans Photos (§40/§55) — mais l'écran ne raconte pas la même histoire
+    /// (voir `ExportSummaryLogic.readyTitle(isRestored:)`).
+    ///
+    /// Une erreur exposée par l'acteur (annulation, interruption) a la
+    /// PRIORITÉ : elle décrit le dernier événement, alors que le fichier
+    /// décrit un état plus ancien.
+    ///
+    /// Aucune mesure n'est reprise d'un résultat restauré : sa durée et son
+    /// nombre de plans valent zéro (§10 : aucune colonne ne décrit un export,
+    /// le fichier est la seule trace). Le résumé §56 continue d'afficher les
+    /// valeurs du PROJET, jamais celles de l'export d'avant.
+    private func restoreLastOutcome() async {
+        guard case .summary = phase else { return }
+        if await environment.exportActor.lastError(projectID: projectID) != nil { return }
+        guard let outcome = await environment.exportActor.lastOutcome(projectID: projectID) else {
+            return
+        }
+        guard !Task.isCancelled else { return } // écran fermé (§8)
+        phase = .ready(url: outcome.outputURL, isRestored: outcome.isRestored)
     }
 
     /// Profil maître §52 — lu auprès de l'EXPORTATEUR, source UNIQUE.
@@ -1048,6 +1278,9 @@ struct ExportSummaryView: View {
         }
 
         didRequestCancel = false
+        // Nouvelle tentative : l'origine de l'issue PRÉCÉDENTE ne doit plus
+        // influencer l'haptique de celle qui vient (§38).
+        didInterruptForBackground = false
         progress = 0
         // §58 : « export en cours » n'est affiché qu'une fois le démarrage
         // CONFIRMÉ par l'acteur — en attendant, une phase d'attente neutre.
@@ -1150,8 +1383,10 @@ struct ExportSummaryView: View {
         }
         progress = 1
         // §8.1 : le succès n'est annoncé qu'ICI, sur confirmation effective de
-        // l'écriture du fichier par l'acteur.
-        phase = .ready(url: outcome.outputURL)
+        // l'écriture du fichier par l'acteur. `isRestored` est repris tel
+        // quel : un fichier remonté d'`exports/` (§60) ne devient pas l'issue
+        // du run qui vient de se terminer.
+        phase = .ready(url: outcome.outputURL, isRestored: outcome.isRestored)
     }
 
     /// §58 : annulation possible à tout moment pendant l'encodage. L'acteur
@@ -1200,6 +1435,10 @@ struct ExportSummaryView: View {
         let id = projectID
         Task { await exportActor.cancelExport(projectID: id) }
         progress = 0
+        // ORIGINE mémorisée AVANT la phase : `.onChange(of: phase)` lira ce
+        // drapeau pour ne PAS jouer l'haptique d'erreur (§38) — une mise en
+        // arrière-plan est une interruption normale, pas une panne.
+        didInterruptForBackground = true
         phase = .failed(message: ExportSummaryLogic.backgroundInterruptionMessage)
         environment.logger.info(
             "Export interrompu par un passage en arrière-plan (§8.1) — projet intact."
@@ -1216,9 +1455,9 @@ struct ExportSummaryView: View {
     /// re-sollicite jamais un refus déjà exprimé) : la vue ne duplique pas
     /// cette règle, elle en traite seulement l'issue.
     /// §66 : refus → le fichier est CONSERVÉ, partage et Réglages proposés.
-    private func saveToPhotos(url: URL) {
-        guard case .ready = phase else { return }
-        phase = .saving(url: url)
+    private func saveToPhotos() {
+        guard case .ready(let url, let isRestored) = phase else { return }
+        phase = .saving(url: url, isRestored: isRestored)
         let saver = environment.photoLibrarySaver
         let logger = environment.logger
         Task {
@@ -1305,6 +1544,45 @@ struct ExportSummaryView: View {
         return spoken
     }
 
+    // MARK: - Haptique d'issue (§38)
+
+    /// Retour tactile d'une phase TERMINALE (§38) :
+    /// - `ready` **non restauré** (fichier écrit à l'instant §55) et
+    ///   `succeeded` (ajouté à Photos) → impact LÉGER, le même que celui
+    ///   d'une association réussie ;
+    /// - `insufficientStorage` (§57), `failed` **d'origine technique** (§66)
+    ///   et `fileKept` (§66 : l'export existe mais n'a pas rejoint Photos) →
+    ///   notification d'ERREUR ;
+    /// - `cancelled` (§58 : l'utilisateur a demandé l'arrêt), `summary`,
+    ///   `starting`, `exporting`, `saving` → RIEN : ni réussite, ni panne.
+    ///
+    /// DEUX phases terminales sont AMBIGUËS et se lisent au drapeau d'origine,
+    /// jamais au seul cas d'énumération :
+    /// - `ready(isRestored: true)` (§60) — le fichier a été RETROUVÉ après
+    ///   relance ; rien n'a réussi maintenant, vibrer « réussite » serait
+    ///   exactement le faux succès que §8.1 interdit ;
+    /// - `failed` produite par un passage en ARRIÈRE-PLAN pendant l'encodage
+    ///   (§8.1, `didInterruptForBackground`) — interruption normale demandée
+    ///   par l'utilisateur lui-même, pas un échec : §38 réserve l'haptique
+    ///   d'erreur à un vrai problème (« asset invalide »). Le message
+    ///   d'interruption, lui, reste affiché.
+    private func playHaptic(for newPhase: ExportPhase) {
+        switch newPhase {
+        case .ready(_, let isRestored):
+            guard !isRestored else { break } // §60/§8.1 : aucun succès à annoncer
+            ExportHaptics.success()
+        case .succeeded:
+            ExportHaptics.success()
+        case .failed:
+            guard !didInterruptForBackground else { break } // §8.1 : interruption normale
+            ExportHaptics.error()
+        case .insufficientStorage, .fileKept:
+            ExportHaptics.error()
+        case .summary, .starting, .exporting, .saving, .cancelled:
+            break
+        }
+    }
+
     /// §40/§66 : ouvrir Réglages pour autoriser l'ajout à Photos.
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
@@ -1323,4 +1601,16 @@ struct ExportSummaryView: View {
     return ExportSummaryView(projectID: UUID())
         .environment(environment)
         .modelContainer(container)
+}
+
+/// §39 — contrôle visuel du dock à une taille d'ACCESSIBILITÉ : les boutons
+/// doivent être EMPILÉS et afficher leur libellé entier, sans compression.
+/// À vérifier sur Mac (le projet n'a jamais été compilé sous Windows).
+#Preview("Export — accessibilité 3") {
+    let container = try! ModelContainerFactory.makeInMemory()
+    let environment = AppEnvironment(modelContainer: container)
+    return ExportSummaryView(projectID: UUID())
+        .environment(environment)
+        .modelContainer(container)
+        .dynamicTypeSize(.accessibility3)
 }

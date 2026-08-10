@@ -58,7 +58,51 @@
 //  action du parcours minimal (§89).
 //
 //  Matériaux translucides sobres §37 (aucun verre permanent sur l'aperçu),
-//  aucune animation décorative §38, accessibilité §39 complète.
+//  aucune animation DÉCORATIVE §38 (les deux animations exigées par §38 sont
+//  décrites ci-dessous), accessibilité §39 complète.
+//
+//  Jalon 12 (§39/§87) — DYNAMIC TYPE : la hauteur du carrousel et celle de
+//  la mini-timeline étaient des constantes (132 et 44). Aux tailles
+//  d'accessibilité AX1–AX5, les cartes débordaient donc du carrousel et leur
+//  contenu était tronqué. Les deux hauteurs passent par `@ScaledMetric`, la
+//  première sur la MÊME base que `SlotCardView` (source unique
+//  `SlotCardView.baseMinHeight`) : carte et carrousel grandissent ensemble.
+//  La largeur des cartes reste proportionnelle au conteneur (§35.2 :
+//  « largeur tactile stable »), donc indépendante de la taille de texte.
+//
+//  Jalon 12 (§39/§87) — DÉBORDEMENT AUX TAILLES D'ACCESSIBILITÉ : une fois
+//  les hauteurs mises à l'échelle, le `VStack` figé de `assemblyContent` ne
+//  tenait plus à l'écran (à AX5, le seul carrousel dépasse 400 pt). La zone
+//  haute et le carrousel sont donc devenus DÉFILABLES, le bouton d'aperçu
+//  §47.2, la mini-timeline §35.3 et le dock §36 restant ANCRÉS en bas
+//  (§30) — voir la documentation de `assemblyContent`.
+//
+//  Jalon 12 (§38) — LES DEUX ANIMATIONS EXIGÉES : §38 demande QUATRE retours
+//  et non deux — haptique d'association réussie, haptique d'erreur sur asset
+//  invalide, « glissement vers la prochaine case » et « morphing doux case
+//  vide → miniature ». Les deux haptiques existaient déjà (photothèque
+//  §46) ; les deux ANIMATIONS ont été ajoutées au Jalon 12 :
+//  - GLISSEMENT : tout recentrage PROGRAMMÉ du carrousel (tap sur une
+//    voisine §35.2, tap/glissé sur la mini-timeline §35.3, avancement
+//    automatique §46 via `onSlotChanged`) passe par
+//    `withAnimation(slideAnimation)` dans `select(_:in:)`. Le scroll à la
+//    MAIN reste natif : il ne traverse jamais ce chemin. La restauration
+//    §60 à l'ouverture n'est pas animée non plus (placement initial) ;
+//  - MORPHING : porté par `SlotCardView` (fondu court sur le changement
+//    d'état de la carte et sur l'arrivée de la miniature réelle).
+//  Ce sont les SEULES animations du projet : aucun fondu, ressort ou
+//  translation décoratifs ailleurs (§38 « aucune animation décorative
+//  longue »).
+//
+//  Jalon 12 (§38/§87) — RÉDUIRE LES ANIMATIONS : les deux animations
+//  ci-dessus sont NEUTRALISÉES quand le réglage système est actif —
+//  `slideAnimation` vaut `nil` (et `withAnimation(nil)` n'anime rien), la
+//  carte fait de même de son côté. Toutes deux lisent
+//  `\.accessibilityReduceMotion`, exactement comme
+//  `reduceMotionSafe()` (App/Core/DesignSystem/ReduceMotion.swift), qui
+//  reste posé sur le contenu de l'écran pour neutraliser en plus toute
+//  animation implicite héritée d'un contexte parent (chargement →
+//  assemblage).
 //
 
 import SwiftData
@@ -223,6 +267,10 @@ private struct AssemblyChangeToken: Equatable {
 ///    [Export]` — « Export » présente le résumé §56 dès qu'un préfixe
 ///    exportable existe (§51, §88.12), désactivé sinon.
 ///
+/// Depuis le Jalon 12 (§39/§87), seuls **1 et 2** DÉFILENT verticalement ;
+/// **3, 4 et 5** restent ANCRÉS en bas et donc toujours sous le pouce (§30),
+/// y compris aux tailles d'accessibilité — voir `assemblyContent`.
+///
 /// La case active est persistée avec un debounce ~300 ms (§59 : « debounce
 /// très court uniquement pour les changements fréquents de navigation,
 /// jamais pour une association critique ») et restaurée à la réouverture
@@ -234,6 +282,22 @@ struct AssemblyView: View {
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
     @Environment(\.displayScale) private var displayScale
+    /// §38/§87 « respecter Réduire les animations » — MÊME mécanisme que
+    /// `reduceMotionSafe()` (App/Core/DesignSystem/ReduceMotion.swift) :
+    /// lecture du réglage système, puis animation `nil` (voir
+    /// `slideAnimation`).
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// §39/§87 : hauteur du carrousel — MÊME base que les cartes
+    /// (`SlotCardView.baseMinHeight`), donc même mise à l'échelle Dynamic
+    /// Type ; une carte ne peut plus déborder de sa fenêtre.
+    @ScaledMetric(relativeTo: .subheadline)
+    private var carouselHeight: CGFloat = SlotCardView.baseMinHeight
+    /// §39/§87 : hauteur de la mini-timeline §35.3 — mise à l'échelle elle
+    /// aussi, sans jamais descendre sous 44 pt (cible tactile §39, voir
+    /// `miniTimelineHeight`).
+    @ScaledMetric(relativeTo: .footnote)
+    private var scaledMiniTimelineHeight: CGFloat = 44
 
     private let projectID: UUID
 
@@ -277,7 +341,11 @@ struct AssemblyView: View {
     /// Alerte §65 : rythme verrouillé par des associations — proposer la
     /// duplication, jamais de mutation destructive.
     @State private var isPaceLockAlertPresented = false
-    /// Alerte générique d'échec (jamais silencieux).
+    /// Alerte d'échec (jamais silencieux). Le message dit CE QUI a échoué et
+    /// CE QU'IL FAUT FAIRE (§62/§64) : changement de rythme et duplication
+    /// sont deux actions différentes, un message unique en aurait décrit une
+    /// pour l'autre.
+    @State private var paceChangeErrorMessage: String?
     @State private var isPaceChangeErrorPresented = false
 
     // MARK: État des feuilles (Jalon 8 photothèque, Jalon 9 preview)
@@ -306,6 +374,12 @@ struct AssemblyView: View {
     /// identifiant d'asset (§35.2) — chargé FENÊTRÉ autour de la case
     /// active (± 2), jamais tout le projet ; libéré avec l'écran (@State).
     @State private var thumbnailsByAssetID: [String: UIImage] = [:]
+    /// §39/§87 : hauteur de carte (arrondie) pour laquelle le cache ci-dessus
+    /// a été rempli. La résolution demandée dépend de `carouselHeight`
+    /// (`@ScaledMetric`) : dès que la taille de texte change, les images
+    /// déjà chargées sont PÉRIMÉES et le cache est vidé (voir
+    /// `loadThumbnails(for:)`). `0` : cache encore vide.
+    @State private var cachedThumbnailCardHeight = 0
 
     init(projectID: UUID) {
         self.projectID = projectID
@@ -337,6 +411,13 @@ struct AssemblyView: View {
                 assemblyContent(items: items)
             }
         }
+        // §38/§87 : le passage chargement → assemblage n'est PAS animé, et
+        // la garde empêche toute animation implicite héritée d'un contexte
+        // parent quand « Réduire les animations » est actif. Les deux SEULES
+        // animations du projet (glissement du carrousel §38 ici, morphing des
+        // cartes §38 dans `SlotCardView`) se neutralisent d'elles-mêmes par
+        // le même réglage — voir `slideAnimation` et l'en-tête de fichier.
+        .reduceMotionSafe()
         // Menu ellipsis : « Changer de rythme » UNIQUEMENT (§65, action rare
         // et non essentielle au parcours minimal §88). L'entrée
         // « Prévisualiser » du Jalon 9 en a été RETIRÉE au Jalon 10 : l'aperçu
@@ -366,9 +447,11 @@ struct AssemblyView: View {
             Text("Ce rythme est verrouillé par des vidéos déjà associées. Dupliquez le projet pour changer de rythme.")
         }
         .alert("Action impossible", isPresented: $isPaceChangeErrorPresented) {
-            Button("OK", role: .cancel) {}
+            Button("OK", role: .cancel) {
+                paceChangeErrorMessage = nil
+            }
         } message: {
-            Text("Le changement de rythme a échoué. Réessayez.")
+            Text(paceChangeErrorMessage ?? Self.paceChangeFailureMessage)
         }
         // Photothèque (Jalon 8, §40–§46) : la feuille RESTE ouverte pendant
         // l'enchaînement §46/§83 — `onSlotChanged` recentre le carrousel
@@ -443,9 +526,11 @@ struct AssemblyView: View {
         }
         // Miniatures réelles (Jalon 8, §35.1/§35.2) : chargées FENÊTRÉES —
         // les cases prêtes autour de la case active (± 2) uniquement, la
-        // clé change avec la navigation et les associations.
-        .task(id: thumbnailWindowAssetIDs) {
-            await loadThumbnails(for: thumbnailWindowAssetIDs)
+        // clé change avec la navigation, les associations ET la taille de
+        // texte (§39/§87 : la résolution demandée en dépend, voir
+        // `ThumbnailWindowKey`).
+        .task(id: thumbnailWindowKey) {
+            await loadThumbnails(for: thumbnailWindowKey)
         }
         .onDisappear {
             // Lecture arrêtée et observateurs retirés (§35.1). La tâche de
@@ -564,17 +649,70 @@ struct AssemblyView: View {
 
     // MARK: - Écran complet (§35)
 
+    /// §39/§87 — DÉBORDEMENT AUX TAILLES D'ACCESSIBILITÉ (correctif Jalon 12).
+    ///
+    /// PROBLÈME : la zone haute (aperçu 16:9 + quatre lignes de texte) et le
+    /// carrousel suivent tous deux la taille de texte (`@ScaledMetric`). Aux
+    /// tailles AX1–AX5 ils ne tiennent plus ensemble à l'écran — à AX5, le
+    /// seul carrousel dépasse 400 pt. Empilés dans un `VStack` NON défilable,
+    /// ils repoussaient la mini-timeline §35.3 et le dock §36 hors du cadre :
+    /// les contrôles OBLIGATOIRES du parcours devenaient inatteignables,
+    /// exactement ce qu'interdit la règle du pouce §30.
+    ///
+    /// SOLUTION RETENUE (la plus simple qui préserve §30) : rendre DÉFILABLE
+    /// verticalement la seule partie qui grandit — zone haute §35.1 +
+    /// carrousel §35.2 — et laisser ANCRÉS en bas le bouton d'aperçu §47.2,
+    /// la mini-timeline §35.3 et le dock §36. Ces trois-là ne défilent
+    /// jamais : ils restent sous le pouce à N'IMPORTE QUELLE taille de texte
+    /// (§30), et la navigation reste possible même quand la zone haute occupe
+    /// tout l'espace visible (la mini-timeline §35.3 permet à elle seule
+    /// d'atteindre n'importe quelle case).
+    ///
+    /// Solution écartée : compacter la zone haute aux tailles
+    /// d'accessibilité — §35.1 impose ses quatre informations (aperçu, plan X
+    /// sur N, timestamps, durée requise), et cela ne réglerait de toute façon
+    /// pas le carrousel, qui dépasse à lui seul la hauteur de l'écran à AX5.
+    ///
+    /// Le `minHeight` égal à la hauteur du conteneur (`GeometryReader`)
+    /// conserve EXACTEMENT la mise en page des tailles standard : le `Spacer`
+    /// continue de pousser le carrousel vers le bas, et le défilement
+    /// n'apparaît que lorsque le contenu dépasse réellement
+    /// (`.scrollBounceBehavior(.basedOnSize)` : aucun rebond sinon, l'écran
+    /// reste perçu comme fixe).
+    ///
+    /// Complément indispensable : l'aperçu 16:9 de la zone haute reçoit un
+    /// PLANCHER de hauteur (`Self.minPreviewHeight`, voir `topZone`). Sans
+    /// lui, c'est ce cadre — le seul totalement flexible — que la mise en
+    /// page écraserait à zéro dès que la place manque, et l'aperçu §35.1
+    /// disparaîtrait aux tailles d'accessibilité au lieu de faire défiler.
+    ///
+    /// Contrôle visuel : preview « Assemblage — accessibilité 3 » en bas de
+    /// fichier.
     private func assemblyContent(items: [AssemblySlotItem]) -> some View {
         // Clamp défensif : si le nombre de cases changeait sous la vue
         // (duplication, migration), jamais d'indexation hors bornes.
         let active = AssemblyViewLogic.clampedActiveIndex(activeIndex, slotCount: items.count)
         let activeItem = items[active]
         return VStack(spacing: 14) {
-            topZone(item: activeItem, count: items.count)
+            // Partie DÉFILABLE (§39/§87) : elle occupe toute la place que lui
+            // laissent les contrôles ancrés ci-dessous.
+            GeometryReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(spacing: 14) {
+                        topZone(item: activeItem, count: items.count)
 
-            Spacer(minLength: 0)
+                        Spacer(minLength: 0)
 
-            carousel(items: items, activeIndex: active)
+                        carousel(items: items, activeIndex: active)
+                    }
+                    // Au moins la hauteur visible : aux tailles standard, le
+                    // `Spacer` s'étend comme avant (carrousel en zone basse
+                    // §30) ; aux tailles d'accessibilité, le contenu dépasse
+                    // et devient défilable au lieu d'être coupé.
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            }
 
             // APERÇU PRINCIPAL §47.2 — décision Jalon 10 (§88.11/§89,
             // documentée en tête de fichier) : bouton discret pleine largeur,
@@ -587,6 +725,9 @@ struct AssemblyView: View {
             }
 
             // Mini-timeline §35.3 : toucher/glisser déplace la sélection.
+            // ANCRÉE hors du défilement (§30/§39/§87) — c'est le moyen de
+            // navigation qui reste atteignable d'un pouce quelle que soit la
+            // taille de texte, même quand la zone haute remplit l'écran.
             AssemblyMiniTimelineView(
                 slots: items,
                 activeIndex: active,
@@ -601,7 +742,9 @@ struct AssemblyView: View {
                     select(index, in: items)
                 }
             )
-            .frame(height: 44)
+            // §39 : suit la taille de texte, jamais sous 44 pt (cible
+            // tactile — c'est aussi une zone de tap et de glissé §35.3).
+            .frame(height: miniTimelineHeight)
             .padding(.horizontal, 20)
         }
         .frame(maxWidth: .infinity)
@@ -611,6 +754,13 @@ struct AssemblyView: View {
     }
 
     // MARK: - Zone haute (§35.1)
+
+    /// Hauteur minimale de l'aperçu 16:9 de la zone haute (§35.1) — voir le
+    /// commentaire de `topZone`. Constante d'ÉCRAN, pas de texte : elle ne
+    /// suit volontairement pas Dynamic Type (une vidéo ne grossit pas avec la
+    /// taille de police), elle garantit seulement que l'aperçu reste VISIBLE
+    /// quand la place manque (§39/§87).
+    private static let minPreviewHeight: CGFloat = 120
 
     /// Aperçu + « Plan X sur N » + timestamps début → fin + durée requise.
     ///
@@ -677,6 +827,17 @@ struct AssemblyView: View {
                     }
                 }
                 .aspectRatio(16 / 9, contentMode: .fit)
+                // §39/§87 : PLANCHER de visibilité. Un cadre en `aspectRatio`
+                // est totalement flexible en hauteur : dans un `VStack`, c'est
+                // donc lui que la mise en page écrase en premier quand la
+                // place manque — aux tailles d'accessibilité, l'aperçu §35.1
+                // disparaissait purement et simplement au profit des lignes de
+                // texte et du carrousel. Ce plancher l'en empêche : le 16/9
+                // est alors conservé en réduisant la LARGEUR (le cadre reste
+                // centré), et c'est le défilement de `assemblyContent` qui
+                // absorbe le dépassement. Ne joue jamais aux tailles standard
+                // (la hauteur naturelle y vaut ~190 pt sur un grand iPhone).
+                .frame(minHeight: Self.minPreviewHeight)
             }
             .buttonStyle(.plain)
             // §64 : seule la lecture du PASSAGE MUSICAL dépend du fichier
@@ -764,7 +925,19 @@ struct AssemblyView: View {
             .scrollPosition(id: $carouselPosition, anchor: .center)
             .scrollIndicators(.hidden)
         }
-        .frame(height: 132)
+        // §39/§87 : même mise à l'échelle Dynamic Type que les cartes
+        // (base commune `SlotCardView.baseMinHeight`) — aux tailles
+        // d'accessibilité, la fenêtre grandit avec son contenu au lieu de
+        // le tronquer.
+        .frame(height: carouselHeight)
+    }
+
+    /// Hauteur effective de la mini-timeline §35.3 : la valeur mise à
+    /// l'échelle, plancher 44 pt (§39 — la zone reste tapable et glissable
+    /// même aux tailles de texte les plus PETITES, où `@ScaledMetric`
+    /// réduirait la valeur de base).
+    private var miniTimelineHeight: CGFloat {
+        max(44, scaledMiniTimelineHeight)
     }
 
     // MARK: - Aperçu principal du préfixe (§47.2, zone basse §30)
@@ -874,12 +1047,34 @@ struct AssemblyView: View {
 
     // MARK: - Navigation entre cases (§35.3, §59)
 
-    /// Sélection par la mini-timeline (tap/drag §35.3) : met à jour la
-    /// case active ET recentre le carrousel.
+    /// §38 « GLISSEMENT VERS LA PROCHAINE CASE » + §87 : animation du
+    /// recentrage PROGRAMMÉ du carrousel — `nil` dès que « Réduire les
+    /// animations » est actif, et `withAnimation(nil)` n'anime rien : le
+    /// carrousel se replace alors instantanément, sans glissement.
+    ///
+    /// Volontairement COURTE (0,25 s) et sans rebond : §38 interdit toute
+    /// « animation décorative longue ». Avec le morphing de `SlotCardView`,
+    /// c'est la seule animation du projet.
+    private var slideAnimation: Animation? {
+        reduceMotion ? nil : .snappy(duration: 0.25)
+    }
+
+    /// Sélection PROGRAMMÉE d'une case : tap sur une carte voisine (§35.2),
+    /// tap/glissé sur la mini-timeline (§35.3) et avancement automatique
+    /// §46 (`onSlotChanged` depuis la photothèque, la feuille restant
+    /// ouverte §83). Met à jour la case active ET recentre le carrousel.
     private func select(_ index: Int, in items: [AssemblySlotItem]) {
         let clamped = AssemblyViewLogic.clampedActiveIndex(index, slotCount: items.count)
         guard clamped != activeIndex else { return }
-        carouselPosition = clamped
+        // §38 « glissement vers la prochaine case » : le recentrage GLISSE au
+        // lieu de sauter. Seul ce chemin est animé — le scroll à la MAIN
+        // reste natif (il arrive par `.onChange(of: carouselPosition)`), et
+        // la restauration §60 à l'ouverture n'est pas animée non plus
+        // (placement initial). Neutralisé sous « Réduire les animations »
+        // (§38/§87) : `slideAnimation` vaut alors `nil`.
+        withAnimation(slideAnimation) {
+            carouselPosition = clamped
+        }
         selectionDidChange(to: clamped)
     }
 
@@ -1063,9 +1258,7 @@ struct AssemblyView: View {
 
     /// Fenêtre de chargement des miniatures : identifiants d'asset des
     /// cases PRÊTES autour de la case active (± 2 — les trois cartes
-    /// visibles du carrousel et leurs voisines immédiates §35.2). Sert de
-    /// clé au `.task(id:)` : navigation ou nouvelle association → la
-    /// fenêtre change → chargement des manquantes.
+    /// visibles du carrousel et leurs voisines immédiates §35.2).
     private var thumbnailWindowAssetIDs: [String] {
         let items = slotItems
         guard !items.isEmpty else { return [] }
@@ -1078,25 +1271,66 @@ struct AssemblyView: View {
         }
     }
 
+    /// Clé du `.task(id:)` des miniatures : la fenêtre ET la hauteur de
+    /// carte ARRONDIE (§39/§87).
+    ///
+    /// La hauteur en fait partie parce que la taille demandée au
+    /// `ThumbnailProvider` (`cardThumbnailPixelSize(cardHeight:)`) est celle
+    /// de la carte, donc celle de `carouselHeight`, un `@ScaledMetric` :
+    /// changer la taille de texte change la RÉSOLUTION demandée. Sans elle,
+    /// la clé ne bougerait pas et les cartes garderaient des miniatures
+    /// calculées pour l'ancienne taille (floues en grandissant). Arrondie au
+    /// point : deux hauteurs identiques ne relancent rien.
+    private struct ThumbnailWindowKey: Equatable, Sendable {
+        let assetIDs: [String]
+        let cardHeight: Int
+    }
+
+    private var thumbnailWindowKey: ThumbnailWindowKey {
+        ThumbnailWindowKey(
+            assetIDs: thumbnailWindowAssetIDs,
+            cardHeight: Int(carouselHeight.rounded())
+        )
+    }
+
     /// Taille de carte en PIXELS pour les miniatures (§35.2) : largeur de
-    /// carte ~55 % d'un grand iPhone (~215 pt) × hauteur de carte 132 pt, à
-    /// l'échelle de l'écran — approximation STABLE documentée (la largeur
-    /// réelle dépend du conteneur), jamais de décodage 4K (§42/§67). La
-    /// zone haute réutilise la même image (§35.1 « même image »), quitte à
-    /// l'agrandir légèrement.
-    private var cardThumbnailPixelSize: CGSize {
-        CGSize(width: 215 * displayScale, height: 132 * displayScale)
+    /// carte ~55 % d'un grand iPhone (~215 pt) × hauteur de carte (celle du
+    /// carrousel, mise à l'échelle Dynamic Type §39), à l'échelle de
+    /// l'écran — approximation STABLE documentée (la largeur réelle dépend
+    /// du conteneur), jamais de décodage 4K (§42/§67). La zone haute
+    /// réutilise la même image (§35.1 « même image »), quitte à l'agrandir
+    /// légèrement.
+    ///
+    /// La hauteur est passée en PARAMÈTRE (et non relue depuis
+    /// `carouselHeight`) : c'est la MÊME valeur que celle de la clé du
+    /// `.task`, donc la résolution demandée correspond toujours exactement
+    /// à la taille pour laquelle le cache est rempli.
+    private func cardThumbnailPixelSize(cardHeight: Int) -> CGSize {
+        CGSize(width: 215 * displayScale, height: CGFloat(cardHeight) * displayScale)
     }
 
     /// Charge les miniatures MANQUANTES de la fenêtre (§35.2) via
     /// `ThumbnailProvider` — séquentiel (au plus 5 assets), chaque image
     /// mise en cache local par identifiant d'asset.
-    private func loadThumbnails(for assetIDs: [String]) async {
-        for assetID in assetIDs where thumbnailsByAssetID[assetID] == nil {
+    ///
+    /// §39/§87 : le cache est indexé par identifiant d'asset SEUL, alors que
+    /// la résolution demandée dépend de la taille de texte. Un changement de
+    /// taille périme donc TOUTES les images déjà chargées — le cache est vidé
+    /// avant rechargement, sinon la boucle sauterait les entrées existantes
+    /// et laisserait des miniatures à l'ancienne résolution. Le test est fait
+    /// ICI (et non dans un `.onChange`) pour qu'il n'y ait aucun ordre
+    /// d'exécution à supposer : le vidage précède toujours le rechargement.
+    private func loadThumbnails(for key: ThumbnailWindowKey) async {
+        if key.cardHeight != cachedThumbnailCardHeight {
+            thumbnailsByAssetID.removeAll()
+            cachedThumbnailCardHeight = key.cardHeight
+        }
+        let targetSize = cardThumbnailPixelSize(cardHeight: key.cardHeight)
+        for assetID in key.assetIDs where thumbnailsByAssetID[assetID] == nil {
             guard !Task.isCancelled else { return }
             guard let image = await environment.thumbnailProvider.thumbnail(
                 for: assetID,
-                targetSize: cardThumbnailPixelSize
+                targetSize: targetSize
             ) else { continue } // asset disparu (§64) → placeholder
             thumbnailsByAssetID[assetID] = image
         }
@@ -1152,10 +1386,20 @@ struct AssemblyView: View {
                 isPaceLockAlertPresented = true
             } catch {
                 environment.logger.error("Changement de rythme impossible : \(error.localizedDescription)")
+                paceChangeErrorMessage = Self.paceChangeFailureMessage
                 isPaceChangeErrorPresented = true
             }
         }
     }
+
+    /// §62/§64 : le message dit ce qui a échoué ET quoi faire — le montage
+    /// n'a pas bougé, l'action est simplement à refaire.
+    private static let paceChangeFailureMessage =
+        "Le rythme n'a pas pu être changé. Votre montage est intact : réessayez depuis le menu du projet."
+
+    private static let duplicationFailureMessage =
+        "Le projet n'a pas pu être dupliqué. Votre montage est intact : réessayez, "
+        + "ou libérez de l'espace sur l'iPhone si le problème persiste."
 
     /// §65 : duplication POUR CHANGER DE RYTHME — la copie repart SANS
     /// associations, au choix du rythme (`duplicateForPaceChange`), sinon
@@ -1169,6 +1413,7 @@ struct AssemblyView: View {
                 dismiss()
             } catch {
                 environment.logger.error("Duplication impossible : \(error.localizedDescription)")
+                paceChangeErrorMessage = Self.duplicationFailureMessage
                 isPaceChangeErrorPresented = true
             }
         }
@@ -1279,4 +1524,23 @@ private func makeAssemblyPreviewContainer(
     }
     .environment(environment)
     .modelContainer(container)
+}
+
+// §39/§87 : contrôle visuel Dynamic Type de l'écran complet. Le carrousel et
+// la mini-timeline suivent la taille de texte (`@ScaledMetric`) ; à cette
+// taille, les hauteurs fixes du Jalon 7 tronquaient les cartes.
+#Preview("Assemblage — accessibilité 3") {
+    let (container, projectID) = makeAssemblyPreviewContainer(
+        durationsTicks: [72_000, 96_000, 60_000, 120_000, 84_000, 108_000, 66_000, 90_000],
+        activeSlotIndex: 2
+    )
+    let environment = AppEnvironment(modelContainer: container)
+    return NavigationStack {
+        AssemblyView(projectID: projectID)
+            .navigationTitle("Projet du 10 août 2026 • 11:24")
+            .toolbarTitleDisplayMode(.inline)
+    }
+    .environment(environment)
+    .modelContainer(container)
+    .environment(\.dynamicTypeSize, .accessibility3)
 }

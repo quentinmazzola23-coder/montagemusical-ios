@@ -15,6 +15,18 @@
 //  accessibilité §39 (libellés, cibles ≥ 44 pt, sélection marquée par
 //  autre chose que la couleur).
 //
+//  Revue finale (§39) — CIBLES TACTILES DU SÉLECTEUR.
+//  Les trois segments du sélecteur de rythme n'avaient qu'un plancher de
+//  HAUTEUR (`minHeight: 52`) : leur largeur était le tiers de ce que
+//  « Projets » et « Utiliser ce rythme » laissaient libre. Aux grandes
+//  tailles de texte, ces deux voisins grossissent et chaque segment pouvait
+//  passer SOUS 44 pt — §39 exige ≥ 44 pt, dans les deux dimensions. Deux
+//  correctifs, décrits dans `selectionDock(family:)` : plancher explicite
+//  `minWidth: 44` sur chaque segment, et bascule du sélecteur sur SA PROPRE
+//  ligne, au-dessus de la rangée `[Projets] [Valider]`, aux tailles
+//  d'accessibilité — le dock reste entier en zone basse (§30) et les trois
+//  zones §36 restent présentes, sur deux lignes au lieu d'une.
+//
 
 import SwiftData
 import SwiftUI
@@ -102,6 +114,9 @@ struct MiniTimelineView: View {
 struct PaceSelectionView: View {
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.dismiss) private var dismiss
+    /// §39 : aux tailles d'accessibilité, le sélecteur de rythme passe sur sa
+    /// propre ligne pour garder des segments ≥ 44 pt (voir `selectionDock`).
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private let projectID: UUID
     /// Famille injectée pour les previews SwiftUI UNIQUEMENT (aucune
@@ -142,6 +157,12 @@ struct PaceSelectionView: View {
                 readyContent(family: family)
             }
         }
+        // §38 : le passage chargement → rythmes (ou → recalcul §61) n'est
+        // pas animé — c'est un choix §38 (« aucune animation décorative »),
+        // et le changement de mode sélectionné ne l'est pas davantage. La
+        // garde neutralise toute animation implicite héritée quand
+        // « Réduire les animations » est actif.
+        .reduceMotionSafe()
         .task(id: projectID) {
             await loadScores()
         }
@@ -197,6 +218,12 @@ struct PaceSelectionView: View {
 
     /// Dock de l'état à recalculer : `Projets` | `Recalculer` (≥ 44 pt,
     /// zone basse §30). Le recalcul est EXPLICITE (§61).
+    ///
+    /// §39 — VÉRIFIÉ à la revue finale : DEUX zones seulement ici, dont une
+    /// (`Recalculer`) prend tout l'espace restant ; même aux tailles
+    /// d'accessibilité, sa largeur reste très au-dessus de 44 pt. Le plancher
+    /// `minWidth: 44` est posé quand même, pour que la garantie soit LUE dans
+    /// le code et non déduite d'un calcul de place.
     private var staleDock: some View {
         HStack(spacing: 12) {
             dockSecondaryButton(
@@ -211,7 +238,8 @@ struct PaceSelectionView: View {
             } label: {
                 Label("Recalculer", systemImage: "arrow.clockwise")
                     .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity, minHeight: 52) // ≥ 44 pt (§39)
+                    // ≥ 44 pt en largeur comme en hauteur (§39).
+                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 52)
                     .background(.ultraThinMaterial, in: Capsule())
                     .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
             }
@@ -302,18 +330,36 @@ struct PaceSelectionView: View {
     /// Le CTA affiche « Utiliser ce rythme » (§34) si la place le permet,
     /// sinon « Valider » — libellé accessible « Utiliser ce rythme » dans
     /// les deux cas (§39).
+    ///
+    /// §39 — DISPOSITION SELON LA TAILLE DE TEXTE. Les trois zones §36 se
+    /// partagent une ligne tant que c'est tenable. Aux tailles
+    /// d'ACCESSIBILITÉ, « Projets » et « Utiliser ce rythme » deviennent si
+    /// larges qu'il ne resterait plus 3 × 44 pt pour le sélecteur : celui-ci
+    /// prend alors SA PROPRE ligne, au-dessus de `[Projets] [Valider]`.
+    /// Toujours dans la zone basse (§30), toujours les mêmes trois zones
+    /// (§36) — seulement réparties sur deux lignes. Le sélecteur est placé
+    /// AU-DESSUS et non en dessous pour que la validation reste le contrôle
+    /// le plus proche du pouce.
     private func selectionDock(family: EditScoreFamily) -> some View {
-        HStack(spacing: 8) {
-            dockSecondaryButton(
-                title: "Projets",
-                accessibilityHint: "Revient à la liste des projets."
-            ) {
-                dismiss()
+        VStack(spacing: 8) {
+            if dynamicTypeSize.isAccessibilitySize {
+                modeSelector(family: family)
             }
 
-            modeSelector(family: family)
+            HStack(spacing: 8) {
+                dockSecondaryButton(
+                    title: "Projets",
+                    accessibilityHint: "Revient à la liste des projets."
+                ) {
+                    dismiss()
+                }
 
-            validateButton(family: family)
+                if !dynamicTypeSize.isAccessibilitySize {
+                    modeSelector(family: family)
+                }
+
+                validateButton(family: family)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -325,6 +371,13 @@ struct PaceSelectionView: View {
     /// jamais par la seule couleur (§39). Chaque segment annonce ses stats
     /// à VoiceOver (« Équilibré, 24 plans, durée moyenne 1 virgule 20
     /// seconde »).
+    ///
+    /// §39 — CIBLE ≥ 44 pt DANS LES DEUX DIMENSIONS. `minHeight: 52` ne
+    /// garantissait que la hauteur : la largeur d'un segment était le tiers
+    /// de l'espace laissé par ses voisins de dock, donc potentiellement bien
+    /// en dessous de 44 pt. `minWidth: 44` pose le plancher manquant ; si les
+    /// trois segments ne tiennent plus, `selectionDock` leur donne une ligne
+    /// entière plutôt que de les laisser rétrécir.
     private func modeSelector(family: EditScoreFamily) -> some View {
         HStack(spacing: 4) {
             ForEach(PaceMode.allCases, id: \.self) { mode in
@@ -346,7 +399,8 @@ struct PaceSelectionView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .padding(.horizontal, 6)
-                    .frame(maxWidth: .infinity, minHeight: 52) // ≥ 44 pt (§39)
+                    // ≥ 44 pt en LARGEUR comme en HAUTEUR (§39).
+                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 52)
                     .background(.ultraThinMaterial, in: Capsule())
                     .overlay(
                         Capsule().strokeBorder(
@@ -379,7 +433,9 @@ struct PaceSelectionView: View {
             .font(.body.weight(.semibold))
             .lineLimit(1)
             .padding(.horizontal, 14)
-            .frame(minHeight: 52) // ≥ 44 pt (§39)
+            // ≥ 44 pt en largeur comme en hauteur (§39) — le libellé le plus
+            // court (« Valider ») dépasse déjà ce plancher, qui reste écrit.
+            .frame(minWidth: 44, minHeight: 52)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
         }
@@ -527,7 +583,8 @@ struct PaceSelectionView: View {
             Text(title)
                 .font(.body.weight(.medium))
                 .padding(.horizontal, 14)
-                .frame(minHeight: 52) // cible ≥ 44 pt (§39)
+                // cible ≥ 44 pt en largeur comme en hauteur (§39)
+                .frame(minWidth: 44, minHeight: 52)
                 .background(.ultraThinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
         }
@@ -599,6 +656,23 @@ private func makePreviewFamily() -> EditScoreFamily {
     }
     .environment(environment)
     .modelContainer(container)
+}
+
+/// §39 — contrôle visuel du dock à une taille d'ACCESSIBILITÉ : le sélecteur
+/// doit occuper sa propre ligne au-dessus de `[Projets] [Valider]`, chaque
+/// segment restant ≥ 44 pt. À vérifier sur Mac (le projet n'a jamais été
+/// compilé sous Windows).
+#Preview("Choix du rythme — accessibilité 3") {
+    let container = try! ModelContainerFactory.makeInMemory()
+    let environment = AppEnvironment(modelContainer: container)
+    return NavigationStack {
+        PaceSelectionView(projectID: UUID(), previewFamily: makePreviewFamily())
+            .navigationTitle("Projet du 10 août 2026 • 11:24")
+            .toolbarTitleDisplayMode(.inline)
+    }
+    .environment(environment)
+    .modelContainer(container)
+    .dynamicTypeSize(.accessibility3)
 }
 
 #Preview("Rythmes à recalculer") {

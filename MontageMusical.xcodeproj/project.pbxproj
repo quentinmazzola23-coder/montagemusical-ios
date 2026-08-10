@@ -275,6 +275,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Montage;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "L'ajout à la photothèque permet d'enregistrer les montages exportés.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Votre photothèque permet de choisir les vidéos qui rempliront les cases du montage.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -302,6 +303,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Montage;
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "L'ajout à la photothèque permet d'enregistrer les montages exportés.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Votre photothèque permet de choisir les vidéos qui rempliront les cases du montage.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

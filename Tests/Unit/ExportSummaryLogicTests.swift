@@ -13,7 +13,10 @@
 //  - messages d'issue : §57 espace insuffisant, §66 fichier conservé,
 //    §64 erreur d'export, §8.1 interruption en arrière-plan ;
 //  - pourcentage de progression §58 (borné, jamais extrapolé) et dérivation
-//    PURE des phases terminales.
+//    PURE des phases terminales ;
+//  - §60/§8.1 : un export RESTAURÉ depuis `exports/` après relance ne
+//    s'annonce pas comme un export qui vient d'aboutir (titre et message
+//    distincts, passé explicite).
 //
 //  Le calcul des dimensions orientées d'un rush a DISPARU avec le calcul de
 //  profil propre à la vue (Jalon 10) : le profil §52 vient désormais d'une
@@ -349,5 +352,38 @@ final class ExportSummaryLogicTests: XCTestCase {
             ExportSummaryLogic.terminalPhase(for: .emptyPrefix),
             .failed(message: ExportSummaryLogic.message(for: ExportError.emptyPrefix))
         )
+    }
+
+    // MARK: - Issue disponible : export récent vs export RESTAURÉ (§60, §8.1)
+
+    func testRestoredExportIsAnnouncedDifferentlyFromAFreshOne() {
+        // §60 : après relance, le fichier d'`exports/` est retrouvé et
+        // reproposé (partage §66, Photos §40/§55). §8.1 interdit qu'il soit
+        // annoncé comme un export qui vient d'aboutir : titre ET message
+        // doivent différer.
+        XCTAssertEqual(ExportSummaryLogic.readyTitle(isRestored: false), "Montage prêt")
+        XCTAssertEqual(ExportSummaryLogic.readyTitle(isRestored: true), "Montage déjà exporté")
+        XCTAssertNotEqual(
+            ExportSummaryLogic.readyTitle(isRestored: true),
+            ExportSummaryLogic.readyTitle(isRestored: false),
+            "Un export restauré ne porte jamais le titre d'un export qui vient de finir (§8.1)"
+        )
+        XCTAssertNotEqual(
+            ExportSummaryLogic.readyMessage(isRestored: true),
+            ExportSummaryLogic.readyMessage(isRestored: false)
+        )
+
+        // Le message restauré SITUE l'export dans le passé — c'est ce qui
+        // empêche de le lire comme une réussite immédiate.
+        XCTAssertTrue(
+            ExportSummaryLogic.readyMessage(isRestored: true).contains("session précédente"),
+            "Le message dit que l'export date d'avant (§60)"
+        )
+        // Les deux messages nomment les gestes possibles (§40/§55/§66).
+        for isRestored in [true, false] {
+            let message = ExportSummaryLogic.readyMessage(isRestored: isRestored)
+            XCTAssertTrue(message.contains("Photos"), "L'enregistrement dans Photos est nommé")
+            XCTAssertFalse(message.isEmpty)
+        }
     }
 }

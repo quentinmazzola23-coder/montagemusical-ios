@@ -40,6 +40,12 @@ import UniformTypeIdentifiers
 /// - Matériaux translucides sobres (§37), aucune animation décorative (§38),
 ///   libellés accessibles et cibles ≥ 44 pt (§39).
 ///
+/// Jalon 12 (§38) — cet écran change de PHASE (sans musique → import →
+/// musique/analyse → rythme → assemblage) sans jamais animer la transition :
+/// c'est un choix §38 (« aucune animation décorative longue »).
+/// `reduceMotionSafe()` garantit qu'aucune animation implicite héritée ne
+/// s'y attache quand « Réduire les animations » est actif.
+///
 /// La vue reçoit uniquement un `UUID` : `ProjectRecord` n'est pas `Sendable`
 /// et ne traverse jamais une frontière d'acteur.
 struct ProjectView: View {
@@ -92,6 +98,10 @@ struct ProjectView: View {
                 notFoundFallback
             }
         }
+        // §38 : les changements de phase de cet écran ne sont pas animés
+        // (choix documenté ci-dessus) — la garde neutralise en plus toute
+        // animation implicite héritée sous « Réduire les animations ».
+        .reduceMotionSafe()
         // Le dock fournit le retour (« Projets »/« Retour ») en zone basse
         // (§30) : le bouton retour système du haut est masqué.
         .navigationBarBackButtonHidden(true)
@@ -346,9 +356,13 @@ struct ProjectView: View {
         // `content(for:)` affiche `PaceSelectionView` (§34, Jalon 6).
         case .failed:
             VStack(spacing: 8) {
-                Text("L'analyse a échoué")
+                // §63/§87 : dire ce qui a échoué ET ce que fait « Réessayer »
+                // — l'analyse repart du dernier checkpoint, rien n'est perdu.
+                Text("L'analyse de la musique a échoué. Réessayez : les étapes déjà terminées sont conservées.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
                 // §63 : échec → bouton « Réessayer » (état sobre).
                 Button("Réessayer") {
                     retryAnalysis()
@@ -368,10 +382,16 @@ struct ProjectView: View {
     private var waveformArea: some View {
         if isMediaUnavailable {
             // Incohérence disque/base : état sobre, le dock reste utilisable.
-            Text("Fichier audio introuvable")
+            // §62/§64 : la cause ET la suite à donner sont dites — sans le
+            // fichier original, ce projet ne peut plus être ni analysé ni
+            // monté ; le seul chemin est d'en créer un nouveau (le
+            // remplacement de musique §65 n'existe pas en V1).
+            Text("Fichier audio introuvable. Créez un nouveau projet et réimportez cette musique.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .frame(height: 96)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+                .frame(minHeight: 96)
         } else if let waveformSamples {
             WaveformView(
                 samples: waveformSamples,
