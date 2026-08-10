@@ -249,11 +249,16 @@ actor MediaLibraryActor {
                     continuation.resume(throwing: Self.resolutionError(info: info))
                     return
                 }
-                // Lectures asynchrones dans une Task locale au rappel :
-                // `avAsset`/`videoTrack` (non-`Sendable`) vivent et meurent
-                // dans cette région — région disjointe transférée à la Task,
-                // jamais fusionnée avec celle de l'acteur.
+                // Lectures asynchrones dans une Task locale au rappel.
+                // Le rappel PhotoKit n'est pas `sending` : le compilateur ne
+                // peut pas prouver que la région de `avAsset` est déconnectée
+                // — boîte `@unchecked Sendable`, sûreté par CONTRAT D'USAGE :
+                // l'asset n'est lu QUE dans cette Task (lectures AVFoundation
+                // thread-safe), jamais partagé ni muté ailleurs, et seul le
+                // `ResolvedVideoAsset` (`Sendable`) en sort.
+                let assetBox = UncheckedSendableBox(value: avAsset)
                 Task {
+                    let avAsset = assetBox.value
                     do {
                         // §64 : piste vidéo absente → refuser d'abord.
                         let videoTracks = try await avAsset.loadTracks(withMediaType: .video)
@@ -335,6 +340,16 @@ actor MediaLibraryActor {
 private let CKErrorDomainName = "CKErrorDomain"
 
 // MARK: - Garde de continuation unique
+
+// Non defini par la specification — outil de concurrence V1.
+/// Boîte de transfert pour une valeur non-`Sendable` livrée par un rappel
+/// système (PhotoKit) dont la fermeture n'est pas `sending` : le compilateur
+/// ne peut pas prouver la déconnexion de région. Sûreté par CONTRAT
+/// D'USAGE, documenté à chaque point d'emploi (valeur lue par une seule
+/// Task, jamais partagée).
+private struct UncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+}
 
 /// Verrou minimal garantissant qu'une continuation n'est reprise qu'UNE
 /// fois même si PhotoKit rappelle son handler (documenté : rappels
