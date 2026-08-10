@@ -15,7 +15,11 @@ import UniformTypeIdentifiers
 /// 3. **Musique présente** (`audioRelativePath` non nil) : forme d'onde
 ///    (`WaveformView`), durée (`MediaTime.displayString`), lecture par
 ///    toucher sur la waveform et bouton Lecture/Pause au dock (ligne §36 la
-///    plus proche : Retour | Lecture/Pause | —).
+///    plus proche : Retour | Lecture/Pause | —). Jalon 4 : au statut
+///    `analyzing`, l'analyse réelle est pilotée par `AudioAnalysisActor`
+///    (démarrage idempotent, progression §33 par polling, annulation avec
+///    checkpoint à la disparition de la vue §8.1) ; `awaitingPaceSelection`
+///    et `failed` (bouton « Réessayer » §63) ont un état sobre.
 ///
 /// Flux d'import (annexe A) : `setStatus(.importingAudio)` →
 /// `importAudio(from:into:)` → `attachAudio` (qui place le statut sur
@@ -58,6 +62,12 @@ struct ProjectView: View {
     /// Vrai si `audio/` ne contient aucun fichier lisible (incohérence
     /// disque/base) — état sobre, jamais de crash.
     @State private var isMediaUnavailable = false
+
+    // MARK: État analyse (Jalon 4)
+
+    /// Dernière progression publiée par `AudioAnalysisActor` (§33 : phase
+    /// courante + étapes terminées, jamais de pourcentage).
+    @State private var analysisProgress: AnalysisProgress?
 
     init(projectID: UUID) {
         self.projectID = projectID
@@ -226,14 +236,10 @@ struct ProjectView: View {
                     .accessibilityLabel("Durée de la musique : \(audioDuration.displayString)")
             }
 
-            // §33 : ne JAMAIS afficher de faux pourcentage ni de fausse
-            // barre de progression — le moteur d'analyse réel arrive au
-            // Jalon 4 ; simple mention textuelle en attendant.
-            if status == .analyzing {
-                Text("Analyse musicale à venir")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-            }
+            // Jalon 4 : progression RÉELLE de l'analyse (§33 : phase
+            // courante + étapes terminées, jamais de pourcentage), état
+            // terminé sobre, ou échec avec « Réessayer » (§63).
+            analysisStatusArea(status: status)
 
             Spacer(minLength: 0)
             Spacer(minLength: 0)
@@ -243,9 +249,82 @@ struct ProjectView: View {
         .task(id: projectID) {
             await loadMedia()
         }
+        // Pilotage de l'analyse (§8, annexe A) : au statut `analyzing`,
+        // démarrage idempotent puis polling de la progression (300 ms).
+        // Le changement de statut relance la `.task` (id) et arrête la
+        // boucle ; la disparition de la vue l'annule.
+        .task(id: status) {
+            guard status == .analyzing else { return }
+            await environment.audioAnalysisActor.startAnalysisIfNeeded(projectID: projectID)
+            while !Task.isCancelled {
+                if let progress = await environment.audioAnalysisActor.currentProgress(projectID: projectID) {
+                    analysisProgress = progress
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
         .onDisappear {
             // Retire l'observateur périodique et arrête la lecture.
             playerController.invalidate()
+            // §8.1 : l'analyse est annulée à la sortie de l'écran — le
+            // checkpoint du dernier jalon terminé est conservé et l'analyse
+            // reprend à la prochaine ouverture du projet (§63).
+            let analysisActor = environment.audioAnalysisActor
+            let id = projectID
+            Task { await analysisActor.cancelAnalysis(projectID: id) }
+        }
+    }
+
+    // MARK: - Zone analyse (Jalon 4, §33, §63)
+
+    /// Les quatre phases publiées par le moteur au Jalon 4 (la 5ᵉ phase §33
+    /// « Création des rythmes » arrive avec le générateur de scores,
+    /// Jalon 5).
+    private static let analysisPhases: [AnalysisPhase] = [
+        .audioPreparation, .pulseAndTempo, .phrasesAndStructure, .buildUpsAndImpacts,
+    ]
+
+    @ViewBuilder
+    private func analysisStatusArea(status: ProjectStatus) -> some View {
+        switch status {
+        case .analyzing:
+            // §33 : phase courante + « Phase x sur 4 » — SANS pourcentage
+            // (le spinner est indéterminé). Avant la première publication,
+            // la première phase est affichée.
+            let phase = analysisProgress?.phase ?? .audioPreparation
+            let phaseNumber = (Self.analysisPhases.firstIndex(of: phase) ?? 0) + 1
+            VStack(spacing: 6) {
+                ProgressView()
+                Text(phase.displayLabel)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("Phase \(phaseNumber) sur \(Self.analysisPhases.count)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Analyse en cours : \(phase.displayLabel), phase \(phaseNumber) sur \(Self.analysisPhases.count)")
+        case .awaitingPaceSelection:
+            // Le choix du rythme (feuille §34) arrive au Jalon 6.
+            Text("Analyse terminée — choix du rythme à venir")
+                .font(.footnote)
+                .foregroundStyle(.tertiary)
+        case .failed:
+            VStack(spacing: 8) {
+                Text("L'analyse a échoué")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                // §63 : échec → bouton « Réessayer » (version sobre ;
+                // l'interface complète d'analyse arrive au Jalon 6).
+                Button("Réessayer") {
+                    retryAnalysis()
+                }
+                .font(.footnote.weight(.semibold))
+                .buttonStyle(.bordered)
+                .accessibilityHint("Relance l'analyse musicale du projet.")
+            }
+        default:
+            EmptyView()
         }
     }
 
@@ -347,9 +426,9 @@ struct ProjectView: View {
                 try await environment.projectStore.setStatus(.importingAudio, projectID: projectID)
                 let imported = try await environment.audioImporter.importAudio(from: url, into: projectID)
                 // `attachAudio` enregistre `audioRelativePath` et place le
-                // statut sur `.analyzing` (annexe A). L'analyse RÉELLE
-                // démarre au Jalon 4 ; en attendant, l'interface affiche
-                // « Analyse musicale à venir » sans fausse progression (§33).
+                // statut sur `.analyzing` (annexe A) — la `.task(id: status)`
+                // de l'état musique présente démarre alors l'analyse réelle
+                // via `AudioAnalysisActor` (Jalon 4).
                 try await environment.projectStore.attachAudio(imported, projectID: projectID)
             } catch {
                 // §62 : erreur d'import → retour au brouillon + explication.
@@ -365,6 +444,25 @@ struct ProjectView: View {
                 importErrorMessage = error.localizedDescription
                 isImportErrorPresented = true
             }
+        }
+    }
+
+    // MARK: - Actions Jalon 4
+
+    /// §63 : « échec : bouton Réessayer » — remet le statut à `analyzing`
+    /// puis relance l'analyse (le checkpoint éventuel est réutilisé, §69).
+    /// Le changement de statut déclenche aussi la `.task(id: status)` qui
+    /// pilote le polling de progression.
+    private func retryAnalysis() {
+        analysisProgress = nil
+        Task {
+            do {
+                try await environment.projectStore.setStatus(.analyzing, projectID: projectID)
+            } catch {
+                environment.logger.error("Relance de l'analyse impossible : \(error.localizedDescription)")
+                return
+            }
+            await environment.audioAnalysisActor.startAnalysisIfNeeded(projectID: projectID)
         }
     }
 

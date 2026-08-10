@@ -41,6 +41,18 @@ final class AppEnvironment {
     /// lecture par blocs pour limiter la mémoire.
     let waveformExtractor: WaveformExtractor
 
+    /// Cache d'analyse et checkpoints de phase dans `analysis/` (§11, §69).
+    let analysisCache: AnalysisCache
+
+    /// Moteur musical déterministe niveau A (Jalon 4, §15, §79) — protocole
+    /// `MusicAnalyzing` §7 ; le moteur avancé Core ML (Jalon 11) se
+    /// branchera derrière le même protocole.
+    let musicAnalyzer: DeterministicMusicAnalyzer
+
+    /// Acteur d'analyse (§8) : une analyse lourde à la fois par projet,
+    /// progression observable, annulation avec checkpoint conservé (§8.1).
+    let audioAnalysisActor: AudioAnalysisActor
+
     /// Initialiseur de production : ouvre le conteneur persistant partagé
     /// (Application Support).
     convenience init() {
@@ -63,11 +75,21 @@ final class AppEnvironment {
     init(modelContainer: ModelContainer) {
         self.logger = AppLogger(category: .app)
         self.modelContainer = modelContainer
-        self.projectStore = ProjectStore(modelContainer: modelContainer)
+        let projectStore = ProjectStore(modelContainer: modelContainer)
+        self.projectStore = projectStore
         let fileStore = ProjectFileStore()
         self.fileStore = fileStore
         self.audioImporter = AudioImporter(fileStore: fileStore)
         self.waveformExtractor = WaveformExtractor()
+        let analysisCache = AnalysisCache(fileStore: fileStore)
+        self.analysisCache = analysisCache
+        let musicAnalyzer = DeterministicMusicAnalyzer(cache: analysisCache, fileStore: fileStore)
+        self.musicAnalyzer = musicAnalyzer
+        self.audioAnalysisActor = AudioAnalysisActor(
+            analyzer: musicAnalyzer,
+            projectStore: projectStore,
+            fileStore: fileStore
+        )
     }
 
     /// Maintenance au lancement (§69A) : brouillons vides résiduels,

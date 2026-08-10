@@ -349,6 +349,20 @@ actor ProjectStore {
         try requireProject(projectID).audioRelativePath
     }
 
+    // MARK: - Analyse (Jalon 4)
+
+    /// Enregistre le résultat d'analyse du projet (annexe A `analyze`) :
+    /// chemin relatif du JSON (`analysis/analysis-v1.json`, §11), version
+    /// du moteur (§61) et statut `awaitingPaceSelection` — en une seule
+    /// écriture autosauvegardée (§59).
+    func saveAnalysisResult(relativePath: String, analysisVersion: Int, projectID: UUID) throws {
+        let record = try requireProject(projectID)
+        record.analysisRelativePath = relativePath
+        record.analysisVersion = analysisVersion
+        record.statusRaw = ProjectStatus.awaitingPaceSelection.rawValue
+        try touchAndSave(record) // updatedAt + autosauvegarde (§59)
+    }
+
     // MARK: - Cases (point d'insertion Jalon 6)
 
     /// Point d'insertion unique des cases d'un projet. Les cases sont

@@ -13,8 +13,8 @@
 | 0 — Bootstrap | ✅ Terminé (build CI vert) |
 | 1 — Temps et domaine | ✅ Terminé (tests CI verts) |
 | 2 — Projets et persistance | ✅ Terminé (CI verte, run 31382568859) |
-| 3 — Import audio | 🔄 Implémenté, CI en attente |
-| 4 — Moteur musical déterministe | ⬜ Non démarré |
+| 3 — Import audio | ✅ Terminé (CI verte, run 31385112438) |
+| 4 — Moteur musical déterministe | 🔄 En cours |
 | 5 — Générateur de scores | ⬜ Non démarré |
 | 6 — Interface analyse / choix rythme | ⬜ Non démarré |
 | 7 — Timeline d'assemblage | ⬜ Non démarré |
@@ -99,6 +99,21 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 **Choix techniques** : validation §62 réelle (UTType + taille + DRM + piste **décodable** `load(.isDecodable)` + durée) ; copie atomique temp/ → staging dans audio/ → suppression ancien → renommage (jamais d'état « ancien perdu, nouveau absent ») ; statuts annexe A (`importingAudio` → `analyzing` par `attachAudio`) ; waveform par blocs, canaux natifs entrelacés (AVAssetReaderTrackOutput refuse `AVNumberOfChannelsKey`), recalage VBR, `Task.yield()` par bloc ; aucun faux pourcentage (§33) — libellés « En attente d'analyse » / « Analyse musicale à venir » jusqu'au Jalon 4.
 
 **Limites documentées (V1, à traiter plus tard)** : fichier iCloud Drive non matérialisé → erreur générique (pas de NSFileCoordinator/téléchargement, à améliorer) ; pas d'annulation UI de l'import en cours (§8 — copie généralement courte) ; cas DRM non testé unitairement (aucun fichier protégé synthétisable) ; erreur d'import survenue après avoir quitté l'écran : alerte non visible, projet proprement rendu à `draft` puis balayé.
+
+## Jalon 4 — Moteur musical déterministe niveau A (10 août 2026)
+
+**Fichiers** : `App/Services/MusicAnalysis/` — `PCMDecoder` (streaming AVAssetReaderAudioMixOutput mono 22 050 Hz, §68), `SpectralFeatureExtractor` (STFT vDSP 1024/256 Hann, features §17 normalisées relatives par quantile 0,95), `OnsetDetector` (§18 : détendançage médian, peak picking adaptatif par bande, fusion < 30 ms), `TempoEstimator` (§19.1 : autocorrélation 50–220 BPM, renforcement harmonique + prior log-normal centré 120 BPM, relations half/double conservées, phase par peigne), `BeatTracker` (programmation dynamique type Ellis, mesures 2/3/4 §20, downbeats/bars), `BeatSyncFeatures` (§21/§22 : vecteurs par beat, similarité cosinus au niveau beat — jamais frame×frame, nouveauté par kernels en damier 4/8/16), `StructureBuilder` (arbre UMS §22.3), `CurvesAndEventsBuilder` (courbes §23 E/D/T/N/S/R/V/B, événements §12.4, relations §25 honnêtes, états dramaturgiques heuristiques §24), `AnalysisCache` (empreinte SHA-256 + version moteur + config, checkpoints de phase §79), `DeterministicMusicAnalyzer` (protocole §7, 4 phases §33 publiées, annulable/reprenable), `AudioAnalysisActor` (§8, une analyse par projet). Câblage : analyse réelle au statut `analyzing` dans ProjectView (progression §33 sans pourcentage, Réessayer §63, annulation à la disparition avec checkpoint §8.1) ; succès → `awaitingPaceSelection`. 8 fichiers de tests (audio synthétique déterministe, LCG seedé).
+
+**Écarts niveau A documentés (résorption prévue Jalons 5/11)** :
+- §16.3 : seule la branche courte (1024/256) est calculée ; branches moyenne/longue de la config présentes mais non consommées.
+- §17 : features partielles — pas de crête/rolloff/flatness/ZCR/contraste/HPSS/**chroma** ; conséquence §22.1 : similarité sur énergie/flux sans timbre ni harmonie (répétitions harmoniques indistinguables). Chroma prévu avec le moteur avancé (Jalon 11) ou l'affinage Jalon 5.
+- §20 : mesures candidates limitées à 2/3/4 (5/6/7 non testées).
+- §21 : variance par span non conservée (moyenne/max/pente seulement).
+- §22 : `repetitionGroupID` toujours nil (pas de regroupement de répétitions).
+- §23 : `TimedValue` ne porte que (time, value) — pente/accélération/durée de tendance/distance au max/confiance non persistées ; `V` (présence vocale) constante à 0 (niveau A sans modèle — le générateur §26.2 ne peut pas s'appuyer sur « phrase vocale en cours » avant le Jalon 11).
+- §24 : fonctions dramaturgiques réduites à ~6 états heuristiques (confiance ≤ 0,5).
+- §11 : pas encore de `features-v1.bin` séparé — les features vivent dans le checkpoint (supprimé au succès) ; à extraire au Jalon 5 pour éviter un redécodage (§69).
+- Prior de tempo log-normal (120 BPM, σ 0,5 octave) : choix d'implémentation standard non décrit par la spec, pour départager les familles half/double-time — toutes les hypothèses restent conservées avec leurs relations (§63).
 
 ## Distribution et vérification (pipeline ClipFlow)
 
