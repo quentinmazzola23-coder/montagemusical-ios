@@ -22,7 +22,7 @@
 | 9 — Géométrie et preview | ✅ Terminé (CI verte, run 31434117279) |
 | 10 — Export | ✅ Terminé (CI verte, run 31439824793) |
 | 11 — Moteur avancé Core ML | ⛔ **NON TERMINÉ — délibérément** (§29A : aucun modèle entraîné, donc aucun modèle simulé. Protocole `MusicAnalyzing`, `BeatActivationModel`, fallback déterministe et tests en place ; l'intégration attend un modèle dont la licence et les données d'entraînement sont validées.) — détail : section « Jalon 11 » ci-dessous |
-| 12 — Polissage | 🟡 **PARTIEL** — 5 des 8 livrables §87 sont faits (accessibilité, haptique, animations, erreurs, icône et nom final) ; **3 sont absents** : profilage mémoire/CPU §67 (impossible sans appareil ni Instruments — aucun chiffre relevé), tests UI §73 (aucun XCUITest écrit : il faut un simulateur, donc macOS), localisation (interface française **en dur**, aucun catalogue de chaînes — la V1 est monolingue française §0, choix assumé et non un oubli). Détail et raisons : section « Jalon 12 » ci-dessous. Vérification Mac ⌘B/⌘U toujours requise |
+| 12 — Polissage | 🟡 **PARTIEL** (CI verte, run 31444633204) — 5 des 8 livrables §87 sont faits (accessibilité, haptique, animations, erreurs, icône et nom final) ; **3 sont absents** : profilage mémoire/CPU §67 (impossible sans appareil ni Instruments — aucun chiffre relevé), tests UI §73 (aucun XCUITest écrit : il faut un simulateur, donc macOS), localisation (interface française **en dur**, aucun catalogue de chaînes — la V1 est monolingue française §0, choix assumé et non un oubli). Détail et raisons : section « Jalon 12 » ci-dessous. Vérification Mac ⌘B/⌘U toujours requise |
 
 ---
 
