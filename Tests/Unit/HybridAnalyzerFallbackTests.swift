@@ -116,20 +116,26 @@ final class HybridAnalyzerFallbackTests: XCTestCase {
     /// compte ses appels : le test vérifie que ce compteur reste à **zéro**,
     /// c'est-à-dire que `HybridMusicAnalyzer` ne consulte aujourd'hui aucun
     /// modèle, même quand on lui en fournit un.
-    private final class RecordingActivationModel: BeatActivationModel, @unchecked Sendable {
-        private let lock = NSLock()
+    ///
+    /// Le compteur vit dans un ACTEUR : `predict` est asynchrone, et
+    /// verrouiller un `NSLock` depuis un contexte async est interdit en
+    /// Swift 6 (« instance method 'lock' is unavailable from asynchronous
+    /// contexts »).
+    private actor CallCounter {
         private var calls = 0
+        func increment() { calls += 1 }
+        var count: Int { calls }
+    }
 
-        var predictCallCount: Int {
-            lock.lock()
-            defer { lock.unlock() }
-            return calls
+    private final class RecordingActivationModel: BeatActivationModel, Sendable {
+        private let counter = CallCounter()
+
+        func predictCallCount() async -> Int {
+            await counter.count
         }
 
         func predict(features: ModelInputFeatures) async throws -> BeatActivations {
-            lock.lock()
-            calls += 1
-            lock.unlock()
+            await counter.increment()
             let zeros = [Float](repeating: 0, count: max(features.frameCount, 1))
             return BeatActivations(
                 beat: zeros,
@@ -338,8 +344,9 @@ final class HybridAnalyzerFallbackTests: XCTestCase {
 
         // Et la preuve directe qu'aucun chemin hybride caché ne s'exécute :
         // `predict` n'est jamais appelé.
+        let predictCallCount = await fakeModel.predictCallCount()
         XCTAssertEqual(
-            fakeModel.predictCallCount, 0,
+            predictCallCount, 0,
             "Aucune inférence ne doit avoir lieu : le chemin hybride est un TODO (§29A)"
         )
     }
