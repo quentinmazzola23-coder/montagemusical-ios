@@ -16,7 +16,11 @@
 //    PURE des phases terminales ;
 //  - §60/§8.1 : un export RESTAURÉ depuis `exports/` après relance ne
 //    s'annonce pas comme un export qui vient d'aboutir (titre et message
-//    distincts, passé explicite).
+//    distincts, passé explicite) ;
+//  - ÉCART PRODUIT (11 août 2026) : plage des plans exportés
+//    (« Plans 28 à 50 », « Plan 28 » au singulier) — l'export porte sur le
+//    SEGMENT continu rempli, où qu'il commence : le résumé §56 doit dire
+//    LESQUELS partent, pas seulement combien.
 //
 //  Le calcul des dimensions orientées d'un rush a DISPARU avec le calcul de
 //  profil propre à la vue (Jalon 10) : le profil §52 vient désormais d'une
@@ -166,6 +170,73 @@ final class ExportSummaryLogicTests: XCTestCase {
         )
     }
 
+    // MARK: - Plage des plans exportés (écart produit du 11 août 2026)
+
+    func testPlanRangeLabelIsOneBasedLikeTheRestOfTheInterface() {
+        // L'exemple de la demande : cases 27…49 en mémoire (0-based) →
+        // « Plans 28 à 50 » à l'écran, comme « Plan X sur N » (§35.1).
+        XCTAssertEqual(
+            ExportSummaryLogic.planRangeLabel(startIndex: 27, endIndex: 49),
+            "Plans 28 à 50"
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.planRangeLabel(startIndex: 0, endIndex: 11),
+            "Plans 1 à 12"
+        )
+    }
+
+    func testPlanRangeLabelIsSingularForASingleSlot() {
+        // Jamais « Plans 28 à 28 ».
+        XCTAssertEqual(ExportSummaryLogic.planRangeLabel(startIndex: 27, endIndex: 27), "Plan 28")
+        XCTAssertEqual(ExportSummaryLogic.planRangeLabel(startIndex: 0, endIndex: 0), "Plan 1")
+    }
+
+    func testPlanRangeLabelIsDefensiveAboutOrderAndNegativeIndexes() {
+        // Bornes inversées ou négatives (jamais attendues) : jamais « Plan 0 »
+        // ni une plage à l'envers.
+        XCTAssertEqual(ExportSummaryLogic.planRangeLabel(startIndex: 9, endIndex: 4), "Plans 5 à 10")
+        XCTAssertEqual(ExportSummaryLogic.planRangeLabel(startIndex: -3, endIndex: -3), "Plan 1")
+    }
+
+    func testPlanRangeAndCountDescribeTheSameSegment() {
+        // Cohérence du bloc §56 : « 23 plans » et « Plans 28 à 50 » doivent
+        // décrire le même montage — sinon l'utilisateur lit deux vérités.
+        let startIndex = 27
+        let endIndex = 49
+        let count = endIndex - startIndex + 1
+        XCTAssertEqual(ExportSummaryLogic.planCountLabel(count), "23 plans")
+        XCTAssertEqual(
+            ExportSummaryLogic.planRangeLabel(startIndex: startIndex, endIndex: endIndex),
+            "Plans 28 à 50"
+        )
+    }
+
+    func testPartialExportNoticeSaysNothingIsMovedNorLost() {
+        // §51 : « les clips ultérieurs ne sont jamais déplacés » ; §89 :
+        // « elle déplace des plans après un trou » est une régression
+        // interdite — l'écart produit ne change rien à cela, et le message
+        // le dit.
+        let notice = ExportSummaryLogic.partialExportNotice
+        XCTAssertTrue(notice.contains("conservé"), notice)
+        XCTAssertTrue(notice.contains("déplacé"), notice)
+        // Le texte ne promet plus que l'export commence au DÉBUT du projet.
+        XCTAssertFalse(notice.contains("Seul le début"), notice)
+    }
+
+    func testNothingReadyMessagesNameTheGestureThatUnblocksTheExport() {
+        // §66 relu par l'écart produit : n'importe quelle case remplie suffit
+        // — ce n'est plus « la première » qu'il faut nommer.
+        XCTAssertTrue(ExportSummaryLogic.nothingReadyTitle.contains("Aucun plan"))
+        XCTAssertTrue(
+            ExportSummaryLogic.nothingReadyHint.contains("au moins une case"),
+            ExportSummaryLogic.nothingReadyHint
+        )
+        XCTAssertFalse(
+            ExportSummaryLogic.nothingReadyHint.contains("première case"),
+            ExportSummaryLogic.nothingReadyHint
+        )
+    }
+
     func testDurationUsesHundredthsOfADisplayRoundingOnly() {
         // 8,431764 s (exemple §9) → « 8,43 s » : le centième est une
         // précision d'AFFICHAGE, jamais réinjectée dans un calcul.
@@ -299,8 +370,18 @@ final class ExportSummaryLogicTests: XCTestCase {
         let error = ExportError.emptyPrefix
         let description = try XCTUnwrap(error.errorDescription)
         XCTAssertEqual(ExportSummaryLogic.message(for: error), description)
-        // §66 : « première case vide : export désactivé ».
-        XCTAssertTrue(description.contains("première case"), description)
+        // §66 : la raison du refus est DITE, jamais un écran muet — et elle
+        // doit nommer le geste RÉELLEMENT attendu. Depuis l'écart produit du
+        // 11 août 2026, n'importe quelle case suffit à débloquer l'export :
+        // le message ne doit donc plus désigner « la première case ».
+        XCTAssertTrue(
+            description.contains("au moins une case"),
+            "Le refus doit nommer le geste qui débloque l'export : \(description)"
+        )
+        XCTAssertFalse(
+            description.contains("première case"),
+            "Formulation périmée (préfixe) : n'importe quelle case débloque l'export — \(description)"
+        )
     }
 
     func testUnknownErrorFallsBackOnANeutralInterruptionMessage() {
@@ -346,8 +427,9 @@ final class ExportSummaryLogicTests: XCTestCase {
             .insufficientStorage(requiredBytes: 42, availableBytes: 7)
         )
 
-        // §66 : « première case vide : export désactivé » — un démarrage
-        // refusé est ANNONCÉ, jamais confondu avec un succès antérieur.
+        // §66 (relu par l'écart produit : aucune case prête → rien à
+        // exporter) — un démarrage refusé est ANNONCÉ, jamais confondu avec
+        // un succès antérieur.
         XCTAssertEqual(
             ExportSummaryLogic.terminalPhase(for: .emptyPrefix),
             .failed(message: ExportSummaryLogic.message(for: ExportError.emptyPrefix))

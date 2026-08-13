@@ -7,6 +7,16 @@
 //  remplies/vides distinguées, position courante, fenêtre du carrousel,
 //  limite d'export partiel (§51).
 //  Toucher déplace la sélection ; glisser permet une navigation rapide.
+//
+//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
+//  utilisateur postérieure à la spécification ; détail dans
+//  IMPLEMENTATION_STATUS.md). La « limite d'export partiel » §35.3 était un
+//  SEUL repère : le début de la première case non prête, l'export étant
+//  limité au PRÉFIXE. L'export portant désormais sur le premier SEGMENT
+//  continu de cases prêtes — où qu'il commence —, une limite unique ne dit
+//  plus rien : il faut son DÉBUT et sa FIN. Le repère devient donc un
+//  MARQUAGE du segment exporté (`drawExportSegment`), et la valeur
+//  accessible §39 l'annonce (« plans 28 à 50 exportables »).
 //  Jalon 9 : l'écart §35.3 est RÉSORBÉ — la courbe musicale simplifiée
 //  (200 bins de `WaveformExtractor`, §16.2/§68) est dessinée EN FOND, très
 //  discrète, sous les segments.
@@ -26,11 +36,14 @@ import SwiftUI
 /// - téléchargement/vérification = plein atténué + trait pointillé ;
 /// - indisponible/trop courte = croix fine.
 ///
-/// Repères :
+/// Repères — trois FORMES distinctes, jamais trois couleurs (§39) :
 /// - position courante = barre verticale `.primary` pleine hauteur ;
-/// - fenêtre du carrousel = soulignement sous la piste ;
-/// - limite d'export partiel (début de la première case non prête, §51) =
-///   petit marqueur triangulaire discret en haut.
+/// - fenêtre du carrousel = soulignement plein SOUS la piste ;
+/// - segment exporté (§51 + écart produit) = crochet AU-DESSUS de la piste,
+///   liséré fin sur toute l'étendue du segment fermé par un montant vertical
+///   à chaque bout — son début ET sa fin sont donc lisibles d'un coup d'œil,
+///   et la forme ne peut pas être confondue avec le soulignement du
+///   carrousel (autre côté de la piste, autre dessin).
 ///
 /// Gestes : tap et glisser horizontal → `AssemblyGeometry.slotIndex` →
 /// `onSelect` (index clampé, appelé uniquement quand la sélection change —
@@ -67,9 +80,16 @@ struct AssemblyMiniTimelineView: View {
     /// fluidité).
     private let segments: [Segment]
 
-    /// Fraction de la limite d'export partiel (§51) : début de la première
-    /// case non prête. `nil` si toutes les cases sont prêtes (aucun trou).
-    private let exportLimitFraction: Double?
+    /// Fractions de largeur du SEGMENT exporté (§51 + écart produit) :
+    /// `début de la première case prête ... fin de la dernière case prête du
+    /// premier segment continu`. `nil` si aucune case n'est prête (rien à
+    /// exporter, rien à marquer).
+    private let exportSegmentFractions: ClosedRange<Double>?
+
+    /// Énoncé §39 du segment exporté (« plans 28 à 50 exportables ») — `nil`
+    /// quand il n'y a rien à exporter. Calculé À LA CONSTRUCTION, comme les
+    /// segments : la valeur accessible ne déclenche aucun calcul au dessin.
+    private let exportSegmentSpokenLabel: String?
 
     init(
         slots: [AssemblySlotItem],
@@ -91,19 +111,12 @@ struct AssemblyMiniTimelineView: View {
         let total = slots.reduce(Int64(0)) { $0 + max(0, $1.duration.ticks) }
         var built: [Segment] = []
         built.reserveCapacity(slots.count)
-        var exportLimit: Double?
         if total > 0 {
             var cumulative: Int64 = 0
             for slot in slots {
                 let startFraction = Double(cumulative) / Double(total)
                 cumulative += max(0, slot.duration.ticks)
                 let endFraction = Double(cumulative) / Double(total)
-                if exportLimit == nil, slot.state != .ready {
-                    // Première case non prête : frontière du préfixe
-                    // exportable (§51) — les cases suivantes sont ignorées
-                    // par l'export, jamais déplacées.
-                    exportLimit = startFraction
-                }
                 built.append(Segment(
                     startFraction: startFraction,
                     endFraction: endFraction,
@@ -112,7 +125,26 @@ struct AssemblyMiniTimelineView: View {
             }
         }
         self.segments = built
-        self.exportLimitFraction = exportLimit
+
+        // Bornes du SEGMENT exporté (écart produit) — dérivées par la MÊME
+        // fonction que l'écran et que le dock d'export
+        // (`AssemblyViewLogic.exportedSegmentPositions`) : aucune seconde
+        // règle ne peut diverger de celle qui décide de l'export.
+        if let positions = AssemblyViewLogic.exportedSegmentPositions(items: slots),
+           built.indices.contains(positions.lowerBound),
+           built.indices.contains(positions.upperBound) {
+            self.exportSegmentFractions =
+                built[positions.lowerBound].startFraction...built[positions.upperBound].endFraction
+            self.exportSegmentSpokenLabel = AssemblyViewLogic.spokenExportSegment(
+                startIndex: slots[positions.lowerBound].index,
+                endIndex: slots[positions.upperBound].index
+            )
+        } else {
+            // Aucune case prête, ou durées toutes nulles (cas dégénéré : rien
+            // n'est dessiné de toute façon).
+            self.exportSegmentFractions = nil
+            self.exportSegmentSpokenLabel = nil
+        }
     }
 
     var body: some View {
@@ -143,8 +175,8 @@ struct AssemblyMiniTimelineView: View {
         guard !segments.isEmpty, size.width > 0, size.height > 0 else { return }
         let width = size.width
 
-        // Piste centrale : marge haute pour le marqueur d'export, marge
-        // basse pour le soulignement de la fenêtre du carrousel.
+        // Piste centrale : marge haute pour le crochet du segment exporté,
+        // marge basse pour le soulignement de la fenêtre du carrousel.
         let markerHeight: CGFloat = 5
         let underlineHeight: CGFloat = 2
         let trackTop = markerHeight + 1
@@ -239,18 +271,51 @@ struct AssemblyMiniTimelineView: View {
             context.fill(bar, with: .color(.primary))
         }
 
-        // Limite d'export partiel (§51) : petit marqueur triangulaire
-        // discret pointant vers la frontière du préfixe exportable.
-        if let exportLimitFraction {
-            let half: CGFloat = 3.5
-            let x = min(max(CGFloat(exportLimitFraction) * width, half), width - half)
-            var triangle = Path()
-            triangle.move(to: CGPoint(x: x - half, y: 0))
-            triangle.addLine(to: CGPoint(x: x + half, y: 0))
-            triangle.addLine(to: CGPoint(x: x, y: markerHeight))
-            triangle.closeSubpath()
-            context.fill(triangle, with: .color(.primary))
-        }
+        // Segment exporté (§51 + écart produit) : crochet AU-DESSUS de la
+        // piste, sur toute l'étendue du segment.
+        drawExportSegment(in: context, width: width, markerHeight: markerHeight)
+    }
+
+    /// Marquage du SEGMENT exporté (§35.3 « limite d'export partiel », relu
+    /// par l'écart produit du 11 août 2026).
+    ///
+    /// FORME : un liséré horizontal fin (2 pt) posé tout en haut, fermé par
+    /// un montant vertical à chaque extrémité (hauteur `markerHeight`) — un
+    /// crochet `⌐…¬`. Le DÉBUT et la FIN du montage exporté sont donc
+    /// visibles, ce qu'un marqueur ponctuel ne pouvait plus dire depuis que
+    /// l'export peut commencer ailleurs qu'à la case 0.
+    ///
+    /// §39 « ne pas dépendre uniquement de la couleur » : ce crochet est
+    /// au-dessus de la piste, alors que la fenêtre du carrousel est un
+    /// soulignement PLEIN en dessous et que la position courante est une
+    /// barre verticale pleine hauteur — trois dessins différents, dans trois
+    /// endroits différents. La valeur accessible de la vue annonce en plus
+    /// le segment en toutes lettres (« plans 28 à 50 exportables »).
+    ///
+    /// Un segment très court (une case fine sur un projet de 300 plans)
+    /// garde une largeur minimale : le crochet reste visible au lieu de
+    /// disparaître sous l'arrondi.
+    private func drawExportSegment(
+        in context: GraphicsContext,
+        width: CGFloat,
+        markerHeight: CGFloat
+    ) {
+        guard let exportSegmentFractions, width > 0 else { return }
+        let capWidth: CGFloat = 1.5
+        let railHeight: CGFloat = 2
+        let minimumWidth = capWidth * 2
+        let rawStart = CGFloat(exportSegmentFractions.lowerBound) * width
+        let rawEnd = CGFloat(exportSegmentFractions.upperBound) * width
+        let x0 = min(max(rawStart, 0), max(0, width - minimumWidth))
+        let x1 = min(max(rawEnd, x0 + minimumWidth), width)
+
+        var bracket = Path()
+        // Liséré : toute l'étendue du segment.
+        bracket.addRect(CGRect(x: x0, y: 0, width: x1 - x0, height: railHeight))
+        // Montants : début et fin, seuls repères qui « ferment » le montage.
+        bracket.addRect(CGRect(x: x0, y: 0, width: capWidth, height: markerHeight))
+        bracket.addRect(CGRect(x: x1 - capWidth, y: 0, width: capWidth, height: markerHeight))
+        context.fill(bracket, with: .color(.primary))
     }
 
     /// Courbe musicale simplifiée §35.3 : enveloppe symétrique remplie,
@@ -329,9 +394,18 @@ struct AssemblyMiniTimelineView: View {
 
     // MARK: - Accessibilité (§39)
 
+    /// « Plan 4 sur 10, plans 28 à 50 exportables » (§39).
+    ///
+    /// Le segment exportable fait partie de la VALEUR et non du dessin seul :
+    /// le crochet du haut est invisible pour VoiceOver, et l'écart produit
+    /// rend l'information indispensable — le montage exporté ne commence plus
+    /// forcément au premier plan. Rien n'est ajouté tant qu'aucune case n'est
+    /// prête : il n'y a alors pas de montage à annoncer (§51).
     private var accessibilityValue: String {
         guard !slots.isEmpty else { return "Aucun plan" }
-        return "Plan \(activeIndex + 1) sur \(slots.count)"
+        let position = "Plan \(activeIndex + 1) sur \(slots.count)"
+        guard let exportSegmentSpokenLabel else { return position }
+        return "\(position), \(exportSegmentSpokenLabel)"
     }
 }
 
@@ -389,6 +463,43 @@ private func makePreviewItems() -> [AssemblySlotItem] {
             let envelope = phase < 0.15 ? 0.25 : (phase < 0.45 ? 0.55 : (phase < 0.75 ? 0.95 : 0.4))
             return Float(envelope * (0.7 + 0.3 * abs(sin(Double(index) * 0.35))))
         },
+        onSelect: { _ in }
+    )
+    .frame(height: 44)
+    .padding()
+}
+
+// ÉCART PRODUIT (11 août 2026) : contrôle visuel du cas qui n'existait pas
+// avant — les premières cases sont VIDES et le montage exporté commence plus
+// loin. Le crochet du haut doit encadrer les cases 4 à 6 (affichées « Plans 4
+// à 6 »), sans se confondre avec le soulignement du carrousel en bas.
+#Preview("Mini-timeline — segment qui commence plus loin") {
+    let entries: [(Int64, AssemblySlotState)] = [
+        (72_000, .empty),
+        (96_000, .empty),
+        (60_000, .downloading),
+        (120_000, .ready),
+        (84_000, .ready),
+        (48_000, .ready),
+        (108_000, .empty),
+        (66_000, .ready)
+    ]
+    var items: [AssemblySlotItem] = []
+    var start: Int64 = 0
+    for (index, entry) in entries.enumerated() {
+        items.append(AssemblySlotItem(
+            id: UUID(),
+            index: index,
+            start: MediaTime(ticks: start),
+            end: MediaTime(ticks: start + entry.0),
+            state: entry.1
+        ))
+        start += entry.0
+    }
+    return AssemblyMiniTimelineView(
+        slots: items,
+        activeIndex: 1,
+        windowRange: 0...2,
         onSelect: { _ in }
     )
     .frame(height: 44)

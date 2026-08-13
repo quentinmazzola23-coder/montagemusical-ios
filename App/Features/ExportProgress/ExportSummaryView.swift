@@ -3,7 +3,7 @@
 //  MontageMusical
 //
 //  Résumé avant export, progression et issue — Jalon 10, spec §56 (résumé
-//  INFORMATIF, jamais un réglage), §51 (préfixe exportable), §52 (profil
+//  INFORMATIF, jamais un réglage), §51 (montage exportable), §52 (profil
 //  maître : géométrie du projet, résolution/cadence d'un même clip maître,
 //  HDR/SDR), §57 (taille estimée et espace disque vérifiés AVANT tout
 //  encodage), §58 (progression dans le dock inférieur, annulation possible,
@@ -19,13 +19,30 @@
 //  décidé seule (§52) et offre un unique bouton « Exporter » (§56). Toute
 //  évolution qui y ajouterait un réglage violerait §89.
 //
+//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
+//  utilisateur POSTÉRIEURE à la spécification ; détail dans
+//  IMPLEMENTATION_STATUS.md). §51/§66 limitaient l'export au PRÉFIXE (depuis
+//  la case 0, arrêt au premier trou ; première case vide → export
+//  impossible). L'export porte désormais sur le PREMIER SEGMENT CONTINU de
+//  cases prêtes, où qu'il commence (cases 28 à 50 → 23 plans exportés).
+//  Conséquences pour CET écran :
+//  - le résumé §56 dit QUELS plans partent (« Plans 28 à 50 ») en plus de
+//    leur nombre et de la durée — sans cette plage, deux projets très
+//    différents afficheraient exactement le même résumé ;
+//  - la durée annoncée est celle du SEGMENT (`fin de la dernière case −
+//    début de la première`), et non plus la fin absolue du préfixe : la
+//    musique exportée est la PORTION correspondante du morceau, posée à
+//    l'instant 0, sans écran noir ajouté ni case déplacée ;
+//  - « aucune case prête » remplace « première case vide » comme seule
+//    raison de désactiver l'export.
+//
 //  DÉCISION Jalon 10 — le profil §52 vient d'une SOURCE UNIQUE.
 //  Le résumé n'a plus AUCUN calcul de profil qui lui soit propre : il lit
 //  `ProjectExporter.masterProfile(project:)`, exactement ce que l'encodage
 //  utilisera. Un calcul parallèle côté vue (résolution PhotoKit rush par
 //  rush, rushs illisibles ignorés) pouvait ANNONCER « HDR » alors que le
 //  fichier produit était SDR : §56 informe sur le fichier réel, jamais sur
-//  une approximation d'écran. Profil indisponible (un rush du préfixe est
+//  une approximation d'écran. Profil indisponible (un rush du segment est
 //  illisible) → « Profil technique indisponible » : jamais un profil PARTIEL.
 //
 //  DÉCISION Jalon 10 — l'enregistrement dans Photos est une action DISTINCTE.
@@ -136,10 +153,15 @@ private enum ExportHaptics {
 /// 12 plans • 18,43 s
 /// ```
 ///
+/// Depuis l'écart produit du 11 août 2026, une LIGNE de plus peut s'y
+/// ajouter — la plage des plans réellement exportés (« Plans 28 à 50 »,
+/// `planRangeLabel`) — quand l'export ne couvre pas tout le projet. C'est une
+/// information, pas un réglage : §56 et §89 restent respectés.
+///
 /// Tous les nombres affichés sont des valeurs MESURÉES (dimensions de rendu,
-/// cadence du clip maître, nombre de cases du préfixe §51, durée exacte) :
-/// aucune n'est réglable, conformément à §56 (« Information, pas réglage »)
-/// et §89.
+/// cadence du clip maître, nombre et plage des cases du segment §51, durée
+/// exacte) : aucune n'est réglable, conformément à §56 (« Information, pas
+/// réglage ») et §89.
 enum ExportSummaryLogic {
 
     /// Titre du résumé (§56, verbatim).
@@ -241,7 +263,33 @@ enum ExportSummaryLogic {
         return safeCount <= 1 ? "\(safeCount) plan" : "\(safeCount) plans"
     }
 
+    /// « Plans 28 à 50 » — plage des plans réellement exportés (ÉCART PRODUIT
+    /// du 11 août 2026 : l'export porte sur le SEGMENT continu rempli, où
+    /// qu'il commence ; le résumé §56 doit donc dire LESQUELS partent, pas
+    /// seulement combien).
+    ///
+    /// Les index reçus sont ceux des cases (`ProjectSlot.index` /
+    /// `ReadySegment.startIndex`, 0-based) et sont AFFICHÉS en 1-based, comme
+    /// partout dans l'interface (« Plan X sur N » §35.1) : cases 27…49 en
+    /// mémoire → « Plans 28 à 50 » à l'écran.
+    ///
+    /// Une plage d'une seule case donne le SINGULIER « Plan 28 » — jamais
+    /// « Plans 28 à 28 ». Les bornes sont remises dans l'ordre et bornées à
+    /// zéro : un index négatif ou inversé (jamais attendu) n'affiche pas
+    /// « Plan 0 » ni une plage à l'envers.
+    static func planRangeLabel(startIndex: Int, endIndex: Int) -> String {
+        let first = max(0, min(startIndex, endIndex)) + 1
+        let last = max(0, max(startIndex, endIndex)) + 1
+        return first == last ? "Plan \(first)" : "Plans \(first) à \(last)"
+    }
+
     /// Durée totale du montage exporté.
+    ///
+    /// ÉCART PRODUIT (11 août 2026) : c'est la durée du SEGMENT — `fin de la
+    /// dernière case − début de la première case` — et non plus la fin
+    /// absolue de la dernière case du préfixe. Un montage fait des cases 28 à
+    /// 50 dure ce que durent ces 23 plans, pas ce qui les sépare du début du
+    /// morceau (aucun écran noir n'est ajouté, aucune case n'est déplacée).
     ///
     /// - moins d'une minute → forme courte §35.2 « 18,43 s », exactement le
     ///   format du bloc §56 ;
@@ -261,6 +309,23 @@ enum ExportSummaryLogic {
     static func plansAndDurationLabel(slotCount: Int, duration: MediaTime) -> String {
         "\(planCountLabel(slotCount)) • \(durationLabel(duration))"
     }
+
+    /// §51 + écart produit : ce qui est exporté n'est pas TOUT le projet —
+    /// dit explicitement, jamais découvert après coup. Formulation neutre
+    /// quant à la POSITION du segment (il ne commence plus forcément au
+    /// début) ; la plage exacte est affichée juste au-dessus
+    /// (`planRangeLabel`).
+    static let partialExportNotice =
+        "Seuls les plans prêts qui se suivent sont exportés ; "
+        + "le reste du projet est conservé, rien n'est déplacé."
+
+    /// §66 (relu par l'écart produit) : aucune case prête → export
+    /// impossible. La raison est DITE, le bouton n'est pas seulement grisé.
+    static let nothingReadyTitle = "Aucun plan n'est encore prêt."
+
+    /// Geste à faire pour débloquer l'export — « au moins une case », et non
+    /// plus « la première case » : n'importe laquelle suffit désormais.
+    static let nothingReadyHint = "Remplissez au moins une case pour pouvoir exporter."
 
     // MARK: VoiceOver (§39)
 
@@ -473,8 +538,9 @@ enum ExportSummaryLogic {
 ///
 /// Déroulé :
 /// 1. **Résumé §56** — dimensions de rendu, orientation, cadence, HDR/SDR,
-///    nombre de plans, durée totale. Les deux dernières valeurs viennent de
-///    l'instantané du projet (§51 : préfixe continu prêt) et s'affichent
+///    nombre de plans, plage des plans exportés (« Plans 28 à 50 », écart
+///    produit) et durée totale. Ces trois dernières valeurs viennent de
+///    l'instantané du projet (§51 : segment continu prêt) et s'affichent
 ///    IMMÉDIATEMENT ; le profil technique (§52) est lu ensuite auprès de
 ///    l'EXPORTATEUR (`masterProfile(project:)`, source unique) — s'il est
 ///    indisponible, l'essentiel reste affiché et l'export reste possible,
@@ -515,26 +581,32 @@ struct ExportSummaryView: View {
 
     // MARK: État du résumé (§56)
 
-    /// Instantané du projet — source du préfixe §51 et entrée du profil §52.
+    /// Instantané du projet — source du segment §51 et entrée du profil §52.
     @State private var snapshot: ProjectSnapshot?
-    /// Nombre de cases du préfixe exportable (§51).
-    @State private var prefixSlotCount = 0
+    /// Nombre de cases du SEGMENT exportable (§51 + écart produit).
+    @State private var segmentSlotCount = 0
+    /// Index de la PREMIÈRE et de la DERNIÈRE case exportées (0-based, tels
+    /// que persistés) — affichés en 1-based (« Plans 28 à 50 »). `nil` quand
+    /// aucune case n'est prête.
+    @State private var segmentStartIndex: Int?
+    @State private var segmentEndIndex: Int?
     /// Nombre total de cases du projet — sert uniquement à signaler un export
-    /// PARTIEL (§51 : « les cases après le premier trou sont ignorées »).
+    /// PARTIEL (§51 : « les cases après le premier trou sont ignorées » ;
+    /// écart produit : celles d'avant le segment le sont tout autant).
     @State private var totalSlotCount = 0
-    /// Durée totale du montage exporté = fin ABSOLUE de la dernière case du
-    /// préfixe (§51 : « la musique est coupée à la fin absolue de la dernière
-    /// case exportée »).
+    /// Durée du montage exporté = `fin de la dernière case − début de la
+    /// première case` du segment (écart produit ; la musique insérée est la
+    /// PORTION correspondante du morceau, placée à l'instant 0).
     @State private var exportDuration: MediaTime = .zero
     /// Profil maître §52 tel que l'EXPORTATEUR le calculera — `nil` tant
-    /// qu'il n'est pas lu, ou s'il n'a pas pu l'être (un rush du préfixe est
+    /// qu'il n'est pas lu, ou s'il n'a pas pu l'être (un rush du segment est
     /// illisible : §52 n'admet pas de profil partiel).
     @State private var profile: MasterProfile?
     /// Vrai pendant la lecture de l'instantané (§56 : aucun écran vide muet).
     @State private var isLoadingSummary = true
     /// Vrai pendant la lecture du profil §52 auprès de l'exportateur.
     /// Vrai DÈS LE DÉPART : la lecture suit toujours une lecture d'instantané
-    /// réussie avec un préfixe non vide — sans cela, l'écran afficherait un
+    /// réussie avec un segment non vide — sans cela, l'écran afficherait un
     /// bref « profil indisponible » avant même d'avoir essayé.
     @State private var isLoadingProfile = true
     /// Message d'échec de LECTURE du projet (§64) — jamais un échec muet.
@@ -582,10 +654,22 @@ struct ExportSummaryView: View {
         }
     }
 
-    /// §51/§66 : « export désactivé si le résultat est vide », « première case
-    /// vide : export désactivé ».
-    private var hasExportablePrefix: Bool {
-        prefixSlotCount > 0
+    /// §51 « export désactivé si le résultat est vide » — relu par l'écart
+    /// produit : le résultat est le SEGMENT continu rempli, où qu'il
+    /// commence. §66 « première case vide : export désactivé » devient donc
+    /// « aucune case prête : export désactivé ».
+    private var hasExportableSegment: Bool {
+        segmentSlotCount > 0
+    }
+
+    /// « Plans 28 à 50 » / « Plan 28 » — `nil` tant qu'aucun segment n'est
+    /// connu (chargement, échec de lecture, aucune case prête).
+    private var planRangeLabel: String? {
+        guard let segmentStartIndex, let segmentEndIndex else { return nil }
+        return ExportSummaryLogic.planRangeLabel(
+            startIndex: segmentStartIndex,
+            endIndex: segmentEndIndex
+        )
     }
 
     // MARK: - Corps
@@ -698,31 +782,43 @@ struct ExportSummaryView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-            } else if !hasExportablePrefix {
-                // §66 : « première case vide : export désactivé » — la raison
-                // est DITE, le bouton n'est pas seulement grisé.
-                Text("Aucun plan n'est encore prêt au début du montage.")
+            } else if !hasExportableSegment {
+                // §66, relu par l'écart produit : aucune case prête → export
+                // désactivé. La raison est DITE, le bouton n'est pas
+                // seulement grisé.
+                Text(ExportSummaryLogic.nothingReadyTitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Text("Remplissez la première case pour pouvoir exporter.")
+                Text(ExportSummaryLogic.nothingReadyHint)
                     .font(.footnote)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
             } else {
                 profileLines
                 Text(ExportSummaryLogic.plansAndDurationLabel(
-                    slotCount: prefixSlotCount,
+                    slotCount: segmentSlotCount,
                     duration: exportDuration
                 ))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
 
                 if isPartialExport {
+                    // ÉCART PRODUIT : QUELS plans partent, pas seulement
+                    // combien — le montage ne commence plus forcément au
+                    // premier plan du projet. Affiché uniquement quand
+                    // l'export est partiel : quand le segment couvre tout le
+                    // projet, « Plans 1 à 23 » n'apprendrait rien de plus que
+                    // « 23 plans » juste au-dessus.
+                    if let planRangeLabel {
+                        Text(planRangeLabel)
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                     // §51 : « les cases après le premier trou sont ignorées »,
                     // « les clips ultérieurs ne sont jamais déplacés » — dit
                     // explicitement, jamais découvert après coup.
-                    Text("Seul le début déjà monté est exporté ; le reste du projet est conservé.")
+                    Text(ExportSummaryLogic.partialExportNotice)
                         .font(.footnote)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
@@ -953,13 +1049,13 @@ struct ExportSummaryView: View {
     private func readyDock(url: URL, isRestored: Bool) -> some View {
         VStack(spacing: 8) {
             if isRestored {
-                let canExportAgain = hasExportablePrefix && loadErrorMessage == nil
+                let canExportAgain = hasExportableSegment && loadErrorMessage == nil
                 HStack(spacing: 8) {
                     dockSecondaryButton(
                         title: "Exporter à nouveau",
                         accessibilityHint: canExportAgain
                             ? "Relance un export du montage. Le fichier précédent sera remplacé."
-                            : "Remplissez la première case pour exporter."
+                            : "Remplissez au moins une case pour exporter."
                     ) {
                         startExport()
                     }
@@ -1063,13 +1159,13 @@ struct ExportSummaryView: View {
     }
 
     /// CTA principal §56 (« Exporter ») et ses variantes de reprise
-    /// (« Réessayer » §57, « Recommencer » §66). Désactivé si le préfixe §51
-    /// est vide ou pendant un export (§58).
+    /// (« Réessayer » §57, « Recommencer » §66). Désactivé si le SEGMENT
+    /// exportable est vide (aucune case prête) ou pendant un export (§58).
     ///
     /// Le libellé §56 est VERBATIM : ce bouton produit le FICHIER, il
     /// n'enregistre rien dans Photos (action distincte, §40/§55).
     private func exportButton(title: String) -> some View {
-        let isEnabled = hasExportablePrefix && !isBusy && loadErrorMessage == nil
+        let isEnabled = hasExportableSegment && !isBusy && loadErrorMessage == nil
         return Button {
             startExport()
         } label: {
@@ -1088,7 +1184,7 @@ struct ExportSummaryView: View {
         .accessibilityHint(
             isEnabled
                 ? "Lance l'export du montage déjà prêt. Gardez l'application ouverte pendant l'export."
-                : "Remplissez la première case pour exporter."
+                : "Remplissez au moins une case pour exporter."
         )
     }
 
@@ -1141,9 +1237,9 @@ struct ExportSummaryView: View {
 
     // MARK: - Chargement du résumé (§51, §52, §56)
 
-    /// Lit l'instantané du projet, en tire le préfixe §51 (nombre de plans et
-    /// durée totale — affichés IMMÉDIATEMENT), puis demande le profil maître
-    /// §52 à l'exportateur.
+    /// Lit l'instantané du projet, en tire le SEGMENT exportable (nombre de
+    /// plans, plage 1-based et durée — affichés IMMÉDIATEMENT), puis demande
+    /// le profil maître §52 à l'exportateur.
     ///
     /// Si un export du même projet est DÉJÀ en cours (§8/§58 : l'acteur n'en
     /// autorise qu'un), l'écran reprend son suivi au lieu d'afficher un CTA
@@ -1167,14 +1263,20 @@ struct ExportSummaryView: View {
             return
         }
 
-        let prefix = snapshot.contiguousReadyPrefix
+        // ÉCART PRODUIT : source UNIQUE du montage exporté, la MÊME que
+        // l'exportateur et que la preview — le premier segment continu de
+        // cases prêtes, où qu'il commence.
+        let segment = contiguousReadySegment(slots: snapshot.slots)
         self.snapshot = snapshot
-        prefixSlotCount = prefix.count
+        segmentSlotCount = segment.slots.count
+        segmentStartIndex = segment.startIndex
+        segmentEndIndex = segment.endIndex
         totalSlotCount = snapshot.slots.count
-        // §51 : « la musique est coupée à la fin ABSOLUE de la dernière case
-        // exportée » — la durée du montage est donc cette frontière, jamais
-        // une somme de durées affichées (§9).
-        exportDuration = prefix.last?.end ?? .zero
+        // Durée du montage = `musicEnd - musicStart` du segment, calculée en
+        // TICKS par le domaine (§9) : jamais une somme de durées affichées,
+        // jamais la fin absolue de la dernière case (qui inclurait tout ce
+        // qui précède le segment).
+        exportDuration = segment.duration
         isLoadingSummary = false
 
         // Export déjà en cours pour ce projet (écran rouvert pendant
@@ -1188,9 +1290,9 @@ struct ExportSummaryView: View {
             await restoreLastOutcome()
         }
 
-        guard !prefix.isEmpty else {
+        guard !segment.isEmpty else {
             isLoadingProfile = false
-            return // §66 : rien à profiler
+            return // §66 : aucune case prête, rien à profiler
         }
         await loadProfile(snapshot: snapshot)
     }
@@ -1231,7 +1333,7 @@ struct ExportSummaryView: View {
     /// `ProjectExporter.masterProfile(project:)` applique exactement la règle
     /// §52 qui sera utilisée à l'encodage (§52.1 géométrie du projet, §52.2
     /// clip maître, §52.3 cadence, §52.4 colorimétrie) et rend `nil` si un
-    /// rush du préfixe est illisible : il n'existe pas de profil PARTIEL, donc
+    /// rush du segment est illisible : il n'existe pas de profil PARTIEL, donc
     /// pas de « HDR » annoncé à tort parce qu'un rush SDR n'a pas pu être lu.
     /// Cet écran n'ouvre plus AUCUN asset PhotoKit : il affiche, il ne calcule
     /// pas (§56 : « information, pas réglage »).
@@ -1248,7 +1350,7 @@ struct ExportSummaryView: View {
     /// CTA « Exporter » : vérification §57 AVANT tout encodage, puis
     /// `ExportActor.startExport` (§8 : un seul export actif par projet).
     private func startExport() {
-        guard hasExportablePrefix, !isBusy, let snapshot else { return }
+        guard hasExportableSegment, !isBusy, let snapshot else { return }
 
         // §57 : « estimer la taille ; vérifier l'espace disponible ; refuser
         // proprement si insuffisant » — le refus arrive AVANT l'encodage, avec
@@ -1294,7 +1396,7 @@ struct ExportSummaryView: View {
     /// écran devient la progression de CE run), `alreadyRunning` (§58 : un
     /// seul export par projet — on reprend le suivi de celui qui tourne, sans
     /// jamais réafficher l'issue d'un run précédent), `refused(erreur)`
-    /// (préfixe vide §66, instantané illisible… — la cause est DITE).
+    /// (segment vide §66, instantané illisible… — la cause est DITE).
     /// Sans ce résultat, un refus laissait lire `lastOutcome` du run
     /// PRÉCÉDENT et pouvait annoncer un succès qui n'avait pas eu lieu (§8.1).
     ///
@@ -1498,9 +1600,12 @@ struct ExportSummaryView: View {
 
     // MARK: - Libellés dépendant de l'état
 
-    /// Vrai si le projet contient des cases au-delà du préfixe exporté (§51).
+    /// Vrai si le projet contient des cases HORS du segment exporté (§51 +
+    /// écart produit) — celles d'AVANT le segment comme celles d'après : dans
+    /// les deux cas, l'export ne couvre pas tout le projet et il faut le
+    /// dire.
     private var isPartialExport: Bool {
-        totalSlotCount > prefixSlotCount
+        totalSlotCount > segmentSlotCount
     }
 
     /// Énoncé VoiceOver du résumé (§39) — un seul élément parlé, sans puce ni
@@ -1512,9 +1617,9 @@ struct ExportSummaryView: View {
         if let loadErrorMessage {
             return loadErrorMessage
         }
-        guard hasExportablePrefix else {
-            return "Aucun plan n'est encore prêt au début du montage. "
-                + "Remplissez la première case pour pouvoir exporter."
+        guard hasExportableSegment else {
+            return ExportSummaryLogic.nothingReadyTitle + " "
+                + ExportSummaryLogic.nothingReadyHint
         }
         var spoken: String
         if let profile {
@@ -1523,18 +1628,24 @@ struct ExportSummaryView: View {
                 height: profile.renderHeight,
                 frameRate: profile.frameRate,
                 isHDR: profile.isHDR,
-                slotCount: prefixSlotCount,
+                slotCount: segmentSlotCount,
                 duration: exportDuration
             )
         } else {
             spoken = ExportSummaryLogic.spokenEssentials(
-                slotCount: prefixSlotCount,
+                slotCount: segmentSlotCount,
                 duration: exportDuration
             )
         }
         if isPartialExport {
-            spoken += " Seul le début déjà monté est exporté ; "
-                + "le reste du projet est conservé."
+            // ÉCART PRODUIT : la PLAGE est dite avant la formule générale —
+            // « Plans 28 à 50 » est ce que l'utilisateur a besoin de vérifier
+            // avant d'exporter, et il ne peut pas le lire sur l'écran s'il
+            // n'y voit rien (§39).
+            if let planRangeLabel {
+                spoken += " \(planRangeLabel)."
+            }
+            spoken += " " + ExportSummaryLogic.partialExportNotice
         }
         if isEncoding {
             // §8.1/§39 : la consigne est AUSSI parlée — elle ne doit pas
@@ -1590,7 +1701,8 @@ struct ExportSummaryView: View {
     }
 }
 
-// MARK: - Preview (projet vide : §66 « première case vide → export désactivé »)
+// MARK: - Preview (projet vide : §66 relu — aucune case prête → export
+// désactivé, écart produit du 11 août 2026)
 //
 // Aucune photothèque n'est sollicitée par cet écran (le profil §52 vient de
 // l'exportateur) : la preview reste purement locale.

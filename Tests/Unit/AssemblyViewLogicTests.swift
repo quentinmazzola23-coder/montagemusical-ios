@@ -10,8 +10,18 @@
 //    de sa ZONE DROITE (Jalon 10 : « Export » dans tous les cas, comme le
 //    tableau §36 — seul son état actif/désactivé varie ; l'aperçu principal
 //    §47.2 a son propre bouton en zone basse, §88.11/§89) ;
-//  - Export désactivé quand le préfixe exportable §51 est vide (réutilise
-//    `contiguousReadyPrefix` du Domain avec des snapshots `ProjectSlot`).
+//  - Export désactivé quand le SEGMENT exportable est vide (réutilise
+//    `contiguousReadySegment(slots:)` du Domain avec des snapshots
+//    `ProjectSlot`) ;
+//  - bornes du segment exporté sur la projection d'affichage
+//    (`exportedSegmentPositions`) et énoncé VoiceOver associé.
+//
+//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
+//  utilisateur postérieure à la spécification). Les tests d'export ont changé
+//  de VERDICT, pas seulement de nom : une PREMIÈRE CASE VIDE n'empêche plus
+//  l'export dès qu'une case plus loin est prête (§66 « première case vide :
+//  export désactivé » ne décrit plus le produit). Ce qui reste vrai : aucune
+//  case prête → export impossible.
 //
 
 import XCTest
@@ -21,8 +31,8 @@ final class AssemblyViewLogicTests: XCTestCase {
 
     // MARK: - Helpers privés (portée classe — aucune collision de module)
 
-    /// Fabrique une case snapshot §51. `status == nil` produit une case
-    /// vide (aucune association).
+    /// Fabrique une case snapshot du domaine. `status == nil` produit une
+    /// case vide (aucune association).
     private func makeSlot(
         index: Int,
         startTicks: Int64,
@@ -43,6 +53,24 @@ final class AssemblyViewLogicTests: XCTestCase {
             end: MediaTime(ticks: endTicks),
             assignment: assignment
         )
+    }
+
+    /// Fabrique une case d'AFFICHAGE (§35) — les durées n'importent pas pour
+    /// les bornes du segment, seul l'état compte.
+    private func makeItem(index: Int, state: AssemblySlotState) -> AssemblySlotItem {
+        let start = Int64(index) * 60_000
+        return AssemblySlotItem(
+            id: UUID(),
+            index: index,
+            start: MediaTime(ticks: start),
+            end: MediaTime(ticks: start + 60_000),
+            state: state
+        )
+    }
+
+    /// Suite de cases d'affichage à partir d'états, index contigus depuis 0.
+    private func makeItems(_ states: [AssemblySlotState]) -> [AssemblySlotItem] {
+        states.enumerated().map { makeItem(index: $0.offset, state: $0.element) }
     }
 
     // MARK: - Clamp de l'index actif (§60)
@@ -198,33 +226,49 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertEqual(filled.right, "Export")
     }
 
-    // MARK: - Export désactivé si le préfixe §51 est vide
+    // MARK: - Export désactivé si le SEGMENT exportable est vide (§51)
 
     func testExportDisabledWithoutAnySlot() {
         XCTAssertFalse(AssemblyViewLogic.isExportEnabled(slots: []))
+        XCTAssertFalse(AssemblyViewLogic.isExportEnabled(items: []))
     }
 
-    func testExportDisabledWhenFirstSlotIsEmpty() {
-        // §51/§66 : « première case vide : export désactivé » — même si
-        // des cases ultérieures sont prêtes.
+    func testExportEnabledWhenFirstSlotIsEmptyButALaterSlotIsReady() {
+        // ÉCART PRODUIT (11 août 2026) — LE test qui a changé de verdict.
+        // Avant : « première case vide : export désactivé » (§66).
+        // Maintenant : l'export porte sur le premier SEGMENT continu de cases
+        // prêtes, où qu'il commence — les cases 1 et 2 forment ce montage.
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: nil),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
             makeSlot(index: 2, startTicks: 90_000, endTicks: 150_000)
         ]
 
-        XCTAssertFalse(AssemblyViewLogic.isExportEnabled(slots: slots))
+        XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
+        XCTAssertTrue(
+            AssemblyViewLogic.isExportEnabled(items: makeItems([.empty, .ready, .ready]))
+        )
     }
 
-    func testExportDisabledWhenFirstSlotIsDownloading() {
-        // §51 : une case `downloading` interrompt le préfixe — en première
-        // position, le préfixe est vide.
+    func testExportDisabledWhenNoSlotIsReady() {
+        // Seule raison restante de désactiver l'export (§51 : « export
+        // désactivé si le résultat est vide ») — aucun état non prêt ne
+        // fabrique un montage : ni vide, ni en cours (§44), ni bloquant
+        // (§64, §3.8).
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: .downloading),
-            makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000)
+            makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000, status: nil),
+            makeSlot(index: 2, startTicks: 90_000, endTicks: 150_000, status: .unavailable),
+            makeSlot(index: 3, startTicks: 150_000, endTicks: 195_000, status: .tooShort),
+            makeSlot(index: 4, startTicks: 195_000, endTicks: 240_000, status: .resolving)
         ]
 
         XCTAssertFalse(AssemblyViewLogic.isExportEnabled(slots: slots))
+        XCTAssertFalse(
+            AssemblyViewLogic.isExportEnabled(
+                items: makeItems([.downloading, .empty, .unavailable, .tooShort, .resolving])
+            )
+        )
     }
 
     func testExportEnabledWhenFirstSlotIsReady() {
@@ -236,9 +280,9 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
     }
 
-    func testExportEnabledDespiteGapAfterReadyPrefix() {
-        // §51 : l'export partiel s'arrête au premier trou mais reste
-        // POSSIBLE — le préfixe [0, 1] est non vide.
+    func testExportEnabledDespiteGapAfterTheSegment() {
+        // §51 : l'export s'arrête au premier trou mais reste POSSIBLE — le
+        // segment [0, 1] est non vide.
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
@@ -247,5 +291,119 @@ final class AssemblyViewLogicTests: XCTestCase {
         ]
 
         XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
+    }
+
+    func testBothExportEnabledVariantsAgreeOnEveryArrangement() {
+        // La variante « items » (dock §36, bouton d'aperçu §47.2) et la
+        // variante « snapshots » (source du domaine) doivent rendre le MÊME
+        // verdict : sans cela, le dock proposerait un export que l'écran
+        // suivant refuserait.
+        let arrangements: [[ClipAssignmentStatus?]] = [
+            [],
+            [nil],
+            [.ready],
+            [nil, .ready],
+            [.ready, nil, .ready],
+            [.downloading, .ready],
+            [nil, .resolving, .unavailable],
+            [.ready, .ready, .tooShort, .ready]
+        ]
+        for statuses in arrangements {
+            var startTicks: Int64 = 0
+            var slots: [ProjectSlot] = []
+            for (index, status) in statuses.enumerated() {
+                slots.append(makeSlot(
+                    index: index,
+                    startTicks: startTicks,
+                    endTicks: startTicks + 45_000,
+                    status: status
+                ))
+                startTicks += 45_000
+            }
+            let items = makeItems(statuses.map { AssemblySlotState.from(assignmentStatusRaw: $0?.rawValue) })
+            XCTAssertEqual(
+                AssemblyViewLogic.isExportEnabled(slots: slots),
+                AssemblyViewLogic.isExportEnabled(items: items),
+                "arrangement : \(statuses)"
+            )
+        }
+    }
+
+    // MARK: - Bornes du segment exporté (écart produit, §35.3)
+
+    func testSegmentPositionsAreNilWhenNothingIsReady() {
+        XCTAssertNil(AssemblyViewLogic.exportedSegmentPositions(items: []))
+        XCTAssertNil(
+            AssemblyViewLogic.exportedSegmentPositions(
+                items: makeItems([.empty, .downloading, .unavailable])
+            )
+        )
+    }
+
+    func testSegmentStartsAtTheFirstReadySlotWhereverItIs() {
+        // L'exemple de la demande : cases 28 à 50 remplies (ici 3 à 5).
+        let items = makeItems([.empty, .empty, .downloading, .ready, .ready, .ready, .empty])
+        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 3...5)
+    }
+
+    func testSegmentStopsAtTheFirstHoleAndIgnoresLaterSegments() {
+        // « S'il existe plusieurs segments, c'est le PREMIER qui compte » —
+        // comportement prévisible, borné par la mini-timeline §35.3.
+        let items = makeItems([.ready, .ready, .empty, .ready, .ready, .ready])
+        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 0...1)
+    }
+
+    func testSegmentOfASingleReadySlot() {
+        let items = makeItems([.empty, .ready, .tooShort])
+        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 1...1)
+    }
+
+    func testSegmentCoversTheWholeProjectWhenEverySlotIsReady() {
+        let items = makeItems([.ready, .ready, .ready, .ready])
+        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 0...3)
+    }
+
+    func testEveryNonReadyStateBreaksTheSegment() {
+        // Aucun état intermédiaire n'est « presque prêt » : résolution,
+        // téléchargement §44, indisponible §64 et trop courte §3.8 coupent
+        // le montage exactement comme une case vide.
+        for state in [AssemblySlotState.empty, .resolving, .downloading, .unavailable, .tooShort] {
+            let items = makeItems([.ready, state, .ready])
+            XCTAssertEqual(
+                AssemblyViewLogic.exportedSegmentPositions(items: items),
+                0...0,
+                "état interrupteur : \(state)"
+            )
+        }
+    }
+
+    // MARK: - Énoncé VoiceOver du segment (§39)
+
+    func testSpokenExportSegmentUsesOneBasedPlanNumbers() {
+        // « plans 28 à 50 exportables » à partir des index 27…49 (0-based).
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportSegment(startIndex: 27, endIndex: 49),
+            "plans 28 à 50 exportables"
+        )
+    }
+
+    func testSpokenExportSegmentIsSingularForASingleSlot() {
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportSegment(startIndex: 27, endIndex: 27),
+            "plan 28 exportable"
+        )
+    }
+
+    func testSpokenExportSegmentIsDefensiveAboutOrderAndNegativeIndexes() {
+        // Bornes inversées ou négatives (jamais attendues) : jamais « plan 0 »
+        // ni une plage à l'envers.
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportSegment(startIndex: 5, endIndex: 2),
+            "plans 3 à 6 exportables"
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportSegment(startIndex: -4, endIndex: -4),
+            "plan 1 exportable"
+        )
     }
 }

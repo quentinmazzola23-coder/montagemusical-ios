@@ -8,7 +8,7 @@
 //  change lors du premier rush / si un asset devient indisponible ».
 //
 //  Trois familles de tests :
-//  - `scopeKey` : les trois portées §47 (case / préfixe contigu / montage
+//  - `scopeKey` : les trois portées §47 (case / segment continu / montage
 //    complet) sont des compositions DIFFÉRENTES, jamais interchangeables ;
 //  - `fingerprint` : change dès qu'un élément du montage change (association,
 //    rush, statut, frontière de case, géométrie) et RESTE IDENTIQUE pour un
@@ -227,11 +227,35 @@ final class PreviewCacheKeyTests: XCTestCase {
         )
     }
 
-    /// Une case vidée interrompt le préfixe §51 : l'empreinte doit le voir.
+    /// Une case vidée interrompt le segment exportable : l'empreinte doit le
+    /// voir.
     func testFingerprintChangesWhenSlotBecomesEmpty() {
         XCTAssertNotEqual(
             PreviewCacheKey.fingerprint(for: makeSnapshot()),
             PreviewCacheKey.fingerprint(for: makeSnapshot(secondAssignment: false))
+        )
+    }
+
+    /// CHANGEMENT PRODUIT : l'aperçu principal porte sur le SEGMENT continu
+    /// de cases prêtes, qui peut commencer n'importe où. Deux montages dont le
+    /// segment n'a PAS le même `musicStart` produisent des compositions
+    /// différentes (décalage `slot.start - musicStart` différent, portion de
+    /// musique différente) : la clé de cache doit les distinguer.
+    ///
+    /// C'est ce que garantit `fingerprint`, sans que la clé ait besoin de
+    /// porter le segment : le segment se déduit entièrement des statuts et des
+    /// frontières, tous deux déjà couverts.
+    func testFingerprintDistinguishesTwoDifferentReadySegments() {
+        // Cases 0 et 1 prêtes → segment [0, 1], musicStart = 0.
+        let wholeMontage = makeSnapshot()
+        // Case 0 en téléchargement → segment [1] seul, musicStart = 1 000.
+        let shiftedSegment = makeSnapshot(firstStatus: .downloading)
+
+        XCTAssertEqual(wholeMontage.contiguousReadySegment.musicStart, MediaTime(ticks: 0))
+        XCTAssertEqual(shiftedSegment.contiguousReadySegment.musicStart, MediaTime(ticks: 1_000))
+        XCTAssertNotEqual(
+            PreviewCacheKey(scope: .contiguousPrefix, snapshot: wholeMontage),
+            PreviewCacheKey(scope: .contiguousPrefix, snapshot: shiftedSegment)
         )
     }
 

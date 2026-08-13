@@ -1078,7 +1078,8 @@ extension ProjectStore {
     ///
     /// Seule forme du projet qui traverse la frontière de l'acteur (§8) :
     /// aucun `PersistentModel` n'en sort. C'est l'entrée du préfixe
-    /// exportable (`contiguousReadyPrefix`, §51), de la prévisualisation
+    /// exportable (`contiguousReadySegment`, §51 amendé par l'écart produit),
+    /// de la prévisualisation
     /// (§47) et de l'export (§7 `ProjectExporting`).
     ///
     /// Cases retenues : celles du rythme CHOISI (après §34, `selectPace`
@@ -1197,8 +1198,12 @@ extension ProjectStore {
     /// « terminé » parce qu'un export partiel a réussi.
     private func restoredStatusRaw(projectID: UUID) throws -> String {
         let snapshot = try projectSnapshot(projectID: projectID)
-        let readyPrefixCount = snapshot.contiguousReadyPrefix.count
-        let isComplete = readyPrefixCount > 0 && readyPrefixCount == snapshot.slots.count
+        // Écart produit : le montage exporté est le SEGMENT continu de cases
+        // prêtes (où qu'il commence), plus le préfixe. Le critère de
+        // « terminé » est inchangé : TOUTES les cases doivent être prêtes —
+        // un segment partiel, même exporté, ne rend pas le projet complet.
+        let readySegmentCount = snapshot.contiguousReadySegment.slotCount
+        let isComplete = readySegmentCount > 0 && readySegmentCount == snapshot.slots.count
         return isComplete
             ? ProjectStatus.complete.rawValue
             : ProjectStatus.assembling.rawValue

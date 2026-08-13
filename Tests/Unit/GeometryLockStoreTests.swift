@@ -324,12 +324,13 @@ final class GeometryLockStoreTests: XCTestCase {
         XCTAssertEqual(geometry.aspectHeight, 16)
         XCTAssertEqual(geometry.orientation, .portrait)
 
-        // §47.2/§51 : la case `downloading` COUPE le préfixe exportable —
-        // la case 2, pourtant prête, est ignorée et n'est jamais avancée.
-        let prefix = snapshot.contiguousReadyPrefix
-        XCTAssertEqual(prefix.map(\.index), [0], "Une case downloading interrompt le préfixe")
-        XCTAssertEqual(prefix.first?.start.ticks, 0)
-        XCTAssertEqual(prefix.first?.end.ticks, 60_000)
+        // La case `downloading` COUPE le segment exportable — la case 2,
+        // pourtant prête, est ignorée et n'est JAMAIS avancée (elle forme un
+        // second segment, et c'est le premier qui est exporté).
+        let segment = snapshot.contiguousReadySegment
+        XCTAssertEqual(segment.slots.map(\.index), [0], "Une case downloading interrompt le segment")
+        XCTAssertEqual(segment.musicStart.ticks, 0)
+        XCTAssertEqual(segment.musicEnd.ticks, 60_000)
     }
 
     func testProjectSnapshotWithoutGeometryOrAssignments() async throws {
@@ -341,8 +342,8 @@ final class GeometryLockStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.slots.count, 4)
         XCTAssertTrue(snapshot.slots.allSatisfy { $0.assignment == nil })
         XCTAssertTrue(
-            snapshot.contiguousReadyPrefix.isEmpty,
-            "§51 : première case vide → préfixe vide → export/preview principal désactivés"
+            snapshot.contiguousReadySegment.isEmpty,
+            "Aucune case prête → aucun segment exportable → export/aperçu désactivés"
         )
     }
 
@@ -364,8 +365,8 @@ final class GeometryLockStoreTests: XCTestCase {
             "Aucun rythme sélectionné → aucune case dans l'instantané"
         )
         XCTAssertTrue(
-            snapshot.contiguousReadyPrefix.isEmpty,
-            "§51 : aucun montage en cours → aucun préfixe exportable"
+            snapshot.contiguousReadySegment.isEmpty,
+            "Aucun montage en cours → aucun segment exportable"
         )
         XCTAssertEqual(snapshot.projectID, projectID)
     }

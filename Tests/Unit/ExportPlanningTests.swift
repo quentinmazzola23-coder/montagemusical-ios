@@ -3,10 +3,13 @@
 //  MontageMusicalTests
 //
 //  Logique d'export testable SANS encodage (Jalon 10) :
-//  - plan d'export §51 (préfixe, durée absolue, nombre de plans, préfixe
-//    vide → `emptyPrefix` §66) ;
+//  - plan d'export = SEGMENT continu de cases prêtes (changement produit qui
+//    remplace le préfixe §51 — contrat en tête de `ExportModels.swift`) :
+//    durée `musicEnd - musicStart`, décalage `slot.start - musicStart`,
+//    nombre de plans, aucune case prête → `emptyPrefix` ;
 //  - TRONCATURE §66 quand un rush devient indisponible pendant l'export
-//    (plan réduit à n-1, musique recoupée §51 ; n == 0 → `emptyPrefix`) ;
+//    (fin du segment raccourcie, musique recoupée, `musicStart` inchangé ;
+//    premier rush du segment indisponible → `emptyPrefix`) ;
 //  - estimation de taille §57 (croissance avec pixels/cadence/durée) et
 //    place exigée pour la COPIE Photos ;
 //  - refus pour espace insuffisant §57/§66 AVANT tout encodage, avec une
@@ -76,12 +79,12 @@ final class ExportPlanningTests: XCTestCase {
         )
     }
 
-    // MARK: - §51 : durée exportée et nombre de plans
+    // MARK: - Durée exportée et nombre de plans (segment)
 
-    func testPlanDurationIsAbsoluteEndOfLastPrefixSlot() {
-        // 3 cases prêtes, jointives : la durée exportée est la fin ABSOLUE de
-        // la dernière (§51 : « la musique est coupée à la fin absolue de la
-        // dernière case exportée »).
+    func testPlanDurationIsTheSegmentDurationWhenItStartsAtZero() {
+        // 3 cases prêtes, jointives, à partir de la case 0 : le segment
+        // commence à l'instant 0, la durée exportée vaut donc la fin ABSOLUE
+        // de la dernière — comportement identique à l'ancien préfixe §51.
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
@@ -90,6 +93,8 @@ final class ExportPlanningTests: XCTestCase {
 
         let plan = try? ExportPlan.make(project: makeSnapshot(slots: slots), scope: .complete)
 
+        XCTAssertEqual(plan?.musicStart, MediaTime(ticks: 0))
+        XCTAssertEqual(plan?.musicEnd, MediaTime(ticks: 150_000))
         XCTAssertEqual(plan?.duration, MediaTime(ticks: 150_000))
         XCTAssertEqual(plan?.slotCount, 3)
         XCTAssertEqual(plan?.slots.map(\.index), [0, 1, 2])
@@ -130,8 +135,8 @@ final class ExportPlanningTests: XCTestCase {
         XCTAssertEqual(plan?.duration, MediaTime(ticks: 45_000))
     }
 
-    func testBothScopesExportTheSamePrefix() {
-        // §66 : `.complete` ne peut jamais exporter AU-DELÀ du préfixe — les
+    func testBothScopesExportTheSameSegment() {
+        // §66 : `.complete` ne peut jamais exporter AU-DELÀ du segment — les
         // deux portées produisent le même plan (contrairement à la
         // prévisualisation §47.2, qui refuse un montage incomplet).
         let slots = [
@@ -147,20 +152,27 @@ final class ExportPlanningTests: XCTestCase {
         XCTAssertEqual(prefixPlan?.slotCount, 1)
     }
 
-    // MARK: - §66 : première case vide → export désactivé
+    // MARK: - CHANGEMENT PRODUIT : première case vide → export POSSIBLE
 
-    func testEmptyFirstSlotThrowsEmptyPrefix() {
+    /// L'attendu de l'ancien test est INVERSÉ : une première case vide ne
+    /// désactive plus l'export, c'est le segment prêt suivant qui est exporté.
+    func testEmptyFirstSlotNowExportsTheFollowingSegment() throws {
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: nil),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000)
         ]
 
-        XCTAssertThrowsError(
-            try ExportPlan.make(project: makeSnapshot(slots: slots), scope: .contiguousPrefix)
-        ) { error in
-            XCTAssertEqual(error as? ExportError, .emptyPrefix)
-        }
+        let plan = try ExportPlan.make(project: makeSnapshot(slots: slots), scope: .contiguousPrefix)
+
+        XCTAssertEqual(plan.slotCount, 1)
+        XCTAssertEqual(plan.slots.map(\.index), [1])
+        XCTAssertEqual(plan.musicStart, MediaTime(ticks: 45_000))
+        XCTAssertEqual(plan.musicEnd, MediaTime(ticks: 90_000))
+        // Durée du fichier = musicEnd − musicStart, et NON musicEnd.
+        XCTAssertEqual(plan.duration, MediaTime(ticks: 45_000))
     }
+
+    // MARK: - Aucune case prête → export désactivé
 
     func testProjectWithoutSlotsThrowsEmptyPrefix() {
         XCTAssertThrowsError(
@@ -170,7 +182,7 @@ final class ExportPlanningTests: XCTestCase {
         }
     }
 
-    func testUnavailableFirstSlotThrowsEmptyPrefix() {
+    func testOnlySlotUnavailableThrowsEmptyPrefix() {
         let slots = [makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: .unavailable)]
 
         XCTAssertThrowsError(
@@ -178,6 +190,118 @@ final class ExportPlanningTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? ExportError, .emptyPrefix)
         }
+    }
+
+    func testNoReadySlotAtAllThrowsEmptyPrefix() {
+        // Aucune case prête, où que ce soit dans le morceau → rien à exporter
+        // (bouton désactivé).
+        let slots = [
+            makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: nil),
+            makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000, status: .downloading),
+            makeSlot(index: 2, startTicks: 90_000, endTicks: 150_000, status: .unavailable)
+        ]
+
+        XCTAssertThrowsError(
+            try ExportPlan.make(project: makeSnapshot(slots: slots), scope: .complete)
+        ) { error in
+            XCTAssertEqual(error as? ExportError, .emptyPrefix)
+        }
+    }
+
+    // MARK: - Exemple CHIFFRÉ de l'utilisateur : cases 28 à 50
+
+    /// 51 cases de 0,5 s (30 000 ticks) pavant la musique sans trou (§28.1),
+    /// seules les cases 28 à 50 étant prêtes. Valeurs calculées à la main
+    /// (60 000 ticks/s, §9) :
+    /// - case 28 : start = 28 × 30 000 = 840 000 ticks (14 s) ;
+    /// - case 50 : end = 51 × 30 000 = 1 530 000 ticks (25,5 s) ;
+    /// - durée exportée = 1 530 000 − 840 000 = 690 000 ticks (11,5 s).
+    private var snapshotReadyFrom28To50: ProjectSnapshot {
+        makeSnapshot(slots: (0...50).map { index in
+            makeSlot(
+                index: index,
+                startTicks: Int64(index) * 30_000,
+                endTicks: Int64(index + 1) * 30_000,
+                status: (28...50).contains(index) ? ClipAssignmentStatus.ready : nil
+            )
+        })
+    }
+
+    func testExportedDurationIsMusicEndMinusMusicStart() throws {
+        let plan = try ExportPlan.make(project: snapshotReadyFrom28To50, scope: .contiguousPrefix)
+
+        XCTAssertEqual(plan.musicStart, MediaTime(ticks: 840_000))
+        XCTAssertEqual(plan.musicEnd, MediaTime(ticks: 1_530_000))
+        XCTAssertEqual(plan.duration, MediaTime(ticks: 690_000))
+        XCTAssertEqual(plan.duration.ticks, plan.musicEnd.ticks - plan.musicStart.ticks)
+        XCTAssertNotEqual(
+            plan.duration, plan.musicEnd,
+            "le montage ne commence plus à l'instant 0 de la musique"
+        )
+    }
+
+    func testExportedShotCountIsTheSegmentSize() throws {
+        let plan = try ExportPlan.make(project: snapshotReadyFrom28To50, scope: .contiguousPrefix)
+
+        XCTAssertEqual(plan.slotCount, 23, "cases 28 à 50 incluses")
+        XCTAssertEqual(plan.slots.map(\.index), Array(28...50))
+        XCTAssertEqual(plan.segment.startIndex, 28)
+        XCTAssertEqual(plan.segment.endIndex, 50)
+    }
+
+    /// Décalage §53 : chaque case est posée à `slot.start - musicStart` dans
+    /// la composition. Fonction PURE — testée sans AVFoundation, exactement
+    /// comme `ProjectExporter.assemble` l'appelle.
+    func testCompositionStartOfEachSlotIsShiftedByMusicStart() throws {
+        let plan = try ExportPlan.make(project: snapshotReadyFrom28To50, scope: .contiguousPrefix)
+
+        for slot in plan.slots {
+            XCTAssertEqual(
+                plan.compositionStart(of: slot),
+                MediaTime(ticks: slot.start.ticks - 840_000)
+            )
+        }
+
+        // Bornes chiffrées à la main.
+        let first = try XCTUnwrap(plan.slots.first)
+        let last = try XCTUnwrap(plan.slots.last)
+        XCTAssertEqual(plan.compositionStart(of: first), .zero, "la case 28 ouvre le montage")
+        XCTAssertEqual(
+            plan.compositionStart(of: last),
+            MediaTime(ticks: 660_000),
+            "case 50 : 1 500 000 − 840 000 ticks"
+        )
+        // Fin du dernier plan == durée du fichier : aucune dérive cumulative.
+        XCTAssertEqual(plan.compositionStart(of: last) + last.duration, plan.duration)
+    }
+
+    /// §57 : l'estimation porte sur la durée RÉELLE du fichier (11,5 s), pas
+    /// sur la fin absolue du morceau (25,5 s) — sinon l'export serait refusé
+    /// pour un manque de place inventé.
+    func testStorageEstimateUsesTheSegmentDurationNotTheAbsoluteEnd() {
+        let profile = makeProfile()
+
+        let segmentBytes = ExportPlan.estimatedBytes(
+            project: snapshotReadyFrom28To50, profile: profile
+        )
+
+        XCTAssertEqual(segmentBytes, makePlan(seconds: 11.5).estimatedBytes(profile: profile))
+        XCTAssertLessThan(segmentBytes, makePlan(seconds: 25.5).estimatedBytes(profile: profile))
+    }
+
+    /// La troncature §66 opère DANS le segment : elle en raccourcit la FIN et
+    /// laisse `musicStart` intact.
+    func testTruncationInsideAnOffsetSegmentKeepsMusicStart() throws {
+        let plan = try ExportPlan.make(project: snapshotReadyFrom28To50, scope: .contiguousPrefix)
+
+        // Le rush de la 4e case du segment (index 31) est reparti dans iCloud.
+        let truncated = try plan.truncated(before: 3)
+
+        XCTAssertEqual(truncated.slots.map(\.index), [28, 29, 30])
+        XCTAssertEqual(truncated.musicStart, MediaTime(ticks: 840_000), "le début ne bouge pas")
+        XCTAssertEqual(truncated.musicEnd, MediaTime(ticks: 930_000), "fin absolue de la case 30")
+        XCTAssertEqual(truncated.duration, MediaTime(ticks: 90_000), "3 × 30 000 ticks")
+        XCTAssertEqual(truncated.compositionStart(of: truncated.slots[0]), .zero)
     }
 
     // MARK: - §66 : rush devenu indisponible PENDANT l'export → troncature
@@ -245,11 +369,12 @@ final class ExportPlanningTests: XCTestCase {
 
     // MARK: - §57 : estimation de taille
 
+    /// Plan d'UNE case couvrant `seconds`, à partir de l'instant 0 : la durée
+    /// du segment vaut alors exactement `seconds`.
     private func makePlan(seconds: Double) -> ExportPlan {
         let end = MediaTime(seconds: seconds)
         return ExportPlan(
-            slots: [makeSlot(index: 0, startTicks: 0, endTicks: end.ticks)],
-            duration: end
+            segment: ReadySegment(slots: [makeSlot(index: 0, startTicks: 0, endTicks: end.ticks)])
         )
     }
 
@@ -290,9 +415,10 @@ final class ExportPlanningTests: XCTestCase {
         XCTAssertEqual(ExportPlan.empty.estimatedBytes(profile: makeProfile()), 0)
     }
 
-    func testEstimateForProjectUsesTheExportablePrefix() {
-        // L'estimation d'un PROJET (§57) porte sur le PRÉFIXE §51, pas sur le
-        // montage entier : les cases situées après le trou ne comptent pas.
+    func testEstimateForProjectUsesTheExportableSegment() {
+        // L'estimation d'un PROJET (§57) porte sur le SEGMENT exportable, pas
+        // sur le montage entier : les cases situées après le trou ne comptent
+        // pas.
         // Logique PURE : aucun exporteur, aucun acteur photothèque, aucun
         // disque — `ExportPlan.estimatedBytes(project:profile:)` est la source
         // unique dont `ProjectExporter.estimatedBytes` n'est qu'une façade.
@@ -315,7 +441,7 @@ final class ExportPlanningTests: XCTestCase {
         XCTAssertLessThan(truncatedBytes, completeBytes)
     }
 
-    func testEstimateForProjectWithoutExportablePrefixIsZero() {
+    func testEstimateForProjectWithoutExportableSegmentIsZero() {
         let profile = makeProfile()
         let snapshot = makeSnapshot(slots: [
             makeSlot(index: 0, startTicks: 0, endTicks: 600_000, status: nil)

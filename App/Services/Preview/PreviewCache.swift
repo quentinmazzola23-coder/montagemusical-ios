@@ -19,8 +19,8 @@ import Foundation
 /// Les trois composantes couvrent EXACTEMENT les causes d'invalidation
 /// listées par la spec §48 :
 /// - `projectID` : le cache d'un projet ne peut jamais servir à un autre ;
-/// - `scopeKey` : une case (`slot:<uuid>`), le préfixe (`prefix`) ou le
-///   montage complet (`complete`) sont des compositions différentes (§47) ;
+/// - `scopeKey` : une case (`slot:<uuid>`), l'aperçu principal (`prefix`) ou
+///   le montage complet (`complete`) sont des compositions différentes (§47) ;
 /// - `assignmentsFingerprint` : empreinte des cases, de leurs associations
 ///   et de la géométrie — elle change dès qu'« une association change », que
 ///   « la géométrie change lors du premier rush », qu'« un asset devient
@@ -28,9 +28,22 @@ import Foundation
 ///
 /// Une composition n'est donc JAMAIS réutilisée après une modification du
 /// montage : la clé ne correspond simplement plus.
+///
+/// **Changement produit (segment au lieu de préfixe) : la clé est INCHANGÉE.**
+/// L'aperçu principal porte désormais sur le SEGMENT continu de cases prêtes,
+/// qui peut commencer n'importe où — mais ce segment est une FONCTION PURE des
+/// index, frontières et statuts des cases, tous déjà couverts par
+/// `fingerprint`. Un segment qui change (bornes déplacées, case devenue prête
+/// avant lui, décalage `musicStart` différent) change donc forcément
+/// l'empreinte : aucune composition périmée ne peut être resservie. Ajouter le
+/// segment à la clé n'apporterait rien et introduirait une seconde source de
+/// vérité.
 struct PreviewCacheKey: Hashable, Sendable {
     let projectID: UUID
-    /// `"slot:<uuid>"` | `"prefix"` | `"complete"`.
+    /// `"slot:<uuid>"` | `"prefix"` (aperçu principal = segment continu) |
+    /// `"complete"`. La VALEUR `"prefix"` est conservée telle quelle : c'est
+    /// un identifiant opaque de portée, jamais affiché, et le renommer
+    /// n'aurait aucun effet observable.
     let scopeKey: String
     /// §48 : invalidation dès qu'une association (ou la géométrie) change.
     let assignmentsFingerprint: String
@@ -62,7 +75,9 @@ extension PreviewCacheKey {
     /// Couvre les cases (identité, ordre, frontières ABSOLUES §9) et leurs
     /// associations (identifiant d'association, rush, statut), plus la
     /// géométrie verrouillée. Deux états de montage différents produisent
-    /// donc deux empreintes différentes.
+    /// donc deux empreintes différentes — et comme le SEGMENT exportable se
+    /// déduit entièrement de ces mêmes données, deux segments différents
+    /// donnent forcément deux empreintes différentes.
     ///
     /// Le condensé est un FNV-1a 64 bits : court, stable d'un lancement à
     /// l'autre (contrairement à `Hasher`, dont la graine change à chaque

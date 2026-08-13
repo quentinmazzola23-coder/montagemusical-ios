@@ -2,7 +2,7 @@
 
 **Projet :** Application iOS de montage musical guidé (nom de travail : MontageMusical)
 **Spécification :** `C:\Users\quent\Downloads\specification_application_montage_musical_ios.md` (v1.0, 10 août 2026)
-**Dernière mise à jour :** 11 août 2026 (revue finale du Jalon 12 — correctifs §39/§60/§61/§62/§64 et état honnête des livrables §87)
+**Dernière mise à jour :** 11 août 2026 (écart produit — **export du segment rempli** : l'export ne porte plus sur le préfixe §51 mais sur le premier segment continu de cases prêtes, où qu'il commence ; voir la section dédiée. Précédemment : revue finale du Jalon 12 — correctifs §39/§60/§61/§62/§64 et état honnête des livrables §87)
 
 ---
 
@@ -20,9 +20,69 @@
 | 7 — Timeline d'assemblage | ✅ Terminé (CI verte, run 31422818870) |
 | 8 — PhotoKit | ✅ Terminé (CI verte, run 31428288550) |
 | 9 — Géométrie et preview | ✅ Terminé (CI verte, run 31434117279) |
-| 10 — Export | ✅ Terminé (CI verte, run 31439824793) |
+| 10 — Export | ✅ Terminé (CI verte, run 31439824793) — ⚠️ **révisé le 11 août 2026 par un écart produit** : l'export ne porte plus sur le PRÉFIXE (§51/§66/§88.12) mais sur le **premier segment continu de cases prêtes, où qu'il commence** (cases 28 à 50 → 23 plans exportés). §51 « l'export s'arrête au premier emplacement vide » et §66 « première case vide : export désactivé » ne décrivent donc plus le produit. Détail, garanties conservées et parties de la spec devenues fausses : section « Écart produit — export du segment rempli » ci-dessous |
 | 11 — Moteur avancé Core ML | ⛔ **NON TERMINÉ — délibérément** (§29A : aucun modèle entraîné, donc aucun modèle simulé. Protocole `MusicAnalyzing`, `BeatActivationModel`, fallback déterministe et tests en place ; l'intégration attend un modèle dont la licence et les données d'entraînement sont validées.) — détail : section « Jalon 11 » ci-dessous |
 | 12 — Polissage | 🟡 **PARTIEL** (CI verte, run 31444633204) — 5 des 8 livrables §87 sont faits (accessibilité, haptique, animations, erreurs, icône et nom final) ; **3 sont absents** : profilage mémoire/CPU §67 (impossible sans appareil ni Instruments — aucun chiffre relevé), tests UI §73 (aucun XCUITest écrit : il faut un simulateur, donc macOS), localisation (interface française **en dur**, aucun catalogue de chaînes — la V1 est monolingue française §0, choix assumé et non un oubli). Détail et raisons : section « Jalon 12 » ci-dessous. Vérification Mac ⌘B/⌘U toujours requise |
+
+---
+
+## Écart produit — export du segment rempli (11 août 2026)
+
+**Ceci n'est pas un écart d'implémentation : c'est un changement de PRODUIT demandé par l'utilisateur, postérieur à la spécification v1.0.** La spécification n'a pas été mise à jour ; cette section fait foi là où elle la contredit.
+
+### Ce que disait la spécification
+
+- **§51 « Préfixe exportable »** : l'export porte sur les cases prêtes **depuis la case 0**, et **s'arrête au premier emplacement vide**.
+- **§66 « Export »** : « **première case vide : export désactivé** ».
+- **§88.12** (parcours minimal) : « exporter **le préfixe** sans finir le projet ».
+
+### Ce que l'utilisateur a demandé
+
+L'export porte sur le **SEGMENT CONTINU de cases prêtes, où qu'il commence**. Exemple donné : **cases 28 à 50 remplies → l'export contient ces 23 plans** (avant, c'était impossible : la case 0 étant vide, l'export était refusé).
+
+**Règle exacte implémentée** :
+
+1. trier les cases par index ;
+2. trouver la **première** case dont l'association est `ready` ;
+3. avancer tant que les suivantes sont `ready` ; s'arrêter au premier trou (case vide, ou association `resolving` / `downloading` / `unavailable` / `tooShort`) ;
+4. ce segment **EST** le montage exporté. S'il existe **plusieurs** segments, c'est le **PREMIER** qui compte — comportement prévisible, et la mini-timeline §35.3 en montre les bornes.
+
+**Conséquence temporelle** — le montage ne commence plus forcément à l'instant 0 de la musique. Pour un segment `[première, dernière]` : `musicStart = première.start`, `musicEnd = dernière.end`, `durée = musicEnd − musicStart`. Dans la composition, la **musique** insérée est la **portion `[musicStart, musicEnd]`** du fichier original placée à l'instant 0, et la **vidéo** de la case `i` est posée à `slot.start − musicStart` pour `slot.end − slot.start`. Tout reste en **ticks entiers** (§9) : aucune conversion en secondes, aucun arrondi cumulatif.
+
+### Ce qui reste GARANTI (inchangé)
+
+- **aucune case n'est jamais déplacée** : les cases gardent leurs temps musicaux absolus (§9, §89 « elle déplace des plans après un trou » reste une régression interdite) ;
+- **aucun écran noir n'est ajouté** : un trou n'est pas comblé, il **borne** le montage ;
+- **la musique est calée sur la portion du segment** : elle ne redémarre pas au début du morceau et n'est pas décalée ;
+- **export impossible si le résultat est vide** (§51) : sans **aucune** case prête, le bouton reste désactivé et la raison est annoncée ;
+- **§89 intact** : aucun réglage ajouté à l'écran d'export, aucun temps arrondi, aucune case obligatoire.
+
+### Ce qui devient FAUX dans la spécification
+
+| Passage | Statut |
+|---|---|
+| §51 « l'export s'arrête au premier emplacement vide » (préfixe depuis la case 0) | **FAUX** — l'export commence à la première case **prête** et s'arrête au premier trou **qui la suit** |
+| §66 « première case vide : export désactivé » | **FAUX** — remplacé par « **aucune case prête** : export désactivé ». Une première case vide n'empêche plus rien |
+| §66 « trou au milieu : export limité au préfixe » | **Partiellement faux** — l'export est limité au **segment**, qui peut commencer après le trou initial |
+| §88.12 « exporter **le préfixe** sans finir le projet » | **À lire « exporter le segment rempli »** — l'intention du parcours minimal est conservée, sa formulation non |
+| §47.2 « aperçu principal du préfixe » | **À lire « du segment »** — le nom d'énumération `PreviewScope.contiguousPrefix` est conservé (compatibilité du domaine), sa **règle** est celle du segment |
+
+### Conséquences dans l'interface (ce qui a changé à l'écran)
+
+- **`AssemblyView`** — « Export » (dock §36) et « Prévisualiser le montage » (§47.2, zone basse) sont actifs dès qu'**un** segment existe, plus seulement quand la première case est prête. Les deux variantes de `AssemblyViewLogic.isExportEnabled` (snapshots et items) passent par le segment ; la variante « items » n'est plus O(1) — regarder la seule première case n'est plus équivalent. Le hint désactivé dit désormais « Remplissez **au moins une case** pour exporter ». Le titre de la feuille d'aperçu nomme les plans lus (« Montage — plans 28 à 50 »).
+- **`AssemblyMiniTimelineView`** (§35.3 « limite d'export partiel ») — le marqueur triangulaire **ponctuel** (début de la première case non prête) est remplacé par un **marquage du segment** : un **crochet au-dessus de la piste** — liséré fin sur toute l'étendue du segment, fermé par un montant vertical à chaque bout. Raison : une limite unique ne dit plus rien quand le montage peut commencer ailleurs qu'à la case 0 ; il faut son **début** et sa **fin**. Trois repères, **trois formes distinctes** et trois emplacements (§39, « ne pas dépendre uniquement de la couleur ») : position courante = barre verticale pleine hauteur, fenêtre du carrousel = soulignement plein **sous** la piste, segment exporté = crochet **au-dessus**. La valeur VoiceOver annonce « Plan 4 sur 10, **plans 28 à 50 exportables** ».
+- **`ExportSummaryView`** (§56) — le résumé dit **quels** plans partent : la plage « Plans 28 à 50 » (1-based, comme partout dans l'interface) s'ajoute au nombre de plans et à la durée, **quand l'export est partiel** (segment ≠ projet entier ; sinon « Plans 1 à 23 » n'apprendrait rien de plus que « 23 plans »). La **durée** affichée est celle du **segment** (`musicEnd − musicStart`), plus la fin absolue de la dernière case. Nouveaux helpers purs testés : `planRangeLabel(startIndex:endIndex:)` (singulier « Plan 28 » pour une case unique), `partialExportNotice`, `nothingReadyTitle`/`nothingReadyHint`.
+- **`PreviewPlayerView`** (§47, §64) — les textes parlent du segment : « Aucun plan prêt à prévisualiser. Remplissez **au moins une case**. » et, pour `PreviewError.incompletePrefix`, « **Un plan de ce montage** n'est pas encore prêt » (et non plus « le début du montage »).
+- **Domaine** (agent Cœur, en parallèle) : `contiguousReadyPrefix(slots:)` est **supprimé** et remplacé par `contiguousReadySegment(slots:) -> ReadySegment` (`slots`, `musicStart`, `musicEnd`, `duration`, `startIndex`, `endIndex`). L'interface code **contre cette API**.
+
+### Tests
+
+- `Tests/Unit/AssemblyViewLogicTests.swift` — un test a **changé de verdict** : `testExportEnabledWhenFirstSlotIsEmptyButALaterSlotIsReady` (avant : export **désactivé** quand la première case est vide). Ajouts : bornes du segment (`exportedSegmentPositions` — premier segment seulement, arrêt sur chaque état non prêt, cas d'une case unique), équivalence des deux variantes de `isExportEnabled`, énoncé VoiceOver `spokenExportSegment`.
+- `Tests/Unit/ExportSummaryLogicTests.swift` — formatage de la plage (1-based, singulier, bornes inversées/négatives défensives), cohérence « 23 plans » ↔ « Plans 28 à 50 », messages « aucune case prête ». Le test du message d'`ExportError.emptyPrefix` ne fige plus sa **formulation** (« remplissez la première case » ne décrit plus le geste attendu — ce texte appartient à `App/Services/Export/ProjectExporter.swift`).
+
+### Point de contrôle restant
+
+Les appelants de `contiguousReadyPrefix` **hors interface** doivent suivre la nouvelle API (agent Cœur) : `App/Services/Export/ProjectExporter.swift`, `App/Services/Export/ExportActor.swift`, `App/Services/Preview/PreviewBuilder.swift`, `App/Data/Persistence/ProjectStore.swift` (`readyPrefixCount`, statut §10 `partiallyPreviewable`/`complete`), `Tests/Unit/ContiguousPrefixTests.swift` et `Tests/Unit/GeometryLockStoreTests.swift`. Vérification Mac (⌘B/⌘U) toujours requise : projet généré sous Windows.
 
 ---
 
@@ -55,7 +115,7 @@
 | 15 | `App/Domain/MusicAnalysis/MusicAnalysisModels.swift` | Tous les types §12 (résultat, hypothèses, UMS, fonctions, événements, relations, courbes) |
 | 16 | `App/Domain/EditScore/EditScoreModels.swift` | Types §13 + §26.3/§28.2 (`PaceMode`, `EditScore*`, `EditAnchor`, `EditSlotDefinition`, gestes, `ScoreConfiguration`) |
 | 17 | `App/Domain/Media/MediaModels.swift` | `ClipAssignmentStatus`, `ClipAssignmentRecord` (§13.3), types photothèque (§7) |
-| 18 | `App/Domain/Export/ExportModels.swift` | `PreviewScope` (§47), `ProjectSnapshot`, `contiguousReadyPrefix` (§51) |
+| 18 | `App/Domain/Export/ExportModels.swift` | `PreviewScope` (§47), `ProjectSnapshot`, `contiguousReadySegment(slots:) -> ReadySegment` (§51 **révisé** — écart produit du 11 août 2026 ; remplace `contiguousReadyPrefix`) |
 | 19 | Protocoles §7 rangés par domaine : `MusicAnalysis/MusicAnalyzing.swift`, `EditScore/EditScoreGenerating.swift`, `Media/MediaLibraryBrowsing.swift`, `Media/AudioImporting.swift`, `Export/ProjectExporting.swift`, `Export/PreviewBuilding.swift` | Les 6 protocoles §7 |
 | 20 | `Tests/Unit/MediaTimeTests.swift` | §70 Temps : conversions, affichage centième, non-dérive 1 000 cases, durée par différence, 29,97/59,94 |
 | 21 | `Tests/Unit/ContiguousPrefixTests.swift` | §70 Préfixe exportable : 6 cas |
@@ -181,6 +241,8 @@ Workflow 6 agents (3 générateurs, 3 relecteurs : conformité spec, compilation
 - Vérification Mac (⌘B/⌘U) toujours requise : projet généré sous Windows.
 
 ## Jalon 10 — Export (10 août 2026)
+
+> ⚠️ **Révisé le 11 août 2026 — écart produit « export du segment rempli ».** Tout ce qui est écrit ci-dessous décrit l'export du **préfixe** (§51/§66/§88.12) : c'est l'état livré au Jalon 10, et **ce n'est plus le comportement du produit**. L'export porte désormais sur le **premier segment continu de cases prêtes, où qu'il commence**, avec la musique prise sur la portion correspondante du morceau. Voir la section « **Écart produit — export du segment rempli (11 août 2026)** » en tête de document : elle dit ce qui reste garanti et quelles phrases de la spécification sont devenues fausses.
 
 **Fichiers** : `App/Services/Export/MasterProfile.swift` (§52 PUR : `MasterClipInfo`, classement lexicographique §52.2, cadences normalisées en fractions exactes §52.3 — 29,97/59,94 préservées, plafond 60 —, HDR seulement si TOUS les rushs du préfixe sont HDR §52.4), `App/Services/Export/ProjectExporter.swift` (§51 `ExportPlan` pur + estimation de taille §57, §54 composition — musique originale sur `[0, prefixEnd]`, aucune piste audio de rush, durées RÉELLES vérifiées —, §52.1 rendu dans la géométrie verrouillée, colorimétrie EXPLICITE §52.4, §55 `AVAssetExportSession` avec presets candidats, fichier temporaire unique nettoyé sur tous les chemins, §58 annulation coopérative ; `masterProfile(project:)` expose le profil §52 à l'interface), `App/Services/Export/ExportActor.swift` (§8 : un export actif par projet, résultat de démarrage explicite `started`/`alreadyRunning`/`refused`, progression interrogeable, `lastOutcome`/`lastError`, statut §10 `exporting` → `assembling`/`complete`), `App/Services/Export/PhotoLibrarySaver.swift` (§40 accès `.addOnly` demandé au PREMIER enregistrement, §55 après succès complet, §66 refus → fichier conservé), extensions `ProjectStore` (`setExporting`, `markExportSucceeded`), `App/Features/ExportProgress/ExportSummaryView.swift` (résumé §56 verbatim + logique d'affichage PURE `ExportSummaryLogic`, progression §58 dans le dock, §57 refus avant encodage, §66 issues), routage `ProjectView`, docks `AssemblyView` et `PreviewPlayerView`. Tests : `MasterProfileTests`, `ExportPlanningTests`, `ExportSummaryLogicTests`.
 

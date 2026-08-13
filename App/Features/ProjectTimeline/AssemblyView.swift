@@ -6,13 +6,32 @@
 //  carrousel trois cases, mini-timeline), §36 (dock contextuel « Case
 //  vide » / « Case remplie » ; « + Vidéo »/« Remplacer » présentent la
 //  photothèque Jalon 8 §40–§46 en sheet, `onSlotChanged` recentre le
-//  carrousel §46), §51 (Export désactivé si le préfixe exportable est vide),
+//  carrousel §46), §51 (Export désactivé si le montage exportable est vide),
 //  §59 (debounce très court UNIQUEMENT pour la navigation), §60 (case
 //  active restaurée à la réouverture), §65 (« Changer de rythme » →
 //  duplication si verrouillé).
 //
+//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
+//  utilisateur POSTÉRIEURE à la spécification ; détail dans
+//  IMPLEMENTATION_STATUS.md).
+//  §51/§66 limitaient l'export au PRÉFIXE (cases prêtes depuis la case 0,
+//  arrêt au premier trou ; première case vide → export impossible). L'export
+//  porte désormais sur le SEGMENT CONTINU de cases prêtes, OÙ QU'IL
+//  COMMENCE : cases 28 à 50 remplies → le montage exporté contient ces
+//  23 plans. S'il existe plusieurs segments, c'est le PREMIER qui compte
+//  (comportement prévisible ; la mini-timeline §35.3 en montre les bornes).
+//  Conséquences pour CET écran :
+//  - « Export » et « Prévisualiser le montage » sont actifs dès qu'UN segment
+//    existe (`AssemblyViewLogic.isExportEnabled`), plus seulement quand la
+//    PREMIÈRE case est prête ;
+//  - aucune case n'est jamais DÉPLACÉE et aucun écran noir n'est ajouté : les
+//    cases gardent leurs temps musicaux absolus (§9), et c'est la MUSIQUE qui
+//    est prise sur la portion `[début du segment, fin du segment]`.
+//  Reste vrai de §51 : export impossible si le résultat est vide (aucune case
+//  prête → bouton désactivé, raison annoncée §66).
+//
 //  Jalon 9 : §47.1 (aperçu LOCAL — toucher sur la zone haute quand la case
-//  active est prête), §47.2 (aperçu PRINCIPAL du préfixe continu — son
+//  active est prête), §47.2 (aperçu PRINCIPAL du segment continu — son
 //  emplacement a changé au Jalon 10, voir ci-dessous), §48 (invalidation du cache de preview
 //  dès qu'une association change), §35.3 (courbe musicale simplifiée passée à
 //  la mini-timeline — écart Jalon 7 résorbé), §49 (rattrapage du verrou de
@@ -21,8 +40,9 @@
 //  Jalon 10 : §36 la zone DROITE du dock retrouve « Export » — l'écran
 //  d'export existe désormais (`ExportSummaryView`, §56) — et l'aperçu
 //  principal §47.2 prend un bouton dédié en zone basse (voir la DÉCISION
-//  ci-dessous), §51 (Export actif seulement si le préfixe est non vide),
-//  §66 (première case vide → export désactivé, raison annoncée).
+//  ci-dessous), §51 (Export actif seulement si le montage exportable est non
+//  vide — le SEGMENT depuis l'écart produit ci-dessus), §66 (aucune case
+//  prête → export désactivé, raison annoncée).
 //
 //  Règle du pouce §30 / §89 : toutes les actions ESSENTIELLES vivent dans la
 //  moitié basse ou sur le contenu lui-même — navigation entre cases
@@ -37,7 +57,8 @@
 //  §88.12, §89, §36) :
 //  Le parcours minimal exige DEUX actions distinctes en fin de chaîne —
 //  « prévisualiser le préfixe rempli » (§88.11) et « exporter le préfixe sans
-//  finir le projet » (§88.12) — alors que le dock §36 n'admet que TROIS
+//  finir le projet » (§88.12), lus depuis l'écart produit comme « le SEGMENT
+//  rempli » — alors que le dock §36 n'admet que TROIS
 //  zones, déjà occupées par `Projets`, `+ Vidéo`/`Remplacer` et `Export`.
 //  Au Jalon 9, la zone droite portait provisoirement « Prévisualiser » faute
 //  d'écran d'export ; ce n'est plus tenable maintenant que l'export existe.
@@ -50,9 +71,9 @@
 //  Retenu : un bouton DISCRET pleine largeur « Prévisualiser le montage »
 //  placé SOUS le carrousel, juste au-dessus de la mini-timeline — donc en
 //  zone basse (§30), cible ≥ 44 pt (§39), affiché UNIQUEMENT quand un
-//  préfixe exportable existe (§51) : il n'occupe aucune place tant qu'il n'y
-//  a rien à lire, et il ne fait pas partie du dock (les trois zones §36
-//  restent intactes). L'entrée « Prévisualiser » du menu ellipsis est
+//  segment exportable existe (§51 + écart produit) : il n'occupe aucune place
+//  tant qu'il n'y a rien à lire, et il ne fait pas partie du dock (les trois
+//  zones §36 restent intactes). L'entrée « Prévisualiser » du menu ellipsis est
 //  RETIRÉE : elle serait désormais un doublon d'un bouton toujours visible
 //  quand il est utile, et un menu du haut n'est pas le bon endroit pour une
 //  action du parcours minimal (§89).
@@ -146,9 +167,10 @@ enum AssemblyViewLogic {
     ///
     /// ZONE DROITE — Jalon 10 : « Export » dans TOUS les cas, exactement
     /// comme le tableau §36. Son libellé ne bouge plus (l'écran d'export
-    /// existe désormais) ; seul son ÉTAT varie — actif si le préfixe §51 est
-    /// non vide (`isExportEnabled`), désactivé sinon avec un hint qui dit
-    /// pourquoi (§66 : « première case vide : export désactivé »).
+    /// existe désormais) ; seul son ÉTAT varie — actif si le SEGMENT
+    /// exportable est non vide (`isExportEnabled`, écart produit), désactivé
+    /// sinon avec un hint qui dit pourquoi (§66, lu comme « aucune case
+    /// prête : export désactivé »).
     /// L'aperçu principal §47.2 ne passe plus par cette zone : il a son
     /// propre bouton pleine largeur sous le carrousel (décision documentée en
     /// tête de fichier) — le dock reste donc à TROIS zones (§36).
@@ -169,19 +191,70 @@ enum AssemblyViewLogic {
     }
 
     /// §51 : « export désactivé si le résultat est vide » — Export actif
-    /// seulement si le préfixe continu prêt (`contiguousReadyPrefix`, le
-    /// MÊME algorithme que la preview et l'export) contient au moins une
-    /// case.
+    /// seulement si le SEGMENT continu de cases prêtes
+    /// (`contiguousReadySegment`, le MÊME algorithme que la preview et
+    /// l'export) contient au moins une case.
+    ///
+    /// ÉCART PRODUIT (11 août 2026) : le segment peut commencer N'IMPORTE OÙ
+    /// — une première case vide ne désactive plus l'export dès lors qu'une
+    /// case plus loin est prête.
     static func isExportEnabled(slots: [ProjectSlot]) -> Bool {
-        !contiguousReadyPrefix(slots: slots).isEmpty
+        !contiguousReadySegment(slots: slots).isEmpty
     }
 
-    /// Variante O(1) sur les items déjà matérialisés (triés par index) :
-    /// le préfixe §51 est non vide SI ET SEULEMENT SI la première case est
-    /// prête — strictement équivalent à `contiguousReadyPrefix.isEmpty`
+    /// Variante sur les items déjà matérialisés (triés par index) : le
+    /// segment est non vide SI ET SEULEMENT SI au moins une case est prête —
+    /// strictement équivalent à `contiguousReadySegment(slots:).isEmpty`
     /// (référence unique, testée via la variante snapshots ci-dessus).
+    ///
+    /// O(N) en comparaisons d'énumération, sans allocation : évaluable à
+    /// chaque passe de `body` (§82), au même titre que `assemblyChangeToken`.
+    /// L'ancienne version regardait la SEULE première case (O(1)) — elle
+    /// n'est plus équivalente depuis l'écart produit.
     static func isExportEnabled(items: [AssemblySlotItem]) -> Bool {
-        items.first?.state == .ready
+        exportedSegmentPositions(items: items) != nil
+    }
+
+    /// Positions (dans le tableau `items`, ordonné par index croissant) du
+    /// SEGMENT exporté — écart produit du 11 août 2026 :
+    /// 1. première case dont l'état est `ready` ;
+    /// 2. on avance tant que les suivantes sont `ready` ;
+    /// 3. on s'arrête au premier trou (case vide, ou association
+    ///    `resolving`/`downloading`/`unavailable`/`tooShort`).
+    ///
+    /// `nil` si aucune case n'est prête (export et aperçu principal
+    /// indisponibles, §51). S'il existe PLUSIEURS segments, c'est le PREMIER
+    /// qui est rendu : comportement prévisible, et la mini-timeline §35.3 en
+    /// montre les bornes pour que ce ne soit jamais une surprise.
+    ///
+    /// MÊME règle que `contiguousReadySegment(slots:)` du domaine, appliquée
+    /// à la projection d'affichage : les deux ne peuvent pas diverger, car
+    /// `AssemblySlotState.ready` est la dérivation unique de
+    /// `ClipAssignmentStatus.ready` (`AssemblySlotState.from`).
+    static func exportedSegmentPositions(items: [AssemblySlotItem]) -> ClosedRange<Int>? {
+        guard let first = items.firstIndex(where: { $0.state == .ready }) else { return nil }
+        var last = first
+        var position = first + 1
+        while position < items.count, items[position].state == .ready {
+            last = position
+            position += 1
+        }
+        return first...last
+    }
+
+    /// Énoncé VoiceOver du segment exportable (§39) — « plans 28 à 50
+    /// exportables », « plan 28 exportable » pour une case unique.
+    ///
+    /// Les index reçus sont ceux des cases (0-based, `AssemblySlotItem.index`)
+    /// et sont annoncés en 1-based, comme partout dans l'interface
+    /// (« Plan X sur N », §35.1). Source UNIQUE de cette formulation :
+    /// la mini-timeline §35.3 l'utilise pour sa valeur accessible.
+    static func spokenExportSegment(startIndex: Int, endIndex: Int) -> String {
+        let first = max(0, min(startIndex, endIndex)) + 1
+        let last = max(0, max(startIndex, endIndex)) + 1
+        return first == last
+            ? "plan \(first) exportable"
+            : "plans \(first) à \(last) exportables"
     }
 }
 
@@ -257,15 +330,15 @@ private struct AssemblyChangeToken: Equatable {
 /// 2. **Carrousel §35.2** : trois cases visibles (précédente, active,
 ///    suivante), cartes à largeur tactile stable, scroll = sélection ;
 /// 3. **Aperçu principal §47.2** : bouton discret pleine largeur
-///    « Prévisualiser le montage », visible uniquement quand un préfixe
-///    exportable existe (§51) — zone basse §30, hors des trois zones du
-///    dock §36 (décision Jalon 10 en tête de fichier) ;
+///    « Prévisualiser le montage », visible uniquement quand un segment
+///    exportable existe (§51 + écart produit) — zone basse §30, hors des
+///    trois zones du dock §36 (décision Jalon 10 en tête de fichier) ;
 /// 4. **Mini-timeline §35.3** : vue d'ensemble proportionnelle aux durées
-///    avec courbe musicale simplifiée en fond, toucher/glisser = navigation
-///    rapide ;
+///    avec courbe musicale simplifiée en fond, bornes du segment exporté,
+///    toucher/glisser = navigation rapide ;
 /// 5. **Dock contextuel §36** : `[Projets] [+ Vidéo • durée | Remplacer]
-///    [Export]` — « Export » présente le résumé §56 dès qu'un préfixe
-///    exportable existe (§51, §88.12), désactivé sinon.
+///    [Export]` — « Export » présente le résumé §56 dès qu'un segment
+///    exportable existe (§51 + écart produit, §88.12), désactivé sinon.
 ///
 /// Depuis le Jalon 12 (§39/§87), seuls **1 et 2** DÉFILENT verticalement ;
 /// **3, 4 et 5** restent ANCRÉS en bas et donc toujours sous le pouce (§30),
@@ -717,11 +790,11 @@ struct AssemblyView: View {
             // APERÇU PRINCIPAL §47.2 — décision Jalon 10 (§88.11/§89,
             // documentée en tête de fichier) : bouton discret pleine largeur,
             // en ZONE BASSE (§30) et hors des trois zones du dock §36,
-            // affiché UNIQUEMENT quand un préfixe exportable existe (§51) :
-            // sans lui, il n'y aurait rien à lire et la place est rendue au
-            // contenu.
-            if AssemblyViewLogic.isExportEnabled(items: items) {
-                prefixPreviewButton
+            // affiché UNIQUEMENT quand un SEGMENT exportable existe (§51 +
+            // écart produit) : sans lui, il n'y aurait rien à lire et la
+            // place est rendue au contenu.
+            if let segment = AssemblyViewLogic.exportedSegmentPositions(items: items) {
+                segmentPreviewButton(items: items, segment: segment)
             }
 
             // Mini-timeline §35.3 : toucher/glisser déplace la sélection.
@@ -940,7 +1013,7 @@ struct AssemblyView: View {
         max(44, scaledMiniTimelineHeight)
     }
 
-    // MARK: - Aperçu principal du préfixe (§47.2, zone basse §30)
+    // MARK: - Aperçu principal du segment (§47.2, zone basse §30)
 
     /// Bouton DISCRET pleine largeur « Prévisualiser le montage » — accès de
     /// référence à l'aperçu principal §47.2 depuis le Jalon 10.
@@ -949,9 +1022,17 @@ struct AssemblyView: View {
     /// ne concurrence pas le CTA de remplissage du dock (« + Vidéo » /
     /// « Remplacer »), qui reste l'action dominante tant que le montage se
     /// construit. Cible ≥ 44 pt (§39), libellé complet pour VoiceOver.
-    private var prefixPreviewButton: some View {
+    ///
+    /// Le LIBELLÉ ne change pas (« Prévisualiser le montage ») ; c'est le
+    /// hint VoiceOver qui NOMME les plans lus (« Lit les plans 28 à 50. »)
+    /// depuis l'écart produit : le montage ne commence plus forcément au
+    /// premier plan, et l'utilisateur doit le savoir avant d'appuyer (§39).
+    private func segmentPreviewButton(
+        items: [AssemblySlotItem],
+        segment: ClosedRange<Int>
+    ) -> some View {
         Button {
-            requestPrefixPreview()
+            requestSegmentPreview(items: items, segment: segment)
         } label: {
             Label("Prévisualiser le montage", systemImage: "play.rectangle")
                 .font(.subheadline.weight(.medium))
@@ -962,7 +1043,22 @@ struct AssemblyView: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 20)
         .accessibilityLabel("Prévisualiser le montage")
-        .accessibilityHint("Lit le montage jusqu'au premier plan non prêt.")
+        .accessibilityHint(
+            "Lit le montage : \(segmentRangeLabel(items: items, segment: segment).lowercased())."
+        )
+    }
+
+    /// « Plans 28 à 50 » / « Plan 28 » (1-based) — source UNIQUE
+    /// `ExportSummaryLogic.planRangeLabel`, partagée avec le résumé §56 :
+    /// l'aperçu et l'export nomment donc exactement les mêmes plans.
+    private func segmentRangeLabel(
+        items: [AssemblySlotItem],
+        segment: ClosedRange<Int>
+    ) -> String {
+        ExportSummaryLogic.planRangeLabel(
+            startIndex: items[segment.lowerBound].index,
+            endIndex: items[segment.upperBound].index
+        )
     }
 
     // MARK: - Dock contextuel (§36)
@@ -973,14 +1069,16 @@ struct AssemblyView: View {
     /// `AssemblyViewLogic.dockLabels` (testée).
     ///
     /// Zone droite (Jalon 10) : « Export » ouvre le résumé §56
-    /// (`ExportSummaryView`) dès que le préfixe exportable §51 est non vide ;
+    /// (`ExportSummaryView`) dès que le SEGMENT exportable est non vide ;
     /// sinon le bouton est DÉSACTIVÉ avec un hint qui dit pourquoi (§51 :
-    /// « export désactivé si le résultat est vide », §66 : « première case
-    /// vide : export désactivé ») — état RÉEL calculé par
-    /// `contiguousReadyPrefix`, pas un stub.
+    /// « export désactivé si le résultat est vide » ; §66 lu depuis l'écart
+    /// produit : aucune case prête → export désactivé) — état RÉEL calculé
+    /// par la MÊME règle que l'export (`exportedSegmentPositions`), pas un
+    /// stub.
     private func contextualDock(activeItem: AssemblySlotItem, items: [AssemblySlotItem]) -> some View {
-        // O(1) sur les items déjà matérialisés (§82 : rien de recalculé
-        // pendant un glisser sur la mini-timeline) — équivalent §51 strict.
+        // Balayage O(N) sans allocation sur les items déjà matérialisés
+        // (§82 : rien de coûteux pendant un glisser sur la mini-timeline) —
+        // équivalent strict de `contiguousReadySegment(slots:)`.
         let isExportEnabled = AssemblyViewLogic.isExportEnabled(items: items)
         let labels = AssemblyViewLogic.dockLabels(
             activeState: activeItem.state,
@@ -1016,7 +1114,8 @@ struct AssemblyView: View {
             .accessibilityHint("Ouvre la photothèque pour choisir une vidéo.")
 
             // Droite : « Export » (§36) — présente le résumé §56 dès qu'un
-            // préfixe exportable existe (§51), désactivé sinon.
+            // segment exportable existe (§51 + écart produit), désactivé
+            // sinon.
             Button {
                 requestExport()
             } label: {
@@ -1037,7 +1136,7 @@ struct AssemblyView: View {
             .accessibilityHint(
                 isExportEnabled
                     ? "Affiche le résumé de l'export du montage déjà prêt."
-                    : "Remplissez la première case pour exporter."
+                    : "Remplissez au moins une case pour exporter."
             )
         }
         .padding(.horizontal, 12)
@@ -1162,18 +1261,24 @@ struct AssemblyView: View {
         }
     }
 
-    /// §47.2 « Aperçu principal » : commence au début et s'arrête avant la
-    /// première case non prête (`contiguousPrefix`). Déclencheur UNIQUE
-    /// depuis le Jalon 10 — le bouton « Prévisualiser le montage » sous le
-    /// carrousel (zone basse §30/§88.11), affiché seulement quand le préfixe
-    /// §51 est non vide : ce chemin n'est donc atteint qu'avec au moins une
-    /// case prête.
-    private func requestPrefixPreview() {
+    /// §47.2 « Aperçu principal » : lit le SEGMENT continu de cases prêtes
+    /// (portée `.contiguousPrefix` — nom d'énumération du domaine, dont la
+    /// RÈGLE est celle de l'écart produit : premier segment rempli, où qu'il
+    /// commence). Déclencheur UNIQUE depuis le Jalon 10 — le bouton
+    /// « Prévisualiser le montage » sous le carrousel (zone basse §30/§88.11),
+    /// affiché seulement quand un segment existe : ce chemin n'est donc
+    /// atteint qu'avec au moins une case prête.
+    ///
+    /// Le TITRE de la feuille nomme les plans lus (« Montage — plans 28 à
+    /// 50 ») : l'aperçu ne commence plus forcément au premier plan du projet,
+    /// et l'utilisateur doit lire quoi, sans avoir à le deviner (§87).
+    private func requestSegmentPreview(items: [AssemblySlotItem], segment: ClosedRange<Int>) {
         playerController.stopSegment()
+        let range = segmentRangeLabel(items: items, segment: segment)
         activeSheet = .preview(PreviewSheetContext(
-            id: "prefix",
+            id: "segment",
             scope: .contiguousPrefix,
-            title: "Montage jusqu'au premier plan non prêt"
+            title: "Montage — \(range.lowercased())"
         ))
     }
 
@@ -1353,10 +1458,10 @@ struct AssemblyView: View {
     }
 
     /// Export (Jalon 10, §56) : présente le résumé AVANT export en feuille.
-    /// Le bouton du dock n'est actif que si le préfixe §51 est non vide, ce
-    /// chemin n'est donc atteint qu'avec au moins une case prête ; le résumé
-    /// revérifie de son côté (source unique : `contiguousReadyPrefix` sur
-    /// l'instantané persisté).
+    /// Le bouton du dock n'est actif que si le SEGMENT exportable est non
+    /// vide, ce chemin n'est donc atteint qu'avec au moins une case prête ;
+    /// le résumé revérifie de son côté (source unique :
+    /// `contiguousReadySegment(slots:)` sur l'instantané persisté).
     ///
     /// Rouvrir cette feuille PENDANT un encodage ne lance jamais un second
     /// export (§58) : `ExportSummaryView` détecte la progression en cours et

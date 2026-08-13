@@ -8,6 +8,14 @@
 //
 //  Protocole §7 `PreviewBuilding`.
 //
+//  CHANGEMENT PRODUIT (voir `ExportModels.swift`) : l'aperçu principal §47.2
+//  n'est plus celui du PRÉFIXE mais celui du SEGMENT continu de cases prêtes,
+//  où qu'il commence. La musique insérée est la PORTION
+//  `[segment.musicStart, segment.musicEnd]` du fichier original, placée à
+//  l'instant 0 ; la vidéo de chaque case est placée à
+//  `slot.start - segment.musicStart`. Les cases gardent leurs temps musicaux
+//  ABSOLUS — aucune n'est déplacée, aucun écran noir n'est ajouté.
+//
 
 import AVFoundation
 import CoreGraphics
@@ -25,8 +33,9 @@ import Foundation
 enum PreviewError: Error, Equatable, LocalizedError {
 
     /// Portée vide : aucune case à lire — case introuvable ou non remplie
-    /// (§47.1), ou préfixe exportable vide car la première case est vide
-    /// (§47.2, §51 : « export désactivé si le résultat est vide »).
+    /// (§47.1), ou SEGMENT exportable vide car AUCUNE case n'est prête
+    /// (§47.2 ; changement produit : une première case vide ne suffit plus à
+    /// vider la portée, le segment peut commencer n'importe où).
     case emptyScope
 
     /// Musique du projet introuvable ou illisible (§11 `audio/original.<ext>`,
@@ -58,15 +67,17 @@ enum PreviewError: Error, Equatable, LocalizedError {
     case icloudUnavailable(String)
 
     /// Portée `.complete` demandée alors que le montage n'est pas terminé :
-    /// au moins une case reste vide, en téléchargement ou indisponible
-    /// (§47.2, §51). L'appelant se rabat sur `.contiguousPrefix`.
+    /// au moins une case reste vide, en téléchargement ou indisponible —
+    /// autrement dit le SEGMENT prêt ne couvre pas TOUTES les cases (§47.2).
+    /// L'appelant se rabat sur `.contiguousPrefix`. Nom du cas conservé pour
+    /// ne pas casser ses appelants.
     case incompletePrefix
 
     var errorDescription: String? {
         switch self {
         case .emptyScope:
             return "Il n'y a rien à prévisualiser pour l'instant : "
-                + "remplissez au moins la première case du montage."
+                + "remplissez au moins une case du montage."
         case .missingAudio:
             return "La musique du projet est introuvable ou illisible. "
                 + "Réimportez la musique pour prévisualiser le montage."
@@ -163,12 +174,14 @@ extension PreviewError {
 ///
 /// Compositions (§48, §54) :
 /// - `AVMutableComposition` avec UNE piste vidéo et UNE piste audio ;
-/// - piste audio = musique ORIGINALE du projet (§11, §16.1), insérée à
-///   partir de zéro sur toute la portée ;
+/// - piste audio = musique ORIGINALE du projet (§11, §16.1), dont la PORTION
+///   `[musicStart, musicEnd]` de la portée est insérée à l'instant 0 ;
 /// - **aucune piste audio de rush** (§48, §54.5 : « ignorer les pistes audio
 ///   source ») ;
 /// - chaque case insère `[0, slotDuration]` de la piste vidéo de son rush à
-///   son temps ABSOLU (§53, §54.4) — aucun clip n'est déplacé (§51) ;
+///   `slot.start - musicStart` (§53, §54.4) — l'écart entre deux cases reste
+///   celui de la musique, aucun clip n'est déplacé les uns par rapport aux
+///   autres ;
 /// - une instruction de composition par case, avec orientation + échelle +
 ///   translation (§50, §54.6/§54.7).
 @MainActor
@@ -210,9 +223,9 @@ struct PreviewBuilder: Sendable {
         case .slot(let slotID):
             return try await makeSlotComposition(project: project, slotID: slotID)
         case .contiguousPrefix:
-            return try await makePrefixComposition(project: project, requiresCompleteMontage: false)
+            return try await makeSegmentComposition(project: project, requiresCompleteMontage: false)
         case .complete:
-            return try await makePrefixComposition(project: project, requiresCompleteMontage: true)
+            return try await makeSegmentComposition(project: project, requiresCompleteMontage: true)
         }
     }
 
@@ -254,47 +267,64 @@ struct PreviewBuilder: Sendable {
         )
     }
 
-    // MARK: - §47.2 Aperçu principal (préfixe contigu)
+    // MARK: - §47.2 Aperçu principal (segment continu)
 
-    /// Aperçu principal (§47.2) : « Commence au début et s'arrête avant la
-    /// première case non prête. Une case `downloading`, `unavailable` ou
-    /// vide interrompt le préfixe. »
+    /// Aperçu principal (§47.2), **version changement produit** : commence à
+    /// la PREMIÈRE case prête — où qu'elle soit dans le morceau — et s'arrête
+    /// avant la case non prête suivante. Une case `downloading`,
+    /// `unavailable` ou vide interrompt le segment ; une case non prête
+    /// AVANT le segment ne l'empêche plus (c'est exactement ce qui remplace
+    /// le préfixe §51).
     ///
-    /// Le préfixe vient de `contiguousReadyPrefix(slots:)` (§51, verbatim) —
-    /// jamais recalculé ici. Chaque case garde son temps ABSOLU : aucun clip
-    /// n'est avancé pour combler un trou (§51, §3.12).
+    /// Le segment vient de `contiguousReadySegment(slots:)` — jamais
+    /// recalculé ici. Chaque case garde son temps musical ABSOLU : aucune
+    /// n'est avancée pour combler un trou (§3.12). Seule l'ORIGINE de la
+    /// timeline lue change :
+    /// - musique : la PORTION `[musicStart, musicEnd]` du fichier original,
+    ///   insérée à l'instant 0 de la composition ;
+    /// - vidéo de la case `i` : insérée à `slot.start - musicStart`
+    ///   (`ReadySegment.compositionStart(of:)`), soit `.zero` pour la
+    ///   première case du segment.
     ///
-    /// Portée `.complete` (`requiresCompleteMontage`) : identique au préfixe
-    /// SI toutes les cases du projet sont prêtes ; sinon `incompletePrefix`
-    /// — un montage complet ne peut pas être « presque complet », l'appelant
-    /// retombe explicitement sur `.contiguousPrefix` (§47.2, §51).
-    private func makePrefixComposition(
+    /// On entend donc EXACTEMENT le passage musical du segment, et chaque
+    /// coupe tombe au même endroit de la musique que dans le montage final
+    /// (§53 : la musique est l'horloge maîtresse).
+    ///
+    /// Portée `.complete` (`requiresCompleteMontage`) : identique au segment
+    /// SI celui-ci couvre TOUTES les cases du projet ; sinon
+    /// `incompletePrefix` — un montage complet ne peut pas être « presque
+    /// complet », l'appelant retombe explicitement sur `.contiguousPrefix`
+    /// (§47.2).
+    private func makeSegmentComposition(
         project: ProjectSnapshot,
         requiresCompleteMontage: Bool
     ) async throws -> CachedComposition {
-        let prefix = project.contiguousReadyPrefix // §51 verbatim
+        let segment = project.contiguousReadySegment // changement produit
         // Complétude vérifiée AVANT la vacuité : demander le montage complet
         // d'un projet dont aucune case n'est prête est un montage
         // INCOMPLET (message « attendez la fin des téléchargements »), pas
         // une portée vide.
-        if requiresCompleteMontage, prefix.count != project.slots.count {
+        if requiresCompleteMontage, segment.slotCount != project.slots.count {
             throw PreviewError.incompletePrefix
         }
-        guard let lastSlot = prefix.last else {
-            throw PreviewError.emptyScope // §51 : préfixe vide
+        guard !segment.isEmpty else {
+            throw PreviewError.emptyScope // aucune case prête
         }
 
-        // Temps ABSOLUS (§53 : « placer chaque vidéo sur [slot.start,
-        // slot.end] ») — aucun clip déplacé (§51).
-        let placements = prefix.map { Placement(slot: $0, compositionStart: $0.start) }
+        // Décalage du segment : temps musicaux ABSOLUS conservés dans les
+        // cases, ramenés à l'origine de la composition par une SOUSTRACTION
+        // en ticks entiers (§9) — jamais par une réécriture des cases.
+        let placements = segment.slots.map {
+            Placement(slot: $0, compositionStart: segment.compositionStart(of: $0))
+        }
 
         return try await assembleComposition(
             project: project,
             placements: placements,
-            // §53 : « insérer l'audio sur [0, prefixEnd] » — la musique est
-            // coupée à la fin ABSOLUE de la dernière case du préfixe (§51).
-            musicSourceStart: .zero,
-            musicDuration: lastSlot.end
+            // La musique lue est la PORTION du morceau couverte par le
+            // segment, posée à l'instant 0 de la composition.
+            musicSourceStart: segment.musicStart,
+            musicDuration: segment.duration
         )
     }
 
@@ -302,7 +332,8 @@ struct PreviewBuilder: Sendable {
 
     /// Position d'une case dans la composition : la case elle-même et son
     /// temps de départ DANS la composition (`.zero` pour un aperçu local
-    /// §47.1, `slot.start` absolu pour le préfixe §47.2/§53).
+    /// §47.1, `slot.start - segment.musicStart` pour l'aperçu principal
+    /// §47.2 — le temps musical absolu de la case reste intact, §53).
     private struct Placement {
         let slot: ProjectSlot
         let compositionStart: MediaTime
@@ -386,7 +417,8 @@ struct PreviewBuilder: Sendable {
     ///    frontière d'acteur) ;
     /// 2. vérifier la durée ;
     /// 3. sélectionner la piste vidéo principale ;
-    /// 4. insérer `[0, slotDuration]` à `slot.start` ;
+    /// 4. insérer `[0, slotDuration]` à `placement.compositionStart` (temps
+    ///    absolu de la case DÉCALÉ du début du segment, §53) ;
     /// 5. ignorer les pistes audio source (§48 : aucune piste audio de rush).
     ///
     /// Les échecs de photothèque sont DISCRIMINÉS (§40, §44, §64) : accès
@@ -400,7 +432,7 @@ struct PreviewBuilder: Sendable {
         into videoTrack: AVMutableCompositionTrack
     ) async throws -> Segment {
         guard let assignment = placement.slot.assignment else {
-            throw PreviewError.emptyScope // filtré en amont (§51)
+            throw PreviewError.emptyScope // filtré en amont (segment §51-bis)
         }
         let identifier = assignment.assetLocalIdentifier
 
@@ -456,15 +488,18 @@ struct PreviewBuilder: Sendable {
         }
     }
 
-    /// Insère la musique du projet (§48 : « insérer la musique de zéro à la
-    /// fin de la portée » ; §53 : « insérer l'audio sur [0, prefixEnd] »).
+    /// Insère la musique du projet (§48 : « insérer la musique … sur toute la
+    /// portée » ; §53 : la musique est l'horloge maîtresse).
     ///
     /// La source est l'ORIGINAL inchangé (§11 `audio/original.<ext>`, §16.1 :
     /// « Conserver le fichier original inchangé pour la lecture et
     /// l'export ») — jamais le flux d'analyse normalisé (§16.2).
     ///
-    /// `sourceStart` vaut `.zero` pour le préfixe et `slot.start` pour un
-    /// aperçu local (§47.1 : « le passage musical correspondant »).
+    /// `sourceStart` vaut `segment.musicStart` pour l'aperçu principal
+    /// (changement produit : la portion lue commence à la première case
+    /// prête, plus forcément à zéro) et `slot.start` pour un aperçu local
+    /// (§47.1 : « le passage musical correspondant »). Dans les deux cas la
+    /// portion est posée à l'instant 0 de la composition.
     ///
     /// Rend la FIN de la piste musicale dans la composition (la musique est
     /// toujours insérée à `.zero`, la fin vaut donc la durée réellement
@@ -570,15 +605,17 @@ struct PreviewBuilder: Sendable {
         // la composition, sans trou ni recouvrement : une plage non décrite
         // produit un rendu indéfini. On parcourt donc la timeline et on
         // comble CHAQUE intervalle découvert par une instruction de fond
-        // opaque, jamais par un clip avancé (§51 : « les clips ultérieurs ne
-        // sont jamais déplacés » — combler un trou avec la vidéo suivante
-        // désynchroniserait le montage de la musique, §53).
+        // opaque, jamais par un clip avancé (les clips ne sont jamais
+        // déplacés les uns par rapport aux autres — combler un trou avec la
+        // vidéo suivante désynchroniserait le montage de la musique, §53).
         //
-        // Ceinture de sécurité : les cases du préfixe sont jointives par
-        // construction (§28.1 — la partition pave la musique sans trou) et
-        // l'aperçu local commence à zéro. Aucun trou n'est donc attendu ;
-        // cette boucle garantit que s'il en apparaissait un (partition d'une
-        // version antérieure §61, plage tronquée), le rendu resterait défini.
+        // Ceinture de sécurité : les cases du SEGMENT sont jointives par
+        // construction (§28.1 — la partition pave la musique sans trou) et le
+        // décalage `slot.start - musicStart` fait tomber la première case
+        // exactement à zéro (aperçu local : zéro également). Aucun trou n'est
+        // donc attendu ; cette boucle garantit que s'il en apparaissait un
+        // (partition d'une version antérieure §61, plage tronquée), le rendu
+        // resterait défini.
         var coveredUntil = CMTime.zero
         for segment in segments {
             if segment.timeRange.start > coveredUntil {

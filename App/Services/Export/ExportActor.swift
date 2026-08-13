@@ -18,7 +18,7 @@ import Foundation
 /// Ce qu'il est advenu d'un appel à `ExportActor.startExport` (§58).
 ///
 /// Sans ce retour, un démarrage refusé (réentrance, export déjà en cours,
-/// préfixe vide, instantané illisible) était SILENCIEUX : l'appelant croyait
+/// aucun segment prêt, instantané illisible) était SILENCIEUX : l'appelant croyait
 /// avoir lancé un export et lisait ensuite l'issue du run PRÉCÉDENT.
 enum ExportStartResult: Sendable, Equatable {
 
@@ -93,8 +93,9 @@ actor ExportActor {
     /// d'observer `currentProgress(projectID:)` au lieu de lire l'issue d'un
     /// run qui n'est pas le sien.
     ///
-    /// Préfixe vide → aucun export lancé (§66 : « première case vide : export
-    /// désactivé ») ; `.refused(.emptyPrefix)` est rendu ET exposé par
+    /// Aucun segment prêt → aucun export lancé (écart produit : une première
+    /// case vide ne bloque plus l'export, contrairement à §66) ;
+    /// `.refused(.emptyPrefix)` est rendu ET exposé par
     /// `lastError` pour que le dock puisse l'expliquer plutôt que rester
     /// inerte.
     ///
@@ -133,18 +134,24 @@ actor ExportActor {
             return .refused(failure)
         }
 
-        // §51/§66 : rien à exporter → aucun encodage, aucun changement de
-        // statut, projet strictement intact.
-        let prefix = snapshot.contiguousReadyPrefix
-        guard !prefix.isEmpty else {
-            logger.info("Export demandé sans préfixe exportable (§66) — refusé.")
+        // Rien à exporter → aucun encodage, aucun changement de statut,
+        // projet strictement intact.
+        //
+        // ÉCART PRODUIT (demande utilisateur postérieure à la spec) : le
+        // montage exporté est le premier SEGMENT continu de cases prêtes, où
+        // qu'il commence — une première case vide ne bloque donc plus
+        // l'export, contrairement à §51/§66.
+        let segment = snapshot.contiguousReadySegment
+        guard !segment.isEmpty else {
+            logger.info("Export demandé sans segment exportable — refusé.")
             errorByProject[projectID] = .emptyPrefix
             return .refused(.emptyPrefix)
         }
-        // Portée informative : `.complete` quand le préfixe couvre TOUT le
-        // montage, `.contiguousPrefix` sinon (§66 : « trou au milieu : export
-        // limité au préfixe » — les deux portées encodent le même préfixe).
-        let scope: ExportScope = prefix.count == snapshot.slots.count ? .complete : .contiguousPrefix
+        // Portée informative : `.complete` quand le segment couvre TOUT le
+        // montage, `.contiguousPrefix` sinon (nom de cas conservé — il
+        // désigne désormais le segment ; les deux portées encodent le même
+        // segment).
+        let scope: ExportScope = segment.slotCount == snapshot.slots.count ? .complete : .contiguousPrefix
 
         // §10 : statut `exporting` pendant l'encodage.
         do {
