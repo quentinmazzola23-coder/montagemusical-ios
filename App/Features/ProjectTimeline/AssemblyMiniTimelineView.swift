@@ -19,6 +19,14 @@
 //  (`drawExportedZones`) — même forme, répétée : l'utilisateur voit d'un coup
 //  d'œil les morceaux qui partiront et les trous qui seront supprimés. La
 //  valeur accessible §39 l'annonce (« 19 plans exportables en 2 zones »).
+//
+//  CORRECTIFS (relecture adversariale du 13 août 2026) :
+//  - les crochets ne DÉRIVENT plus vers la droite sur un projet dense : la
+//    largeur minimale et la séparation anti-chevauchement s'accumulaient de
+//    zone en zone (détail et nouvelle règle : `drawExportedZones`) ;
+//  - le nombre de plans annoncé par VoiceOver vient du compte FAISANT AUTORITÉ
+//    (`AssemblyViewLogic.exportedSlotCount`), plus de la largeur des plages
+//    d'index — l'oreille et le résumé §56 comptent la même chose.
 //  Jalon 9 : l'écart §35.3 est RÉSORBÉ — la courbe musicale simplifiée
 //  (200 bins de `WaveformExtractor`, §16.2/§68) est dessinée EN FOND, très
 //  discrète, sous les segments.
@@ -145,8 +153,15 @@ struct AssemblyMiniTimelineView: View {
         }
         // Énoncé §39 sur les INDEX de case (1-based à l'annonce) : il décrit
         // le montage exporté même quand les fractions manquent.
+        //
+        // Le NOMBRE de plans vient du compte faisant autorité de l'écran
+        // (`AssemblyViewLogic.exportedSlotCount`, le pendant de
+        // `ReadyTimeline.slotCount`) et non de la largeur des plages d'index :
+        // VoiceOver annonce exactement le nombre de plans que le résumé §56
+        // affichera (correctif de la relecture adversariale du 13 août 2026).
         self.exportedZonesSpokenLabel = AssemblyViewLogic.spokenExportedZones(
-            zones: positions.map { slots[$0.lowerBound].index...slots[$0.upperBound].index }
+            zones: positions.map { slots[$0.lowerBound].index...slots[$0.upperBound].index },
+            slotCount: AssemblyViewLogic.exportedSlotCount(items: slots)
         )
     }
 
@@ -298,9 +313,29 @@ struct AssemblyMiniTimelineView: View {
     ///
     /// Une zone très courte (une case fine sur un projet de 300 plans) garde
     /// une largeur minimale : son crochet reste visible au lieu de disparaître
-    /// sous l'arrondi. Deux crochets voisins gardent une séparation d'un point
-    /// (`gapWidth`) — sans elle, deux zones séparées par une seule case fine
-    /// se liraient comme une seule.
+    /// sous l'arrondi. Cette largeur minimale est CENTRÉE sur la vraie plage
+    /// de la zone, jamais ajoutée à droite.
+    ///
+    /// CORRECTIF (relecture adversariale du 13 août 2026) — LES CROCHETS NE
+    /// DÉRIVENT PLUS. La version précédente reportait deux corrections de
+    /// proche en proche : `x1 = max(rawEnd, x0 + minimumWidth)` poussait la fin
+    /// vers la droite, puis `x0 = max(rawStart, previousEnd + gapWidth)`
+    /// poussait le DÉBUT de la zone suivante au-delà de cette fin élargie. Sur
+    /// un projet dense (300 cases, zones d'une seule case fine), les décalages
+    /// s'ACCUMULAIENT : au bout de quelques dizaines de zones, un crochet
+    /// pouvait être dessiné entièrement à côté de la zone qu'il désigne —
+    /// exactement le contraire de ce que §35.3 demande à ce repère.
+    /// Chaque crochet est désormais posé sur SA plage :
+    /// - la largeur minimale est obtenue en s'écartant symétriquement du
+    ///   CENTRE de la plage réelle, puis en glissant à l'intérieur de la vue si
+    ///   l'on déborde d'un bord — aucun report sur la zone suivante ;
+    /// - la séparation entre deux crochets voisins est obtenue en RÉTRÉCISSANT
+    ///   le crochet courant par la gauche (jamais en le déplaçant), et
+    ///   uniquement s'il reste assez de place ; sinon la séparation est
+    ///   abandonnée pour cette paire — mieux vaut deux crochets qui se touchent
+    ///   qu'un crochet au mauvais endroit.
+    /// L'erreur de position est ainsi bornée par la demi-largeur minimale
+    /// (1,5 pt), quel que soit le nombre de zones.
     ///
     /// UN seul chemin pour toutes les zones : le nombre de commandes de dessin
     /// reste constant quel que soit le nombre de zones (§67, §82).
@@ -313,26 +348,55 @@ struct AssemblyMiniTimelineView: View {
         let capWidth: CGFloat = 1.5
         let railHeight: CGFloat = 2
         let gapWidth: CGFloat = 1
-        let minimumWidth = capWidth * 2
+        let minimumWidth = min(capWidth * 2, width)
 
         var brackets = Path()
         var previousEnd: CGFloat = -.greatestFiniteMagnitude
         for fractions in exportedZoneFractions {
-            let rawStart = CGFloat(fractions.lowerBound) * width
-            let rawEnd = CGFloat(fractions.upperBound) * width
-            // Séparation garantie avec la zone précédente, puis largeur
-            // minimale : deux zones voisines ne fusionnent jamais visuellement.
-            let clampedStart = max(rawStart, previousEnd + gapWidth)
-            let x0 = min(max(clampedStart, 0), max(0, width - minimumWidth))
-            let x1 = min(max(rawEnd, x0 + minimumWidth), width)
+            let rawStart = min(max(CGFloat(fractions.lowerBound) * width, 0), width)
+            let rawEnd = min(max(CGFloat(fractions.upperBound) * width, rawStart), width)
+
+            // 1. Largeur minimale CENTRÉE sur la plage réelle (aucun report).
+            var x0 = rawStart
+            var x1 = rawEnd
+            if x1 - x0 < minimumWidth {
+                let center = (x0 + x1) / 2
+                x0 = center - minimumWidth / 2
+                x1 = center + minimumWidth / 2
+                // Débordement d'un bord de la vue : le crochet GLISSE à
+                // l'intérieur sans changer de largeur (le décalage vaut au plus
+                // une demi-largeur minimale).
+                if x0 < 0 {
+                    x1 -= x0
+                    x0 = 0
+                } else if x1 > width {
+                    x0 -= x1 - width
+                    x1 = width
+                }
+            }
+
+            // 2. Séparation avec le crochet précédent : on RÉTRÉCIT par la
+            //    gauche tant que la largeur minimale est préservée. Jamais de
+            //    déplacement — c'est lui qui faisait dériver le dessin.
+            if x0 < previousEnd + gapWidth {
+                let separated = previousEnd + gapWidth
+                if x1 - separated >= minimumWidth {
+                    x0 = separated
+                }
+            }
+
             guard x1 > x0 else { continue }
             previousEnd = x1
 
             // Liséré : toute l'étendue de la zone.
             brackets.addRect(CGRect(x: x0, y: 0, width: x1 - x0, height: railHeight))
             // Montants : début et fin, seuls repères qui « ferment » la zone.
-            brackets.addRect(CGRect(x: x0, y: 0, width: capWidth, height: markerHeight))
-            brackets.addRect(CGRect(x: x1 - capWidth, y: 0, width: capWidth, height: markerHeight))
+            // Sur un crochet à la largeur minimale, les deux montants se
+            // touchent — c'est le dessin le plus dense possible, jamais un
+            // débordement.
+            let cap = min(capWidth, (x1 - x0) / 2)
+            brackets.addRect(CGRect(x: x0, y: 0, width: cap, height: markerHeight))
+            brackets.addRect(CGRect(x: x1 - cap, y: 0, width: cap, height: markerHeight))
         }
         context.fill(brackets, with: .color(.primary))
     }

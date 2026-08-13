@@ -393,8 +393,9 @@ actor ProjectStore {
         // réussi avant confirmation effective » — et jamais un export en cours
         // qui n'existe plus). Le statut revient à sa valeur RESTAURÉE, avec la
         // règle EXACTE qu'applique `ExportActor` après un export
-        // (`restoredStatusRaw` : `complete` si le préfixe §51 couvre toutes
-        // les cases, `assembling` sinon). Le montage n'est pas touché : §66
+        // (`restoredStatusRaw` : `complete` si la TIMELINE exportable — toutes
+        // les zones remplies concaténées — couvre toutes les cases,
+        // `assembling` sinon). Le montage n'est pas touché : §66
         // « interruption : projet intact ». Les fichiers temporaires —
         // encodage partiel, sources matérialisées §52.3 — sont supprimés par
         // le vidage des `temp/` ci-dessous.
@@ -1078,7 +1079,8 @@ extension ProjectStore {
     ///
     /// Seule forme du projet qui traverse la frontière de l'acteur (§8) :
     /// aucun `PersistentModel` n'en sort. C'est l'entrée de la timeline
-    /// exportable (`readyTimeline`, §51 amendé par l'écart produit), de la
+    /// exportable (`readyTimeline` — toutes les zones remplies concaténées,
+    /// écart produit qui remplace le préfixe §51), de la
     /// prévisualisation (§47) et de l'export (§7 `ProjectExporting`).
     ///
     /// Cases retenues : celles du rythme CHOISI (après §34, `selectPace`
@@ -1093,15 +1095,15 @@ extension ProjectStore {
     ///
     /// Statut d'association illisible (base corrompue, jamais attendu) →
     /// `unavailable` : le repli ne peut JAMAIS valoir `ready`, donc une
-    /// donnée douteuse n'entre jamais dans la timeline exportable (§51).
+    /// donnée douteuse n'entre jamais dans une zone exportée.
     func projectSnapshot(projectID: UUID) throws -> ProjectSnapshot {
         let project = try requireProject(projectID)
 
         var slots: [ProjectSlot] = []
         // Aucun rythme choisi (§34 pas encore franchi) → aucune case dans
-        // l'instantané : aucun montage en cours, donc aucun préfixe
-        // exportable (§51). La géométrie, elle, reste rapportée : le verrou
-        // §49 survit à un retour au choix du rythme.
+        // l'instantané : aucun montage en cours, donc aucune zone remplie,
+        // donc aucune timeline exportable. La géométrie, elle, reste
+        // rapportée : le verrou §49 survit à un retour au choix du rythme.
         if let selectedModeRaw = project.selectedPaceRaw {
             var assignmentsBySlotID: [UUID: ClipAssignmentRecord] = [:]
             for assignment in try fetchAssignments(projectID: projectID) {

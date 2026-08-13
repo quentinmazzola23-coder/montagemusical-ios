@@ -46,6 +46,22 @@ enum ExportError: Error, Equatable, LocalizedError {
     /// zones remplies). Nom du cas CONSERVÉ pour ne pas casser ses appelants.
     case emptyPrefix
 
+    /// §66 : le TOUT PREMIER plan du montage a perdu son rush PENDANT
+    /// l'assemblage — reparti dans iCloud, supprimé, ou photothèque révoquée.
+    ///
+    /// Cas DISTINCT d'`emptyPrefix`, et c'est tout l'intérêt : le montage
+    /// existe, il est même rempli — c'est la MATIÈRE de son premier plan qui
+    /// manque. Répondre « remplissez au moins une case » serait faux et
+    /// enverrait l'utilisateur remplir un montage déjà rempli. La troncature
+    /// §66 (« export limité avant lui ») ne laisse ici rien à exporter : il n'y
+    /// a aucun plan AVANT le premier.
+    ///
+    /// La chaîne porte l'identifiant local du rush (§51 : elle dit QUELLE case
+    /// est en cause) et `isStillDownloading` sépare les deux actions
+    /// utilisateur (§44/§64) : attendre la fin d'un téléchargement iCloud, ou
+    /// remplacer le rush / réautoriser l'accès.
+    case firstAssetUnavailable(String, isStillDownloading: Bool)
+
     /// §57/§66 : « espace insuffisant : bloquer avant encodage ». Aucun
     /// encodage n'a été lancé, aucun fichier temporaire n'a été écrit.
     case insufficientStorage(requiredBytes: Int64, availableBytes: Int64)
@@ -90,6 +106,16 @@ enum ExportError: Error, Equatable, LocalizedError {
         case .emptyPrefix:
             return "Il n'y a rien à exporter pour l'instant : "
                 + "remplissez au moins une case du montage."
+        case .firstAssetUnavailable(let identifier, let isStillDownloading):
+            // La cause RÉELLE, jamais « remplissez une case » : le montage est
+            // rempli, c'est le premier plan qui n'a plus de vidéo lisible.
+            return isStillDownloading
+                ? "La vidéo du premier plan du montage est encore dans iCloud "
+                    + "(\(identifier)). Attendez la fin de son téléchargement, "
+                    + "puis relancez l'export."
+                : "La vidéo du premier plan du montage n'est plus disponible "
+                    + "(\(identifier)). Remplacez-la — ou réautorisez l'accès à "
+                    + "vos photos dans Réglages —, puis relancez l'export."
         case .insufficientStorage(let requiredBytes, let availableBytes):
             return "Espace de stockage insuffisant : environ "
                 + "\(Self.megabytes(requiredBytes)) Mo sont nécessaires et "
@@ -131,21 +157,43 @@ struct ExportOutcome: Sendable, Equatable {
     let duration: MediaTime
     let slotCount: Int
 
+    /// Profil maître §52 RÉELLEMENT utilisé pour encoder ce fichier, quand il
+    /// est connu (`ExportResult.masterProfile`).
+    ///
+    /// `nil` pour une issue RESTAURÉE (§60) : le schéma §10 ne décrit aucun
+    /// export, le fichier seul survit et son profil n'est pas relu. Un `nil`
+    /// n'est donc PAS « SDR 1080p par défaut » — c'est « inconnu », et rien ne
+    /// doit être affiché comme une mesure.
+    ///
+    /// Sur un export de la session courante, c'est la valeur à comparer au
+    /// profil ANNONCÉ par le résumé §56
+    /// (`ProjectExporter.masterProfile(project:)`) : une troncature §66 peut
+    /// avoir changé le clip maître, donc la résolution, la cadence ou le HDR
+    /// du fichier livré.
+    let masterProfile: MasterProfile?
+
     /// Vrai quand l'issue a été RESTAURÉE depuis le disque à la réouverture
     /// (§60), et non produite par un export de la session courante.
     ///
     /// Le schéma §10 est verbatim : aucune colonne ne décrit un export — seul
-    /// le FICHIER survit (§11 `exports/`). `duration` et `slotCount` sont
-    /// alors inconnus et valent zéro : ils ne doivent JAMAIS être affichés
-    /// comme des mesures. Un tel résultat n'est pas non plus l'issue d'un
-    /// export qui vient de se terminer (rien ne doit être ré-enregistré dans
-    /// Photos sur cette base, §55).
+    /// le FICHIER survit (§11 `exports/`). `duration`, `slotCount` et
+    /// `masterProfile` sont alors inconnus (zéro / `nil`) : ils ne doivent
+    /// JAMAIS être affichés comme des mesures. Un tel résultat n'est pas non
+    /// plus l'issue d'un export qui vient de se terminer (rien ne doit être
+    /// ré-enregistré dans Photos sur cette base, §55).
     let isRestored: Bool
 
-    init(outputURL: URL, duration: MediaTime, slotCount: Int, isRestored: Bool = false) {
+    init(
+        outputURL: URL,
+        duration: MediaTime,
+        slotCount: Int,
+        masterProfile: MasterProfile? = nil,
+        isRestored: Bool = false
+    ) {
         self.outputURL = outputURL
         self.duration = duration
         self.slotCount = slotCount
+        self.masterProfile = masterProfile
         self.isRestored = isRestored
     }
 }
@@ -174,6 +222,18 @@ struct ExportPlan: Sendable, Equatable {
     /// Runs exportés : chaque zone remplie, avec ses bornes musicales.
     var runs: [ReadyRun] { timeline.runs }
 
+    /// Cases exportées AVEC leur instant de composition, dans l'ordre du
+    /// montage — la dérivation PURE du domaine (`ReadyTimeline.placements`),
+    /// celle que l'assemblage consomme et que les tests vérifient avec des
+    /// littéraux calculés à la main. Aucun autre endroit ne recompose
+    /// `runStart + (slot.start - run.musicStart)`.
+    var placements: [SlotPlacement] { timeline.placements }
+
+    /// Portions de musique du montage : une par zone remplie
+    /// (`ReadyTimeline.musicInsertions`). Même statut que `placements` :
+    /// source unique, partagée avec l'aperçu.
+    var musicInsertions: [MusicInsertion] { timeline.musicInsertions }
+
     /// Durée totale du fichier produit = SOMME des durées de toutes les cases
     /// exportées.
     ///
@@ -188,10 +248,8 @@ struct ExportPlan: Sendable, Equatable {
     /// (§56 : « 19 plans • 9,50 s »).
     var slotCount: Int { timeline.slotCount }
 
-    /// Instant de composition d'une case exportée :
-    /// `(position de son run) + (slot.start - run.musicStart)` (§9, ticks
-    /// entiers). Fonction PURE — c'est elle que testent les tests de position,
-    /// sans AVFoundation.
+    /// Instant de composition d'une case exportée — lecture ponctuelle de
+    /// `placements` (§9, ticks entiers), jamais un second calcul.
     ///
     /// - Returns: `nil` si la case n'est pas exportée (elle n'a alors aucun
     ///   instant de composition).
@@ -248,8 +306,12 @@ struct ExportPlan: Sendable, Equatable {
     /// Faire échouer l'export ENTIER contredirait §66, qui décrit un export
     /// LIMITÉ, pas un export perdu.
     ///
-    /// - Throws: `ExportError.emptyPrefix` si `index <= 0` — le TOUT PREMIER
-    ///   rush du montage est indisponible, il ne reste rien à exporter.
+    /// - Throws: `ExportError.emptyPrefix` s'il ne reste rien après la coupe.
+    ///   Le cas `index <= 0` (TOUT PREMIER rush indisponible) est intercepté
+    ///   AVANT par `assemble`, qui lève alors la cause réelle
+    ///   (`firstAssetUnavailable`) : dire « remplissez au moins une case » d'un
+    ///   montage rempli serait faux. Ce garde-fou reste pour tout autre
+    ///   appelant.
     func truncated(before index: Int) throws -> ExportPlan {
         guard index > 0 else { throw ExportError.emptyPrefix }
         let kept = timeline.truncated(toFirst: index)
@@ -430,6 +492,16 @@ struct ProjectExporter: Sendable {
         try checkCancellation()
 
         // §52 : profil maître — résolution ET cadence du MÊME clip.
+        //
+        // **Profil RÉELLEMENT encodé.** Il est calculé sur `assembly.clips`,
+        // c'est-à-dire sur les rushs CONSERVÉS : après une troncature §66, ce
+        // n'est plus forcément le profil annoncé par le résumé avant export
+        // (§56), qui porte sur la timeline complète (`masterProfile(project:)`).
+        // Si le clip maître disparaît avec la troncature, la résolution, la
+        // cadence et la capacité HDR du fichier changent. C'est pourquoi ce
+        // profil est rendu dans `ExportResult.masterProfile` : l'interface
+        // affiche et compare ce qui a été PRODUIT, jamais ce qui avait été
+        // supposé.
         guard let profile = MasterProfileSelector.selectMaster(
             clips: assembly.clips,
             geometry: assembly.geometry
@@ -481,10 +553,13 @@ struct ProjectExporter: Sendable {
             + "\(profile.renderWidth)×\(profile.renderHeight), "
             + "\(profile.isHDR ? "HDR" : "SDR"), taille estimée \(estimatedBytes) octets."
         )
+        // Les trois mesures décrivent le FICHIER : plan EFFECTIF (troncature
+        // §66 comprise) et profil RÉELLEMENT utilisé pour encoder.
         return ExportResult(
             outputURL: outputURL,
             duration: effectivePlan.duration,
-            slotCount: effectivePlan.slotCount
+            slotCount: effectivePlan.slotCount,
+            masterProfile: profile
         )
     }
 
@@ -514,6 +589,16 @@ struct ProjectExporter: Sendable {
     /// pourrait annoncer une résolution ou une cadence que l'export ne
     /// produirait pas — deux vérités pour une seule décision (§52 : « Prendre
     /// la résolution et la cadence d'un même clip maître »).
+    ///
+    /// **C'est le profil ANNONCÉ, pas une garantie sur le fichier.** Il porte
+    /// sur la timeline COMPLÈTE ; l'export, lui, profile les rushs
+    /// effectivement conservés. Si un rush disparaît pendant l'assemblage
+    /// (§66), le montage est tronqué et le clip maître peut changer :
+    /// résolution, cadence et HDR du fichier peuvent alors différer de ce qui a
+    /// été affiché. Le profil RÉELLEMENT utilisé est rendu par
+    /// `ExportResult.masterProfile` — c'est lui qui décrit le fichier livré, et
+    /// c'est à l'interface de signaler l'écart plutôt que de laisser croire à
+    /// l'utilisateur qu'il a obtenu ce qui lui avait été annoncé.
     ///
     /// Coût documenté : ce calcul résout réellement chaque rush exporté (sans
     /// réseau, §44) et matérialise au besoin la source d'un rush recomposé
@@ -654,24 +739,11 @@ struct ProjectExporter: Sendable {
         let assetIdentifier: String
     }
 
-    /// Position d'une case dans le montage concaténé : la case et son instant
-    /// de départ DANS la composition
-    /// (`position du run + slot.start - run.musicStart`). Calculée UNE fois,
-    /// avant l'assemblage, pour que l'ordre d'insertion et l'ordre de
-    /// troncature §66 soient exactement le même.
-    private struct Placement {
-        let slot: ProjectSlot
-        let compositionStart: MediaTime
-    }
-
-    /// Portion de musique à insérer : le passage ABSOLU
-    /// `[sourceStart, sourceStart + duration]` du morceau, posé à
-    /// `compositionStart`. UNE portion par RUN (§53) — jamais une par case.
-    private struct MusicInsertion {
-        let sourceStart: MediaTime
-        let duration: MediaTime
-        let compositionStart: MediaTime
-    }
+    // Les positions de composition (`SlotPlacement`) et les portions de
+    // musique (`MusicInsertion`) ne sont plus des types privés de l'exporteur :
+    // ce sont les types du DOMAINE (`ExportModels.swift`), produits par
+    // `ReadyTimeline.placements` / `.musicInsertions` — la seule dérivation du
+    // produit, partagée avec l'aperçu et couverte par les tests.
 
     /// Composition assemblée + matière du profil maître (§52).
     private struct Assembly {
@@ -703,10 +775,31 @@ struct ProjectExporter: Sendable {
         /// supprimé, photothèque devenue inaccessible) : le montage reste
         /// valide, seule la matière manque à partir de cette case.
         let truncatesPlan: Bool
+        /// Cause exacte côté photothèque, quand elle est connue — elle décide
+        /// du MESSAGE quand la case en cause est la toute première (attendre un
+        /// téléchargement iCloud n'est pas la même action que remplacer un
+        /// rush effacé, §44/§64).
+        let cause: MediaLibraryError?
+
+        init(identifier: String, truncatesPlan: Bool, cause: MediaLibraryError? = nil) {
+            self.identifier = identifier
+            self.truncatesPlan = truncatesPlan
+            self.cause = cause
+        }
 
         /// Erreur exposée quand la troncature n'est pas possible (§51 :
         /// l'identifiant du rush dit QUELLE case remplacer).
         var exportError: ExportError { .assetUnavailable(identifier) }
+
+        /// Erreur exposée quand la case en cause est le TOUT PREMIER plan du
+        /// montage (§66) : il n'y a rien AVANT elle à livrer, mais la cause
+        /// n'est pas « aucune case prête » — elle est dite telle quelle.
+        var firstSlotExportError: ExportError {
+            .firstAssetUnavailable(
+                identifier,
+                isStillDownloading: cause == MediaLibraryError.icloudUnavailable
+            )
+        }
     }
 
     /// §66 : causes d'INDISPONIBILITÉ d'un rush — elles tronquent le plan.
@@ -746,7 +839,10 @@ struct ProjectExporter: Sendable {
     /// à la fin absolue de sa dernière case, et l'export livre ce montage
     /// réduit. Faire échouer l'export ENTIER perdrait un montage parfaitement
     /// exportable, ce que §66 ne demande nulle part. Si la case en cause est
-    /// la TOUTE PREMIÈRE, il ne reste rien à exporter : `emptyPrefix`.
+    /// la TOUTE PREMIÈRE, il n'y a rien AVANT elle à livrer : l'export échoue
+    /// sur `firstAssetUnavailable`, qui dit la cause RÉELLE (rush encore dans
+    /// iCloud, effacé, accès révoqué) — et surtout pas `emptyPrefix`, qui
+    /// demanderait de « remplir au moins une case » d'un montage déjà rempli.
     private func assemble(project: ProjectSnapshot, plan: ExportPlan) async throws -> Assembly {
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(
@@ -756,18 +852,13 @@ struct ProjectExporter: Sendable {
             throw ExportError.exportFailed("Piste vidéo de composition impossible à créer.")
         }
 
-        // Positions FINALES calculées en une fois, dans l'ordre du montage :
-        // `runStarts` cumule les durées des runs en ticks entiers (§9), et
-        // c'est LE MÊME calcul que l'aperçu (`ReadyTimeline`).
-        var placements: [Placement] = []
-        placements.reserveCapacity(plan.slotCount)
-        for (run, runStart) in zip(plan.timeline.runs, plan.timeline.runStarts) {
-            for slot in run.slots {
-                placements.append(
-                    Placement(slot: slot, compositionStart: runStart + run.offset(of: slot))
-                )
-            }
-        }
+        // Positions FINALES : lues telles quelles sur la timeline
+        // (`ReadyTimeline.placements`, ticks entiers §9). Ce calcul n'est PAS
+        // refait ici — c'est exactement la même fonction que consomme l'aperçu
+        // (`PreviewBuilder.makeTimelineComposition`), donc les deux ne peuvent
+        // pas diverger, et elle est testée avec des littéraux calculés à la
+        // main.
+        let placements = plan.placements
 
         var segments: [Segment] = []
         var clips: [MasterClipInfo] = []
@@ -786,8 +877,19 @@ struct ProjectExporter: Sendable {
                     projectID: project.projectID
                 )
             } catch let failure as ClipLoadFailure where failure.truncatesPlan {
-                // §66 : export LIMITÉ avant la case indisponible. `truncated`
-                // lève `emptyPrefix` si c'est la toute première case.
+                // §66 : export LIMITÉ avant la case indisponible.
+                guard order > 0 else {
+                    // TOUT PREMIER plan du montage : il n'y a rien avant lui à
+                    // livrer. La cause RÉELLE est levée (rush encore dans
+                    // iCloud, effacé, accès révoqué) — surtout pas
+                    // `emptyPrefix`, dont le message « remplissez au moins une
+                    // case » serait faux : le montage EST rempli.
+                    logger.error(
+                        "Premier plan du montage sans rush exploitable "
+                        + "(\(failure.identifier)) — export impossible (§66)."
+                    )
+                    throw failure.firstSlotExportError
+                }
                 effectivePlan = try plan.truncated(before: order)
                 logger.error(
                     "Rush indisponible en cours d'export (\(failure.identifier)) — "
@@ -816,18 +918,13 @@ struct ProjectExporter: Sendable {
         // la position de composition du run. La musique de la dernière zone
         // conservée est donc coupée à la fin absolue de sa dernière case, et
         // les passages des cases vides n'existent pas dans le fichier.
+        //
+        // Comme les positions vidéo, ces portions viennent de la timeline
+        // (`ReadyTimeline.musicInsertions`) : même source que l'aperçu, aucun
+        // recalcul local.
         let musicEnd = try await insertMusic(
             projectID: project.projectID,
-            insertions: zip(
-                effectivePlan.timeline.runs,
-                effectivePlan.timeline.runStarts
-            ).map { (run, runStart) in
-                MusicInsertion(
-                    sourceStart: run.musicStart,
-                    duration: run.duration,
-                    compositionStart: runStart
-                )
-            },
+            insertions: effectivePlan.musicInsertions,
             into: composition
         )
 
@@ -986,7 +1083,8 @@ struct ProjectExporter: Sendable {
             logger.error("Rush indisponible à l'export (\(identifier)) : \(error)")
             throw ClipLoadFailure(
                 identifier: identifier,
-                truncatesPlan: Self.truncatesPlan(error)
+                truncatesPlan: Self.truncatesPlan(error),
+                cause: error
             )
         } catch {
             // Cause inconnue (lecture AVFoundation en échec) : jamais

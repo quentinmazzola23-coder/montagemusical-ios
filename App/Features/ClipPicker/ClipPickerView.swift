@@ -853,7 +853,15 @@ struct ClipPickerView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Prévisualiser")
-                .accessibilityHint("Lit le montage depuis le début.")
+                // CORRECTIF (relecture adversariale du 13 août 2026) — cette
+                // phase signifie « plus aucune case VIDE », pas « tout est
+                // prêt » : une case peut être remplie et pourtant en
+                // téléchargement (§44), indisponible (§64) ou trop courte
+                // (§43). L'aperçu §47.2 lit donc les ZONES PRÊTES concaténées
+                // (écart produit), pas « le montage depuis le début » — qui,
+                // depuis l'écart produit, ne commence même plus forcément à la
+                // première case.
+                .accessibilityHint("Lit les zones prêtes du montage, mises bout à bout.")
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
@@ -864,8 +872,17 @@ struct ClipPickerView: View {
         .sheet(isPresented: $isPreviewPresented) {
             PreviewPlayerView(
                 projectID: projectID,
-                scope: .contiguousPrefix, // §47.2 : préfixe continu prêt
-                title: "Montage complet"
+                // §47.2 : zones de cases prêtes concaténées (nom d'énumération
+                // du domaine conservé — seule sa RÈGLE a changé).
+                scope: .contiguousPrefix,
+                // Le titre nomme ce qui est RÉELLEMENT lu. « Montage complet »
+                // promettait tout le projet ; cette feuille ne contient que les
+                // zones prêtes, et cette phase ne garantit pas qu'elles
+                // couvrent tout. `AssemblyView` compose un titre plus précis
+                // (« Montage — plans 28 à 50 ») parce qu'il connaît les zones ;
+                // ici, la photothèque ne lit pas les associations — elle dit
+                // donc le vrai sans prétendre au détail.
+                title: "Montage — zones prêtes"
             )
         }
     }

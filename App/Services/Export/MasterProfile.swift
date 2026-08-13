@@ -17,10 +17,13 @@ import CoreGraphics
 import CoreMedia
 import Foundation
 
-// MARK: - Caractéristiques d'un rush du préfixe (§52)
+// MARK: - Caractéristiques d'un rush exporté (§52)
 
-/// Caractéristiques techniques d'UN rush du préfixe exporté (§52 :
-/// « Analyser seulement les rushs du préfixe exporté »).
+/// Caractéristiques techniques d'UN rush du montage exporté (§52 : « Analyser
+/// seulement les rushs du préfixe exporté » — le préfixe §51 a été remplacé par
+/// la TIMELINE CONCATÉNÉE des zones remplies, la règle vaut donc pour les rushs
+/// de CETTE timeline : les cases non exportées n'entrent jamais dans le
+/// classement).
 ///
 /// Toutes les valeurs sont MESURÉES sur la piste vidéo réelle (jamais des
 /// métadonnées PhotoKit) et déjà ORIENTÉES (`preferredTransform` appliqué,
@@ -44,8 +47,8 @@ struct MasterClipInfo: Sendable, Equatable {
     /// Capacité HDR du rush (§52.4).
     let isHDR: Bool
 
-    /// Ordre d'apparition dans le préfixe — départage les égalités parfaites
-    /// (§52.2 point 4).
+    /// Ordre d'apparition dans le montage exporté (runs concaténés) —
+    /// départage les égalités parfaites (§52.2 point 4).
     let appearanceOrder: Int
 }
 
@@ -59,7 +62,13 @@ struct MasterClipInfo: Sendable, Equatable {
 /// inventer du 4K60 à partir d'un clip 4K30 et d'un autre 1080p60 ») : c'est
 /// `MasterProfileSelector` qui choisit CE clip, et ce type ne fait que porter
 /// le résultat.
-struct MasterProfile: Sendable, Equatable {
+///
+/// `Codable` : le profil voyage dans `ExportResult` (contrat d'interface —
+/// c'est le profil RÉELLEMENT encodé, celui que le résumé §56 doit refléter),
+/// et `ExportResult` est `Codable`. La synthèse porte sur les propriétés
+/// stockées, jamais sur l'initialiseur normalisant ci-dessous : un profil
+/// décodé reste donc exactement celui qui a été encodé.
+struct MasterProfile: Codable, Sendable, Equatable {
 
     /// Largeur de rendu — PAIRE (§55 : les encodeurs H.264/HEVC 4:2:0
     /// exigent des dimensions paires).
@@ -83,8 +92,9 @@ struct MasterProfile: Sendable, Equatable {
     /// Valeur dérivée de la fraction exacte ci-dessus — jamais saisie à part.
     let frameRate: Double
 
-    /// Sortie HDR (§52.4) : vrai seulement si TOUS les rushs du préfixe sont
-    /// HDR ; un mélange HDR/SDR impose une sortie SDR cohérente.
+    /// Sortie HDR (§52.4) : vrai seulement si TOUS les rushs exportés (toutes
+    /// zones confondues) sont HDR ; un mélange HDR/SDR impose une sortie SDR
+    /// cohérente.
     let isHDR: Bool
 
     /// Durée d'une image, à poser telle quelle sur
@@ -221,9 +231,11 @@ extension MasterProfile {
 
 /// Choix du profil maître d'export (§52).
 ///
-/// Entrée : les rushs du PRÉFIXE exporté uniquement (§52 : « Analyser
-/// seulement les rushs du préfixe exporté ») et la géométrie VERROUILLÉE du
-/// projet (§14, §49).
+/// Entrée : les rushs RÉELLEMENT exportés uniquement — c'est-à-dire ceux de la
+/// TIMELINE concaténée des zones remplies, dans l'ordre du montage (§52 :
+/// « Analyser seulement les rushs du préfixe exporté », lu après le
+/// remplacement du préfixe §51) — et la géométrie VERROUILLÉE du projet
+/// (§14, §49).
 enum MasterProfileSelector {
 
     /// Tolérance RELATIVE de compatibilité de rapport (§52.2 : « les clips
@@ -249,7 +261,7 @@ enum MasterProfileSelector {
     /// exactement le « comportement implicite non testé » que §52.4 interdit.
     /// V1 rend donc TOUJOURS en SDR Rec.709 avec le tone mapping EXPLICITE
     /// déjà implémenté (`ProjectExporter.makeVideoComposition` renseigne les
-    /// trois propriétés colorimétriques) : un préfixe entièrement HDR reçoit
+    /// trois propriétés colorimétriques) : un montage entièrement HDR reçoit
     /// le même traitement qu'un mélange HDR/SDR — « sortie SDR cohérente ».
     ///
     /// Le classement §52.2 continue d'utiliser la capacité HDR des rushs
@@ -259,8 +271,9 @@ enum MasterProfileSelector {
     /// basculer cette constante suffira.
     static let allowsHDROutput = false
 
-    /// Profil maître du préfixe (§52), ou `nil` si aucun clip n'est fourni
-    /// (préfixe vide → export désactivé §51/§66 : il n'y a rien à profiler).
+    /// Profil maître du montage exporté (§52), ou `nil` si aucun clip n'est
+    /// fourni (timeline vide → export désactivé §66 : il n'y a rien à
+    /// profiler).
     ///
     /// - §52.1 : la géométrie est TOUJOURS celle du projet — le clip maître
     ///   ne fait que DIMENSIONNER ce rapport (`GeometryLock.renderSize`) ;
@@ -277,8 +290,9 @@ enum MasterProfileSelector {
             masterHeight: master.orientedHeight
         )
 
-        // §52.4 : le HDR se décide sur TOUT le préfixe, pas sur le seul clip
-        // maître — un unique rush SDR imposerait déjà une sortie SDR. En V1
+        // §52.4 : le HDR se décide sur TOUT le montage exporté, pas sur le
+        // seul clip maître — un unique rush SDR, dans n'importe quelle zone,
+        // imposerait déjà une sortie SDR. En V1
         // la condition est de toute façon écrasée par `allowsHDROutput`
         // (voir la constante) : la sortie est SDR, tone mapping explicite.
         let isEveryClipHDR = !clips.isEmpty && clips.allSatisfy(\.isHDR)
@@ -307,7 +321,7 @@ enum MasterProfileSelector {
     /// 2. **classement lexicographique** §52.2 : pixels orientés, cadence de
     ///    lecture plafonnée à 60, HDR, ordre d'apparition.
     static func selectMasterClip(clips: [MasterClipInfo], geometry: ProjectGeometry) -> MasterClipInfo? {
-        guard !clips.isEmpty else { return nil } // §51 : préfixe vide
+        guard !clips.isEmpty else { return nil } // §66 : aucune zone remplie
 
         let compatible = clips.filter { isAspectCompatible($0, geometry: geometry) }
         let candidates = compatible.isEmpty ? clips : compatible

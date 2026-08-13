@@ -36,6 +36,21 @@
 //  Reste vrai de §51 : export impossible si le résultat est vide (aucune case
 //  prête → bouton désactivé, raison annoncée §66).
 //
+//  CORRECTIFS (relecture adversariale du 13 août 2026) :
+//  - UN SEUL COMPTE DE PLANS. Le nombre de plans exportés était affiché depuis
+//    deux dérivations — le compte du domaine d'un côté, la somme des LARGEURS
+//    des intervalles d'index de l'autre (titre d'aperçu, valeur VoiceOver de
+//    la mini-timeline). Les deux ne coïncident que si les index d'une zone
+//    sont strictement contigus. `AssemblyViewLogic.exportedSlotCount(items:)`
+//    est désormais l'unique compte, passé aux libellés — écran ET VoiceOver ;
+//  - §64 : LE GESTE PROPOSÉ DÉPEND DE LA CAUSE. Le hint du bouton « Export »
+//    désactivé disait toujours « Remplissez au moins une case », y compris
+//    quand toutes les cases étaient REMPLIES mais non prêtes (téléchargement
+//    iCloud §44, asset indisponible §64, rush trop court §43) — il faut alors
+//    attendre ou remplacer, pas remplir. `nothingReadyCause(items:)` traduit
+//    les états en constats, la table des messages restant unique
+//    (`ExportSummaryLogic.NothingReadyCause`).
+//
 //  Jalon 9 : §47.1 (aperçu LOCAL — toucher sur la zone haute quand la case
 //  active est prête), §47.2 (aperçu PRINCIPAL des zones exportées — son
 //  emplacement a changé au Jalon 10, voir ci-dessous), §48 (invalidation du cache de preview
@@ -263,6 +278,21 @@ enum AssemblyViewLogic {
         }
     }
 
+    /// Nombre de cases RÉELLEMENT exportées — compte FAISANT AUTORITÉ de cet
+    /// écran, l'exact pendant de `ReadyTimeline.slotCount` côté domaine.
+    ///
+    /// CORRECTIF (relecture adversariale du 13 août 2026) : les libellés le
+    /// recalculaient en additionnant les LARGEURS des intervalles d'index
+    /// (`zone.count`). Les deux ne coïncident que si les index d'une zone sont
+    /// strictement contigus — vrai par construction (§10.1), mais alors le
+    /// second calcul n'apporte rien, et faux le jour où il ne l'est plus : le
+    /// même écran annoncerait deux comptes différents. Une seule source.
+    ///
+    /// O(N) en comparaisons d'énumération, sans allocation (§82).
+    static func exportedSlotCount(items: [AssemblySlotItem]) -> Int {
+        items.reduce(0) { $0 + ($1.state == .ready ? 1 : 0) }
+    }
+
     /// Énoncé VoiceOver des zones exportables (§39) — `nil` quand rien n'est
     /// prêt (il n'y a alors aucun montage à annoncer, §51) :
     /// - UNE zone → « plans 28 à 50 exportables » / « plan 28 exportable » ;
@@ -273,7 +303,11 @@ enum AssemblyViewLogic {
     /// Source UNIQUE de cette formulation : la mini-timeline §35.3 l'utilise
     /// pour sa valeur accessible — le crochet dessiné au-dessus de la piste
     /// est invisible pour VoiceOver.
-    static func spokenExportedZones(zones: [ClosedRange<Int>]) -> String? {
+    ///
+    /// `slotCount` est le compte faisant autorité (`exportedSlotCount(items:)`)
+    /// et n'est PAS redérivé des plages : l'oreille et l'écran comptent la même
+    /// chose (voir `exportedSlotCount`).
+    static func spokenExportedZones(zones: [ClosedRange<Int>], slotCount: Int) -> String? {
         guard !zones.isEmpty else { return nil }
         if zones.count == 1, let zone = zones.first {
             let first = max(0, zone.lowerBound) + 1
@@ -282,9 +316,31 @@ enum AssemblyViewLogic {
                 ? "plan \(first) exportable"
                 : "plans \(first) à \(last) exportables"
         }
-        let slotCount = zones.reduce(0) { $0 + $1.count }
-        let plans = slotCount <= 1 ? "\(slotCount) plan exportable" : "\(slotCount) plans exportables"
+        let safeCount = max(0, slotCount)
+        let plans = safeCount <= 1 ? "\(safeCount) plan exportable" : "\(safeCount) plans exportables"
         return "\(plans) en \(zones.count) zones"
+    }
+
+    /// §64 — POURQUOI l'export est indisponible, vu depuis la projection
+    /// d'affichage. Traduit les états de cases en deux constats
+    /// (« quelque chose est en cours », « quelque chose est bloqué ») que
+    /// `ExportSummaryLogic.NothingReadyCause` transforme en geste à proposer :
+    /// remplir, attendre, ou remplacer.
+    ///
+    /// La TABLE des messages n'existe qu'une fois (dans `ExportSummaryLogic`) :
+    /// l'écran d'assemblage et le résumé §56 ne peuvent pas conseiller deux
+    /// gestes différents pour la même situation.
+    static func nothingReadyCause(items: [AssemblySlotItem]) -> ExportSummaryLogic.NothingReadyCause {
+        var hasPending = false
+        var hasBlocked = false
+        for item in items {
+            switch item.state {
+            case .resolving, .downloading: hasPending = true
+            case .unavailable, .tooShort: hasBlocked = true
+            case .ready, .empty: break
+            }
+        }
+        return .from(hasPending: hasPending, hasBlocked: hasBlocked)
     }
 }
 
@@ -801,6 +857,9 @@ struct AssemblyView: View {
         // redérive de son côté à la construction (§82 : rien pendant le
         // dessin).
         let exportedZones = AssemblyViewLogic.exportedZoneIndexes(items: items)
+        // Compte FAISANT AUTORITÉ des plans exportés — jamais redérivé des
+        // plages d'index par les libellés (voir `exportedSlotCount`).
+        let exportedSlotCount = AssemblyViewLogic.exportedSlotCount(items: items)
         return VStack(spacing: 14) {
             // Partie DÉFILABLE (§39/§87) : elle occupe toute la place que lui
             // laissent les contrôles ancrés ci-dessous.
@@ -829,7 +888,7 @@ struct AssemblyView: View {
             // (§51 + écart produit) : sans lui, il n'y aurait rien à lire et
             // la place est rendue au contenu.
             if !exportedZones.isEmpty {
-                montagePreviewButton(zones: exportedZones)
+                montagePreviewButton(zones: exportedZones, slotCount: exportedSlotCount)
             }
 
             // Mini-timeline §35.3 : toucher/glisser déplace la sélection.
@@ -1063,9 +1122,9 @@ struct AssemblyView: View {
     /// 50. », « … : 19 plans en 2 zones. ») depuis l'écart produit : le
     /// montage n'est plus une plage unique, et l'utilisateur doit le savoir
     /// avant d'appuyer (§39).
-    private func montagePreviewButton(zones: [ClosedRange<Int>]) -> some View {
+    private func montagePreviewButton(zones: [ClosedRange<Int>], slotCount: Int) -> some View {
         Button {
-            requestMontagePreview(zones: zones)
+            requestMontagePreview(zones: zones, slotCount: slotCount)
         } label: {
             Label("Prévisualiser le montage", systemImage: "play.rectangle")
                 .font(.subheadline.weight(.medium))
@@ -1077,7 +1136,7 @@ struct AssemblyView: View {
         .padding(.horizontal, 20)
         .accessibilityLabel("Prévisualiser le montage")
         .accessibilityHint(
-            "Lit le montage : \(exportedPlansLabel(zones: zones).lowercased())."
+            "Lit le montage : \(exportedPlansLabel(zones: zones, slotCount: slotCount).lowercased())."
         )
     }
 
@@ -1086,8 +1145,13 @@ struct AssemblyView: View {
     /// résumé §56 : l'aperçu et l'export nomment exactement le même montage.
     /// Repli neutre si les zones sont vides — ce chemin n'est jamais atteint
     /// (le bouton n'existe pas sans zone).
-    private func exportedPlansLabel(zones: [ClosedRange<Int>]) -> String {
-        ExportSummaryLogic.exportedPlansLabel(zones: zones) ?? "aucun plan"
+    ///
+    /// `slotCount` est le compte faisant autorité de l'écran
+    /// (`AssemblyViewLogic.exportedSlotCount`) : le titre de l'aperçu et le
+    /// résumé §56 annoncent le même nombre de plans, jamais deux comptes
+    /// dérivés séparément.
+    private func exportedPlansLabel(zones: [ClosedRange<Int>], slotCount: Int) -> String {
+        ExportSummaryLogic.exportedPlansLabel(zones: zones, slotCount: slotCount) ?? "aucun plan"
     }
 
     // MARK: - Dock contextuel (§36)
@@ -1161,10 +1225,17 @@ struct AssemblyView: View {
             // couleur (§39).
             .opacity(isExportEnabled ? 1 : 0.4)
             .accessibilityLabel(labels.right)
+            // §64 : désactivé, le hint nomme le geste qui débloque VRAIMENT
+            // l'export. Une case peut être REMPLIE sans être prête
+            // (téléchargement iCloud §44, asset indisponible §64, rush trop
+            // court §43) : « remplissez une case » serait alors le mauvais
+            // conseil — il faut attendre, ou remplacer.
             .accessibilityHint(
                 isExportEnabled
                     ? "Affiche le résumé de l'export du montage déjà prêt."
-                    : "Remplissez au moins une case pour exporter."
+                    : ExportSummaryLogic.nothingReadyShortHint(
+                        AssemblyViewLogic.nothingReadyCause(items: items)
+                    )
             )
         }
         .padding(.horizontal, 12)
@@ -1301,9 +1372,9 @@ struct AssemblyView: View {
     /// 50 », « Montage — 19 plans en 2 zones ») : l'aperçu ne couvre pas tout
     /// le projet et l'utilisateur doit savoir quoi, sans avoir à le deviner
     /// (§87).
-    private func requestMontagePreview(zones: [ClosedRange<Int>]) {
+    private func requestMontagePreview(zones: [ClosedRange<Int>], slotCount: Int) {
         playerController.stopSegment()
-        let plans = exportedPlansLabel(zones: zones)
+        let plans = exportedPlansLabel(zones: zones, slotCount: slotCount)
         activeSheet = .preview(PreviewSheetContext(
             id: "montage",
             scope: .contiguousPrefix,

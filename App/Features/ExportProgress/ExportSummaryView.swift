@@ -41,6 +41,28 @@
 //  - « aucune case prête » remplace « première case vide » comme seule
 //    raison de désactiver l'export.
 //
+//  CORRECTIF (relecture adversariale du 13 août 2026) — CE QUI EST ANNONCÉ
+//  EST CE QUI EST ENCODÉ, ET CE QUI EST ÉCRIT EST CE QUI EST ANNONCÉ.
+//  Deux défauts jumeaux vivaient ici :
+//  1. l'écran figeait son résumé §56 à l'ouverture, tandis que l'acteur
+//     d'export RELISAIT un instantané frais à l'appui : entre les deux, un
+//     téléchargement iCloud pouvait terminer (une zone de plus) ou un rush
+//     disparaître (une zone de moins), et l'utilisateur obtenait un montage
+//     qu'il n'avait pas validé. L'instantané ANNONCÉ est désormais transmis à
+//     `ExportActor.startExport(projectID:snapshot:)` : c'est EXACTEMENT lui
+//     qui est encodé (contrat partagé avec l'agent Cœur) ;
+//  2. un export TRONQUÉ (§66 : un rush devenu indisponible PENDANT
+//     l'encodage — le montage s'arrête avant lui) était annoncé comme un
+//     succès plein (« Votre montage est exporté. »), alors que
+//     `ExportOutcome` portait le VRAI nombre de plans et la VRAIE durée.
+//     `finish()` COMPARE désormais l'annonce (mémorisée dans `announced` au
+//     moment de l'appui) et le fichier réellement écrit — plans, durée et
+//     profil §52 réellement utilisé — et, en cas d'écart, la phase `ready`
+//     prend l'origine `.truncated` : ce qui a été écrit, POURQUOI, et quoi
+//     faire (relancer quand la vidéo sera revenue). §8.1 interdit d'annoncer
+//     un succès qui n'a pas eu lieu ; un succès PARTIEL annoncé comme plein
+//     est le même mensonge.
+//
 //  DÉCISION Jalon 10 — le profil §52 vient d'une SOURCE UNIQUE.
 //  Le résumé n'a plus AUCUN calcul de profil qui lui soit propre : il lit
 //  `ProjectExporter.masterProfile(project:)`, exactement ce que l'encodage
@@ -104,8 +126,9 @@
 //  ni enregistrement dans Photos §40/§55). `load()` interroge désormais
 //  `lastOutcome` en l'absence d'export en cours et présente la phase
 //  `ready`.
-//  Un résultat RESTAURÉ (`isRestored`, session précédente) est DISTINGUÉ
-//  d'un export qui vient de se terminer : titre, icône et message diffèrent,
+//  Un résultat RESTAURÉ (`ReadyOrigin.restored`, session précédente) est
+//  DISTINGUÉ d'un export qui vient de se terminer : titre, icône et message
+//  diffèrent,
 //  et AUCUNE haptique de succès n'est jouée — §8.1 interdit d'annoncer un
 //  succès qui n'a pas eu lieu maintenant. Sa durée et son nombre de plans
 //  valent zéro (le fichier est la seule trace §10/§11) : ils ne sont donc
@@ -310,15 +333,26 @@ enum ExportSummaryLogic {
     /// feuille d'aperçu §47.2 et le hint du bouton « Prévisualiser le
     /// montage » l'utilisent — ils ne peuvent pas nommer deux montages
     /// différents.
-    static func exportedPlansLabel(zones: [ClosedRange<Int>]) -> String? {
+    ///
+    /// CORRECTIF (relecture adversariale du 13 août 2026) — le nombre de plans
+    /// est un PARAMÈTRE, il n'est plus recalculé ici. Il valait auparavant la
+    /// somme des LARGEURS des intervalles d'index (`zone.count`), c'est-à-dire
+    /// un second calcul qui ne coïncide avec le compte faisant autorité
+    /// (`ReadyTimeline.slotCount`, le nombre de cases réellement encodées) que
+    /// si les index d'un run sont strictement contigus. Le même écran affichait
+    /// donc « 19 plans » sur une ligne et « 20 plans en 2 zones » sur la
+    /// suivante dès qu'un index manquait. Une seule source, passée par
+    /// l'appelant qui la tient du domaine.
+    ///
+    /// - Parameters:
+    ///   - zones: plages d'index (0-based) des zones exportées, dans l'ordre ;
+    ///   - slotCount: nombre de cases RÉELLEMENT exportées (autorité).
+    static func exportedPlansLabel(zones: [ClosedRange<Int>], slotCount: Int) -> String? {
         guard let first = zones.first else { return nil }
         if zones.count == 1 {
             return planRangeLabel(startIndex: first.lowerBound, endIndex: first.upperBound)
         }
-        return plansAndZonesLabel(
-            slotCount: zones.reduce(0) { $0 + $1.count },
-            zoneCount: zones.count
-        )
+        return plansAndZonesLabel(slotCount: slotCount, zoneCount: zones.count)
     }
 
     /// « 19 plans en 2 zones » — nombre total de plans exportés et nombre de
@@ -414,9 +448,94 @@ enum ExportSummaryLogic {
     /// impossible. La raison est DITE, le bouton n'est pas seulement grisé.
     static let nothingReadyTitle = "Aucun plan n'est encore prêt."
 
-    /// Geste à faire pour débloquer l'export — « au moins une case », et non
-    /// plus « la première case » : n'importe laquelle suffit désormais.
-    static let nothingReadyHint = "Remplissez au moins une case pour pouvoir exporter."
+    // MARK: Pourquoi rien n'est prêt (§64, §66)
+
+    // Non defini par la specification — definition minimale V1.
+    /// CORRECTIF (relecture adversariale du 13 août 2026) — §64.
+    ///
+    /// Tous les libellés de blocage disaient « Remplissez au moins une case »,
+    /// c'est-à-dire le geste d'une case VIDE. Or une case peut être REMPLIE et
+    /// pourtant non prête : téléchargement iCloud en cours (§44), asset devenu
+    /// indisponible (§64), rush trop court après résolution (§43/§3.8). Dans
+    /// ces cas, remplir une case de plus ne débloque rien — il faut ATTENDRE
+    /// (téléchargement) ou REMPLACER (bloqué). Un libellé qui demande le
+    /// mauvais geste est pire qu'un bouton grisé sans explication.
+    ///
+    /// Les quatre causes sont exclusives et couvrent tout : ni pendante ni
+    /// bloquée → il n'y a que des cases vides.
+    enum NothingReadyCause: Equatable {
+        /// Aucune association nulle part : il faut remplir.
+        case nothingFilled
+        /// Au moins une association en cours (résolution, téléchargement §44)
+        /// et aucune bloquée : il faut attendre.
+        case pending
+        /// Au moins une association bloquée (indisponible §64, trop courte
+        /// §43) et aucune en cours : il faut remplacer.
+        case blocked
+        /// Les deux à la fois : attendre ne suffira pas, remplacer non plus.
+        case pendingAndBlocked
+
+        /// Dérivation UNIQUE de la cause à partir de deux constats. Chaque
+        /// vocabulaire (statuts §13.3 du domaine, `AssemblySlotState` de
+        /// l'écran d'assemblage) n'a plus qu'à dire s'il a vu une association
+        /// en cours et une association bloquée : le CHOIX du message, lui,
+        /// n'existe qu'ici — deux tables de messages divergeraient.
+        static func from(hasPending: Bool, hasBlocked: Bool) -> NothingReadyCause {
+            switch (hasPending, hasBlocked) {
+            case (true, true): .pendingAndBlocked
+            case (true, false): .pending
+            case (false, true): .blocked
+            case (false, false): .nothingFilled
+            }
+        }
+    }
+
+    /// Cause du blocage lue sur un instantané de projet (§13.3) — utilisée par
+    /// le résumé §56, qui travaille sur `ProjectSnapshot`.
+    static func nothingReadyCause(slots: [ProjectSlot]) -> NothingReadyCause {
+        var hasPending = false
+        var hasBlocked = false
+        for slot in slots {
+            switch slot.assignment?.status {
+            case .resolving, .downloading: hasPending = true
+            case .unavailable, .tooShort: hasBlocked = true
+            case .ready, .none: break
+            }
+        }
+        return .from(hasPending: hasPending, hasBlocked: hasBlocked)
+    }
+
+    /// Geste à faire pour débloquer l'export, SELON la cause (§64).
+    ///
+    /// Une case vide se remplit ; une vidéo en cours de téléchargement
+    /// s'attend ; une vidéo indisponible ou trop courte se remplace. Le
+    /// libellé nomme le geste RÉELLEMENT attendu, jamais un geste par défaut.
+    static func nothingReadyHint(_ cause: NothingReadyCause) -> String {
+        switch cause {
+        case .nothingFilled:
+            "Remplissez au moins une case pour pouvoir exporter."
+        case .pending:
+            "Une vidéo choisie n'est pas encore prête : attendez la fin de son téléchargement, "
+                + "puis relancez l'export."
+        case .blocked:
+            "Les vidéos choisies ne peuvent pas remplir leur case (indisponible ou trop courte) : "
+                + "remplacez-les, ou remplissez une autre case."
+        case .pendingAndBlocked:
+            "Aucune vidéo choisie n'est encore utilisable : attendez la fin des téléchargements "
+                + "et remplacez celles qui sont indisponibles ou trop courtes."
+        }
+    }
+
+    /// Version COURTE du même geste, pour le hint VoiceOver d'un bouton
+    /// « Export » désactivé (§39) — une phrase, pas un paragraphe.
+    static func nothingReadyShortHint(_ cause: NothingReadyCause) -> String {
+        switch cause {
+        case .nothingFilled: "Remplissez au moins une case pour exporter."
+        case .pending: "Attendez la fin du téléchargement de la vidéo choisie pour exporter."
+        case .blocked: "Remplacez la vidéo indisponible ou trop courte pour exporter."
+        case .pendingAndBlocked: "Aucune vidéo n'est encore utilisable : attendez ou remplacez-les."
+        }
+    }
 
     // MARK: VoiceOver (§39)
 
@@ -486,16 +605,224 @@ enum ExportSummaryLogic {
         "Un export de ce montage est conservé sur cet iPhone depuis une session précédente. "
         + "Partagez-le, enregistrez-le dans Photos, ou lancez un nouvel export."
 
-    /// Titre de la phase `ready` selon l'ORIGINE du fichier (§60) — un export
-    /// qui vient d'aboutir et un export retrouvé après relance ne s'annoncent
-    /// jamais avec les mêmes mots (§8.1).
-    static func readyTitle(isRestored: Bool) -> String {
-        isRestored ? restoredReadyTitle : freshReadyTitle
+    // MARK: - Export TRONQUÉ : l'annonce et le fichier diffèrent (§66, §8.1)
+
+    // Non defini par la specification — definition minimale V1.
+    /// ORIGINE du fichier présenté par la phase `ready` — trois cas
+    /// EXCLUSIFS, portés par le type plutôt que par un booléen et un drapeau
+    /// annexe (un « restauré ET tronqué » n'existe pas).
+    enum ReadyOrigin: Equatable {
+        /// L'encodage vient de se terminer et le fichier écrit correspond
+        /// EXACTEMENT au résumé §56 validé par l'utilisateur.
+        case fresh
+        /// §66 : le fichier est bien écrit, mais il ne contient PAS ce qui a
+        /// été annoncé — un rush est devenu indisponible pendant l'encodage,
+        /// le montage a été tronqué avant lui. Le fichier reste partageable et
+        /// enregistrable (il existe vraiment) : c'est le DISCOURS qui change.
+        case truncated(ExportDivergence)
+        /// §60 : fichier retrouvé dans `exports/` après relance. Rien ne s'est
+        /// produit maintenant — ni succès à annoncer, ni écart à mesurer (sa
+        /// durée et son nombre de plans sont inconnus, §10/§11).
+        case restored
+
+        /// §60 : vrai pour le seul cas restauré — les autres décrivent un
+        /// encodage de CETTE session.
+        var isRestored: Bool { self == .restored }
     }
 
-    /// Message de la phase `ready` selon l'origine du fichier (§60).
-    static func readyMessage(isRestored: Bool) -> String {
-        isRestored ? restoredReadyMessage : freshReadyMessage
+    // Non defini par la specification — definition minimale V1.
+    /// Écart MESURÉ entre ce que le résumé §56 a annoncé et ce que le fichier
+    /// contient réellement.
+    ///
+    /// Les valeurs « produites » viennent de l'issue de l'acteur d'export
+    /// (`ExportOutcome`/`ExportResult`), qui décrit le FICHIER écrit — jamais
+    /// l'intention. Les valeurs « annoncées » sont celles que l'utilisateur
+    /// avait sous les yeux en appuyant sur « Exporter ».
+    ///
+    /// Type imbriqué (et non global) : le domaine peut porter un jour son
+    /// propre vocabulaire d'écart sans collision de nom.
+    struct ExportDivergence: Equatable {
+        let announcedSlotCount: Int
+        let producedSlotCount: Int
+        let announcedDuration: MediaTime
+        let producedDuration: MediaTime
+        /// Profil §52 annoncé — `nil` s'il n'avait pas pu être lu (§56 :
+        /// aucun profil partiel n'est annoncé, il n'y a alors rien à comparer).
+        let announcedProfile: MasterProfile?
+        /// Profil §52 RÉELLEMENT utilisé par l'encodage, quand l'acteur
+        /// l'expose — `nil` sinon : on ne compare jamais à une valeur inconnue.
+        let producedProfile: MasterProfile?
+
+        /// Le fichier contient MOINS de plans que promis : c'est la signature
+        /// d'une troncature §66.
+        var hasFewerSlots: Bool { producedSlotCount < announcedSlotCount }
+
+        var hasDifferentSlotCount: Bool { producedSlotCount != announcedSlotCount }
+
+        var hasDifferentDuration: Bool { producedDuration != announcedDuration }
+
+        /// Vrai si le profil produit diffère de celui ANNONCÉ sur l'un des
+        /// points que l'écran avait affichés (§56) : dimensions, cadence telle
+        /// qu'elle est écrite, HDR/SDR. Une différence purement interne
+        /// (fraction de cadence équivalente) n'est PAS un écart pour
+        /// l'utilisateur : elle ne se voit nulle part.
+        var hasDifferentProfile: Bool {
+            guard let announcedProfile, let producedProfile else { return false }
+            return announcedProfile.renderWidth != producedProfile.renderWidth
+                || announcedProfile.renderHeight != producedProfile.renderHeight
+                || announcedProfile.isHDR != producedProfile.isHDR
+                || ExportSummaryLogic.frameRateValueLabel(announcedProfile.frameRate)
+                    != ExportSummaryLogic.frameRateValueLabel(producedProfile.frameRate)
+        }
+
+        /// Vrai dès qu'il y a quelque chose à dire à l'utilisateur.
+        var isSignificant: Bool {
+            hasDifferentSlotCount || hasDifferentDuration || hasDifferentProfile
+        }
+    }
+
+    /// Compare l'annonce §56 et le fichier écrit — `nil` quand ils décrivent
+    /// le MÊME montage (cas normal : rien à signaler, l'export est un succès
+    /// plein).
+    ///
+    /// Fonction PURE, testable sans encodage : c'est elle qui décide qu'un
+    /// export est « incomplet », et elle seule.
+    static func divergence(
+        announcedSlotCount: Int,
+        announcedDuration: MediaTime,
+        announcedProfile: MasterProfile?,
+        producedSlotCount: Int,
+        producedDuration: MediaTime,
+        producedProfile: MasterProfile?
+    ) -> ExportDivergence? {
+        let divergence = ExportDivergence(
+            announcedSlotCount: announcedSlotCount,
+            producedSlotCount: producedSlotCount,
+            announcedDuration: announcedDuration,
+            producedDuration: producedDuration,
+            announcedProfile: announcedProfile,
+            producedProfile: producedProfile
+        )
+        return divergence.isSignificant ? divergence : nil
+    }
+
+    /// §66 : titre de la phase `ready` quand le fichier écrit contient MOINS
+    /// que ce qui a été annoncé. « Montage prêt » y serait un demi-mensonge :
+    /// le montage EST prêt, mais ce n'est pas celui qui a été validé.
+    static let truncatedExportTitle = "Export incomplet"
+
+    /// §66 : même situation, mais sans plan manquant — seul le profil §52
+    /// livré diffère de celui annoncé. « Incomplet » serait faux : rien ne
+    /// manque, c'est la description technique qui a changé.
+    static let divergentExportTitle = "Export différent de l'annonce"
+
+    /// Titre selon la FORME de l'écart (§66).
+    static func divergenceTitle(_ divergence: ExportDivergence) -> String {
+        divergence.hasFewerSlots ? truncatedExportTitle : divergentExportTitle
+    }
+
+    /// §66 + §8.1 : ce qui a été écrit, POURQUOI, et QUOI FAIRE.
+    ///
+    /// L'ordre est celui des questions que se pose l'utilisateur : « qu'est-ce
+    /// que j'ai obtenu ? », « pourquoi pas ce que j'avais demandé ? », « que
+    /// puis-je faire ? ». Le fichier n'est jamais présenté comme perdu — il
+    /// existe, il est partageable et enregistrable (§55/§66) — et le projet
+    /// n'a pas bougé.
+    ///
+    /// Chaque phrase n'apparaît que si elle a quelque chose à dire : comparer
+    /// « 19 plans » à « 19 plans » quand seul le profil a changé ferait passer
+    /// le message pour une erreur d'affichage.
+    static func truncatedExportMessage(_ divergence: ExportDivergence) -> String {
+        var sentences: [String] = []
+
+        if divergence.hasDifferentSlotCount || divergence.hasDifferentDuration {
+            sentences.append(
+                "Le fichier exporté contient "
+                    + plansAndDurationLabel(
+                        slotCount: divergence.producedSlotCount,
+                        duration: divergence.producedDuration
+                    )
+                    + ", au lieu des "
+                    + plansAndDurationLabel(
+                        slotCount: divergence.announcedSlotCount,
+                        duration: divergence.announcedDuration
+                    )
+                    + " annoncés."
+            )
+        }
+
+        if divergence.hasFewerSlots {
+            // §66 « asset en téléchargement : export limité avant lui » — la
+            // seule cause possible d'un montage plus court que l'annonce.
+            sentences.append(
+                "Une vidéo du montage est devenue indisponible pendant l'encodage : "
+                    + "l'export s'est arrêté avant elle."
+            )
+        }
+
+        if divergence.hasDifferentProfile,
+           let announcedProfile = divergence.announcedProfile,
+           let producedProfile = divergence.producedProfile {
+            // §52/§56 : la ligne technique annoncée décrivait le montage
+            // complet ; le fichier livré a pu changer de clip maître.
+            sentences.append(
+                "Le profil technique du fichier est "
+                    + technicalSummary(producedProfile)
+                    + ", au lieu de "
+                    + technicalSummary(announcedProfile)
+                    + "."
+            )
+        }
+
+        sentences.append(
+            divergence.hasFewerSlots
+                ? "Votre montage est intact : relancez l'export quand cette vidéo sera de nouveau disponible."
+                : "Votre montage est intact : vous pouvez relancer l'export."
+        )
+
+        return sentences.joined(separator: " ")
+    }
+
+    /// « 2160 × 3840 • Vertical • 60 i/s • SDR » — profil §52 en UNE ligne,
+    /// pour comparer deux profils dans une phrase (§66). La ligne du résumé
+    /// §56 reste `technicalLine`, sur deux lignes distinctes.
+    static func technicalSummary(_ profile: MasterProfile) -> String {
+        dimensionsLabel(width: profile.renderWidth, height: profile.renderHeight)
+            + " • "
+            + technicalLine(
+                width: profile.renderWidth,
+                height: profile.renderHeight,
+                frameRate: profile.frameRate,
+                isHDR: profile.isHDR
+            )
+    }
+
+    /// Titre de la phase `ready` selon l'origine du fichier (§60, §66).
+    static func readyTitle(origin: ReadyOrigin) -> String {
+        switch origin {
+        case .fresh: freshReadyTitle
+        case .truncated(let divergence): divergenceTitle(divergence)
+        case .restored: restoredReadyTitle
+        }
+    }
+
+    /// Message de la phase `ready` selon l'origine du fichier (§60, §66).
+    static func readyMessage(origin: ReadyOrigin) -> String {
+        switch origin {
+        case .fresh: freshReadyMessage
+        case .truncated(let divergence): truncatedExportMessage(divergence)
+        case .restored: restoredReadyMessage
+        }
+    }
+
+    /// Icône de la phase `ready` selon l'origine (§39 : l'état n'est jamais
+    /// porté par la seule couleur — ici, ni par le seul texte).
+    static func readySystemImage(origin: ReadyOrigin) -> String {
+        switch origin {
+        case .fresh: "checkmark.circle"
+        case .truncated: "exclamationmark.triangle"
+        case .restored: "clock.arrow.circlepath"
+        }
     }
 
     // MARK: - Phases de l'écran (§57, §58, §66)
@@ -521,17 +848,20 @@ enum ExportSummaryLogic {
         /// distincte (§40) : partage et enregistrement sont proposés, rien
         /// n'est fait dans le dos.
         ///
-        /// `isRestored` (§60) distingue les deux origines possibles :
-        /// - `false` — l'encodage vient de se terminer DANS cette session ;
-        /// - `true` — le fichier vient d'`exports/` (§11), retrouvé après
+        /// `origin` (§60, §66) distingue les trois origines possibles :
+        /// - `.fresh` — l'encodage vient de se terminer DANS cette session et
+        ///   le fichier correspond à ce qui a été annoncé (§56) ;
+        /// - `.truncated` — le fichier existe mais ne contient PAS le montage
+        ///   annoncé (§66 : rush devenu indisponible pendant l'encodage) ;
+        /// - `.restored` — le fichier vient d'`exports/` (§11), retrouvé après
         ///   relance de l'application. Rien ne s'est produit maintenant :
         ///   §8.1 interdit d'annoncer un succès qui n'a pas eu lieu, donc ni
         ///   le même message, ni l'haptique de réussite.
-        case ready(url: URL, isRestored: Bool)
+        case ready(url: URL, origin: ReadyOrigin)
         /// Enregistrement dans Photos en cours (§55) — déclenché par
-        /// l'utilisateur depuis `ready`. `isRestored` est TRANSPORTÉ pour que
-        /// le retour éventuel à `ready` ne change pas de discours (§60).
-        case saving(url: URL, isRestored: Bool)
+        /// l'utilisateur depuis `ready`. `origin` est TRANSPORTÉE pour que
+        /// le retour éventuel à `ready` ne change pas de discours (§60, §66).
+        case saving(url: URL, origin: ReadyOrigin)
         /// Enregistré dans Photos (§55).
         case succeeded
         /// §66 : le fichier existe et est CONSERVÉ, mais n'a pas rejoint
@@ -668,6 +998,20 @@ struct ExportSummaryView: View {
 
     private typealias ExportPhase = ExportSummaryLogic.ExportPhase
     private typealias FileKeptReason = ExportSummaryLogic.FileKeptReason
+    private typealias ReadyOrigin = ExportSummaryLogic.ReadyOrigin
+
+    // Non defini par la specification — definition minimale V1.
+    /// Ce qui a été ANNONCÉ à l'utilisateur au moment où il a appuyé sur
+    /// « Exporter » (§56), figé pour être comparé au fichier réellement écrit
+    /// (§66). Sans cette photographie, l'écran comparerait le résultat à un
+    /// résumé qui a pu changer entre-temps.
+    private struct AnnouncedMontage {
+        let slotCount: Int
+        let duration: MediaTime
+        /// Profil §52 tel qu'affiché — `nil` s'il n'avait pas encore pu être
+        /// lu : rien n'a alors été promis de ce côté, rien ne sera comparé.
+        let profile: MasterProfile?
+    }
 
     private let projectID: UUID
 
@@ -706,6 +1050,11 @@ struct ExportSummaryView: View {
     // MARK: État de l'export (§58)
 
     @State private var phase: ExportPhase = .summary
+    /// Résumé §56 EXACT au moment de l'appui sur « Exporter » — comparé au
+    /// fichier écrit par `finish()` (§66). `nil` tant qu'aucun export n'a été
+    /// lancé DEPUIS CET ÉCRAN : reprendre le suivi d'un encodage déjà en
+    /// cours (§58) n'annonce rien, il n'y a donc rien à comparer.
+    @State private var announced: AnnouncedMontage?
     /// Progression d'encodage `0...1` (§58) — valeur MESURÉE.
     @State private var progress: Double = 0
     /// Tâche de suivi (lancement + interrogation périodique + issue).
@@ -756,8 +1105,24 @@ struct ExportSummaryView: View {
     /// « Plans 28 à 50 » (une zone) / « 19 plans en 2 zones » (plusieurs) —
     /// `nil` tant qu'aucune zone n'est connue (chargement, échec de lecture,
     /// aucune case prête).
+    ///
+    /// Le nombre de plans passé est celui du DOMAINE (`ReadyTimeline.slotCount`,
+    /// déjà dans `exportedSlotCount`) : la ligne « 19 plans • 9,50 s » et la
+    /// ligne « 19 plans en 2 zones » comptent la même chose, par construction.
     private var exportedPlansLabel: String? {
-        ExportSummaryLogic.exportedPlansLabel(zones: exportedZones)
+        ExportSummaryLogic.exportedPlansLabel(
+            zones: exportedZones,
+            slotCount: exportedSlotCount
+        )
+    }
+
+    /// Pourquoi rien n'est prêt (§64) — dérivé de l'instantané chargé, pour
+    /// que le geste proposé soit celui qui débloque VRAIMENT l'export.
+    /// Sans instantané (chargement, échec de lecture), le cas le plus courant
+    /// est retenu : il n'y a alors aucune association connue.
+    private var nothingReadyCause: ExportSummaryLogic.NothingReadyCause {
+        guard let snapshot else { return .nothingFilled }
+        return ExportSummaryLogic.nothingReadyCause(slots: snapshot.slots)
     }
 
     /// « 28–35, 40–50 » — plages détaillées, `nil` en dessous de deux zones.
@@ -811,16 +1176,17 @@ struct ExportSummaryView: View {
         switch phase {
         case .summary, .starting, .exporting:
             summaryContent
-        case .ready(_, let isRestored), .saving(_, let isRestored):
+        case .ready(_, let origin), .saving(_, let origin):
             // §55 : le fichier est écrit et CONFIRMÉ ; rien n'est encore dans
             // Photos — l'enregistrement est un geste explicite (§40).
             // §60/§8.1 : un fichier RETROUVÉ après relance ne s'annonce pas
             // comme un export qui vient d'aboutir — autre icône, autre titre,
-            // autre message.
+            // autre message. §66 : un export TRONQUÉ non plus (il dit ce qui a
+            // été écrit, pourquoi, et quoi faire).
             messageContent(
-                systemImage: isRestored ? "clock.arrow.circlepath" : "checkmark.circle",
-                title: ExportSummaryLogic.readyTitle(isRestored: isRestored),
-                message: ExportSummaryLogic.readyMessage(isRestored: isRestored)
+                systemImage: ExportSummaryLogic.readySystemImage(origin: origin),
+                title: ExportSummaryLogic.readyTitle(origin: origin),
+                message: ExportSummaryLogic.readyMessage(origin: origin)
             )
         case .succeeded:
             // §55 : l'asset Photos n'existe qu'après un succès complet.
@@ -883,7 +1249,10 @@ struct ExportSummaryView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Text(ExportSummaryLogic.nothingReadyHint)
+                // §64 : le geste proposé dépend de la CAUSE — une case vide se
+                // remplit, un téléchargement s'attend, une vidéo indisponible
+                // ou trop courte se remplace.
+                Text(ExportSummaryLogic.nothingReadyHint(nothingReadyCause))
                     .font(.footnote)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
@@ -1050,8 +1419,8 @@ struct ExportSummaryView: View {
                     }
                     exportButton(title: "Exporter")
                 }
-            case .ready(let url, let isRestored):
-                readyDock(url: url, isRestored: isRestored)
+            case .ready(let url, let origin):
+                readyDock(url: url, origin: origin)
             case .succeeded:
                 HStack(spacing: 8) {
                     dockPrimaryButton(
@@ -1156,18 +1525,24 @@ struct ExportSummaryView: View {
     /// l'ajout d'une action secondaire. La rangée du bas garde les trois
     /// zones importantes §36 ; celle du haut est délibérément discrète (même
     /// forme que la rangée « Annuler » de la phase `exporting`). Elle
-    /// n'existe PAS après un export qui vient d'aboutir : y proposer
-    /// immédiatement un ré-export n'aurait aucun sens.
-    private func readyDock(url: URL, isRestored: Bool) -> some View {
+    /// n'existe PAS après un export qui vient d'aboutir CONFORMÉMENT à
+    /// l'annonce : y proposer immédiatement un ré-export n'aurait aucun sens.
+    ///
+    /// §66 — RÉSULTAT TRONQUÉ : la même rangée secondaire est proposée
+    /// (« Exporter à nouveau »), parce que c'est précisément le geste que le
+    /// message demande — relancer quand la vidéo manquante sera revenue. Le
+    /// fichier incomplet reste partageable et enregistrable : il existe, et
+    /// l'utilisateur reste libre de le garder.
+    private func readyDock(url: URL, origin: ReadyOrigin) -> some View {
         VStack(spacing: 8) {
-            if isRestored {
+            if origin != .fresh {
                 let canExportAgain = hasExportableMontage && loadErrorMessage == nil
                 HStack(spacing: 8) {
                     dockSecondaryButton(
                         title: "Exporter à nouveau",
                         accessibilityHint: canExportAgain
                             ? "Relance un export du montage. Le fichier précédent sera remplacé."
-                            : "Remplissez au moins une case pour exporter."
+                            : ExportSummaryLogic.nothingReadyShortHint(nothingReadyCause)
                     ) {
                         startExport()
                     }
@@ -1293,10 +1668,14 @@ struct ExportSummaryView: View {
         // « estompé » + hint), jamais par la seule couleur (§39).
         .opacity(isEnabled ? 1 : 0.4)
         .accessibilityLabel(title)
+        // §64 : désactivé, le hint nomme le geste qui débloque VRAIMENT
+        // l'export — remplir, attendre un téléchargement, ou remplacer une
+        // vidéo indisponible ; jamais « remplissez une case » quand toutes le
+        // sont déjà.
         .accessibilityHint(
             isEnabled
                 ? "Lance l'export du montage déjà prêt. Gardez l'application ouverte pendant l'export."
-                : "Remplissez au moins une case pour exporter."
+                : ExportSummaryLogic.nothingReadyShortHint(nothingReadyCause)
         )
     }
 
@@ -1395,7 +1774,11 @@ struct ExportSummaryView: View {
         if let current = await environment.exportActor.currentProgress(projectID: projectID) {
             progress = current
             phase = .exporting
-            monitorExport(startsNewExport: false)
+            // Encodage lancé AVANT l'ouverture de cet écran : rien n'a été
+            // annoncé ici (`announced` reste nil), il n'y aura donc rien à
+            // comparer à l'issue — l'écran ne peut pas reprocher un écart à
+            // une annonce qu'il n'a pas faite (§66).
+            monitorExport(snapshotToEncode: nil)
         } else {
             await restoreLastOutcome()
         }
@@ -1418,7 +1801,7 @@ struct ExportSummaryView: View {
     /// (`isRestored == true`). Les deux cas mènent à la phase `ready` — le
     /// fichier est réellement là, donc partageable (§66) et enregistrable
     /// dans Photos (§40/§55) — mais l'écran ne raconte pas la même histoire
-    /// (voir `ExportSummaryLogic.readyTitle(isRestored:)`).
+    /// (voir `ExportSummaryLogic.readyTitle(origin:)`).
     ///
     /// Une erreur exposée par l'acteur (annulation, interruption) a la
     /// PRIORITÉ : elle décrit le dernier événement, alors que le fichier
@@ -1428,6 +1811,13 @@ struct ExportSummaryView: View {
     /// nombre de plans valent zéro (§10 : aucune colonne ne décrit un export,
     /// le fichier est la seule trace). Le résumé §56 continue d'afficher les
     /// valeurs du PROJET, jamais celles de l'export d'avant.
+    ///
+    /// LIMITE ASSUMÉE (§66) : un fichier retrouvé n'est jamais annoncé comme
+    /// TRONQUÉ, même s'il l'était. L'écart ne se mesure que par rapport à une
+    /// ANNONCE, et l'annonce vit le temps de cet écran (`announced`) ; comparer
+    /// un fichier d'avant au montage d'aujourd'hui inventerait des écarts à
+    /// chaque case ajoutée depuis. L'écran qui a lancé l'export a, lui, dit la
+    /// vérité au moment où elle était vérifiable.
     private func restoreLastOutcome() async {
         guard case .summary = phase else { return }
         if await environment.exportActor.lastError(projectID: projectID) != nil { return }
@@ -1435,7 +1825,9 @@ struct ExportSummaryView: View {
             return
         }
         guard !Task.isCancelled else { return } // écran fermé (§8)
-        phase = .ready(url: outcome.outputURL, isRestored: outcome.isRestored)
+        // §60 : ce fichier ne décrit aucun encodage de cette session — ni
+        // succès à annoncer, ni écart à mesurer (ses mesures valent zéro).
+        phase = .ready(url: outcome.outputURL, origin: outcome.isRestored ? .restored : .fresh)
     }
 
     /// Profil maître §52 — lu auprès de l'EXPORTATEUR, source UNIQUE.
@@ -1464,20 +1856,30 @@ struct ExportSummaryView: View {
 
         // §57 : « estimer la taille ; vérifier l'espace disponible ; refuser
         // proprement si insuffisant » — le refus arrive AVANT l'encodage, avec
-        // un message clair. La RÈGLE est celle de l'exportateur
-        // (`requireSufficientStorage`, source unique) et l'estimation porte
-        // déjà sa marge : aucune seconde marge n'est ajoutée ici, sinon cet
-        // écran refuserait des exports que l'exportateur accepterait.
+        // un message clair.
+        //
+        // CORRECTIF (relecture adversariale du 13 août 2026) : la RÈGLE est
+        // celle de l'exportateur, qui exige la place de l'encodage ET celle de
+        // la copie Photos (`requiredBytesIncludingPhotosCopy`, §57 —
+        // `PHAssetCreationRequest` COPIE le fichier, le montage occupe donc
+        // deux fois sa taille à l'instant de l'ajout). Cet écran ne vérifiait
+        // que l'estimation NUE : il laissait donc démarrer des exports que
+        // l'exportateur refusait aussitôt — et le commentaire affirmait
+        // l'inverse de ce que faisait le code (« aucune seconde marge n'est
+        // ajoutée ici, sinon cet écran refuserait des exports que
+        // l'exportateur accepterait »). Même seuil des deux côtés : même
+        // verdict, et le refus est expliqué ici plutôt que subi là-bas.
+        //
         // Sans profil §52 (information manquante), la vérification est laissée
         // à l'exportateur, qui la refait avant d'écrire quoi que ce soit.
         if let profile {
-            let requiredBytes = environment.projectExporter.estimatedBytes(
+            let estimatedBytes = environment.projectExporter.estimatedBytes(
                 project: snapshot,
                 profile: profile
             )
             do {
                 try ProjectExporter.requireSufficientStorage(
-                    requiredBytes: requiredBytes,
+                    requiredBytes: ProjectExporter.requiredBytesIncludingPhotosCopy(estimatedBytes),
                     availableBytes: availableCapacityBytes()
                 )
             } catch let error as ExportError {
@@ -1494,10 +1896,19 @@ struct ExportSummaryView: View {
         // influencer l'haptique de celle qui vient (§38).
         didInterruptForBackground = false
         progress = 0
+        // §56/§66 : ce que l'utilisateur a sous les yeux au moment d'appuyer —
+        // figé ICI pour être comparé au fichier écrit (voir `finish()`).
+        announced = AnnouncedMontage(
+            slotCount: exportedSlotCount,
+            duration: exportDuration,
+            profile: profile
+        )
         // §58 : « export en cours » n'est affiché qu'une fois le démarrage
         // CONFIRMÉ par l'acteur — en attendant, une phase d'attente neutre.
         phase = .starting
-        monitorExport(startsNewExport: true)
+        // L'instantané ANNONCÉ part à l'encodage : c'est exactement celui-là
+        // qui sera écrit, jamais une relecture plus fraîche du projet.
+        monitorExport(snapshotToEncode: snapshot)
     }
 
     /// Suivi d'un export, du lancement à l'issue (§58).
@@ -1510,20 +1921,33 @@ struct ExportSummaryView: View {
     /// Sans ce résultat, un refus laissait lire `lastOutcome` du run
     /// PRÉCÉDENT et pouvait annoncer un succès qui n'avait pas eu lieu (§8.1).
     ///
+    /// **L'INSTANTANÉ ANNONCÉ est celui qui est encodé** (correctif de la
+    /// relecture adversariale du 13 août 2026, contrat partagé avec l'agent
+    /// Cœur) : `snapshotToEncode` est exactement l'instantané dont le résumé
+    /// §56 a été tiré. Sans lui, l'acteur relisait le projet à l'appui — un
+    /// téléchargement iCloud terminé entre-temps ajoutait une zone, un rush
+    /// disparu en retirait une, et l'utilisateur obtenait un montage qu'il
+    /// n'avait pas validé (§3 : jamais de résultat silencieusement
+    /// différent). `nil` = simple OBSERVATION d'un encodage déjà en cours :
+    /// rien n'est lancé, donc rien n'est annoncé.
+    ///
     /// La fin de l'encodage ne se déduit pas du retour de `startExport` (qui
     /// rend la main aussitôt) mais de la disparition de la progression
     /// (`currentProgress == nil`), ce qui couvre du même coup l'écran rouvert
-    /// pendant un encodage déjà lancé (`startsNewExport: false`).
+    /// pendant un encodage déjà lancé (`snapshotToEncode: nil`).
     ///
     /// Un SEUL suivi vit à la fois (`monitorTask`) : deux suivis simultanés
     /// pourraient présenter deux issues contradictoires.
-    private func monitorExport(startsNewExport: Bool) {
+    private func monitorExport(snapshotToEncode: ProjectSnapshot?) {
         let exportActor = environment.exportActor
         let id = projectID
         monitorTask?.cancel()
         monitorTask = Task {
-            if startsNewExport {
-                let startResult = await exportActor.startExport(projectID: id)
+            if let snapshotToEncode {
+                let startResult = await exportActor.startExport(
+                    projectID: id,
+                    snapshot: snapshotToEncode
+                )
                 // Suivi annulé PENDANT l'attente (écran fermé §8, passage en
                 // arrière-plan §8.1) : ne rien réécrire — un `phase` posé ici
                 // écraserait le message d'interruption déjà affiché.
@@ -1571,6 +1995,17 @@ struct ExportSummaryView: View {
     /// interruption est annoncée, jamais avalée) ; à défaut, le fichier
     /// produit est proposé à l'enregistrement et au partage (§55 : Photos
     /// seulement sur geste explicite de l'utilisateur).
+    ///
+    /// **Le succès n'est annoncé PLEIN que s'il l'est** (§66, §8.1 —
+    /// correctif de la relecture adversariale du 13 août 2026) :
+    /// `ExportOutcome` décrit le FICHIER écrit (nombre de plans, durée, et
+    /// profil §52 réellement utilisé). Quand un rush devient indisponible
+    /// PENDANT l'encodage, l'exportateur TRONQUE le montage (§66 : « asset en
+    /// téléchargement : export limité avant lui ») — le fichier existe, mais
+    /// il n'est pas celui qui a été validé. Ces mesures sont donc comparées à
+    /// l'annonce figée à l'appui (`announced`), et tout écart devient une
+    /// origine `.truncated` : l'écran dit ce qui a été écrit, pourquoi, et
+    /// quoi faire.
     private func finish() async {
         let exportActor = environment.exportActor
         let lastError = await exportActor.lastError(projectID: projectID)
@@ -1595,10 +2030,53 @@ struct ExportSummaryView: View {
         }
         progress = 1
         // §8.1 : le succès n'est annoncé qu'ICI, sur confirmation effective de
-        // l'écriture du fichier par l'acteur. `isRestored` est repris tel
-        // quel : un fichier remonté d'`exports/` (§60) ne devient pas l'issue
-        // du run qui vient de se terminer.
-        phase = .ready(url: outcome.outputURL, isRestored: outcome.isRestored)
+        // l'écriture du fichier par l'acteur. Un fichier remonté d'`exports/`
+        // (§60) ne devient pas l'issue du run qui vient de se terminer.
+        phase = .ready(url: outcome.outputURL, origin: readyOrigin(for: outcome))
+    }
+
+    /// Origine à annoncer pour un fichier produit (§60, §66) — voir
+    /// `finish()`.
+    ///
+    /// L'écart n'est cherché que si CET écran a annoncé quelque chose
+    /// (`announced`) et que l'issue décrit bien un encodage de cette session
+    /// (`isRestored == false` : les mesures d'un fichier restauré valent zéro,
+    /// les comparer inventerait une troncature à tous les coups).
+    private func readyOrigin(for outcome: ExportOutcome) -> ReadyOrigin {
+        guard !outcome.isRestored, let announced else {
+            return outcome.isRestored ? .restored : .fresh
+        }
+        guard let divergence = ExportSummaryLogic.divergence(
+            announcedSlotCount: announced.slotCount,
+            announcedDuration: announced.duration,
+            announcedProfile: announced.profile,
+            producedSlotCount: outcome.slotCount,
+            producedDuration: outcome.duration,
+            producedProfile: producedProfile(of: outcome)
+        ) else {
+            return .fresh
+        }
+        // §69A : uniquement des nombres, aucun nom de fichier ni identifiant
+        // d'asset — mais l'écart est journalisé, il ne disparaît pas avec
+        // l'écran.
+        environment.logger.error(
+            "Export livré différent de l'annonce (§66) : "
+            + "\(divergence.producedSlotCount) plans / \(divergence.producedDuration.ticks) ticks écrits, "
+            + "\(divergence.announcedSlotCount) plans / \(divergence.announcedDuration.ticks) ticks annoncés."
+        )
+        return .truncated(divergence)
+    }
+
+    /// Profil maître §52 RÉELLEMENT utilisé par l'encodage, tel que l'acteur
+    /// d'export l'expose sur son issue (contrat partagé avec l'agent Cœur :
+    /// `ExportResult.masterProfile` décrit le fichier écrit, alors que le
+    /// profil annoncé §56 portait sur la timeline complète).
+    ///
+    /// `nil` quand l'issue ne le porte pas : on ne compare jamais l'annonce à
+    /// une valeur inconnue — un profil « différent » inventé serait exactement
+    /// le mensonge que ce correctif supprime.
+    private func producedProfile(of outcome: ExportOutcome) -> MasterProfile? {
+        outcome.masterProfile
     }
 
     /// §58 : annulation possible à tout moment pendant l'encodage. L'acteur
@@ -1668,8 +2146,8 @@ struct ExportSummaryView: View {
     /// cette règle, elle en traite seulement l'issue.
     /// §66 : refus → le fichier est CONSERVÉ, partage et Réglages proposés.
     private func saveToPhotos() {
-        guard case .ready(let url, let isRestored) = phase else { return }
-        phase = .saving(url: url, isRestored: isRestored)
+        guard case .ready(let url, let origin) = phase else { return }
+        phase = .saving(url: url, origin: origin)
         let saver = environment.photoLibrarySaver
         let logger = environment.logger
         Task {
@@ -1733,8 +2211,11 @@ struct ExportSummaryView: View {
             return loadErrorMessage
         }
         guard hasExportableMontage else {
+            // §39/§64 : la MÊME raison et le MÊME geste qu'à l'écran — jamais
+            // « remplissez une case » à l'oreille quand l'écran dit
+            // « attendez le téléchargement ».
             return ExportSummaryLogic.nothingReadyTitle + " "
-                + ExportSummaryLogic.nothingReadyHint
+                + ExportSummaryLogic.nothingReadyHint(nothingReadyCause)
         }
         var spoken: String
         if let profile {
@@ -1780,20 +2261,24 @@ struct ExportSummaryView: View {
     // MARK: - Haptique d'issue (§38)
 
     /// Retour tactile d'une phase TERMINALE (§38) :
-    /// - `ready` **non restauré** (fichier écrit à l'instant §55) et
-    ///   `succeeded` (ajouté à Photos) → impact LÉGER, le même que celui
-    ///   d'une association réussie ;
-    /// - `insufficientStorage` (§57), `failed` **d'origine technique** (§66)
-    ///   et `fileKept` (§66 : l'export existe mais n'a pas rejoint Photos) →
-    ///   notification d'ERREUR ;
+    /// - `ready(origin: .fresh)` (fichier écrit à l'instant §55, conforme à
+    ///   l'annonce) et `succeeded` (ajouté à Photos) → impact LÉGER, le même
+    ///   que celui d'une association réussie ;
+    /// - `insufficientStorage` (§57), `failed` **d'origine technique** (§66),
+    ///   `fileKept` (§66 : l'export existe mais n'a pas rejoint Photos) et
+    ///   `ready(origin: .truncated)` (§66 : le fichier n'est pas le montage
+    ///   validé) → notification d'ERREUR ;
     /// - `cancelled` (§58 : l'utilisateur a demandé l'arrêt), `summary`,
     ///   `starting`, `exporting`, `saving` → RIEN : ni réussite, ni panne.
     ///
-    /// DEUX phases terminales sont AMBIGUËS et se lisent au drapeau d'origine,
-    /// jamais au seul cas d'énumération :
-    /// - `ready(isRestored: true)` (§60) — le fichier a été RETROUVÉ après
+    /// DEUX phases terminales sont AMBIGUËS et se lisent à l'ORIGINE, jamais
+    /// au seul cas d'énumération :
+    /// - `ready(origin: .restored)` (§60) — le fichier a été RETROUVÉ après
     ///   relance ; rien n'a réussi maintenant, vibrer « réussite » serait
-    ///   exactement le faux succès que §8.1 interdit ;
+    ///   exactement le faux succès que §8.1 interdit. `ready(origin:
+    ///   .truncated)` (§66) est un cas symétrique : le fichier est écrit, mais
+    ///   ce n'est pas le montage validé — c'est l'haptique d'ERREUR qui
+    ///   convient (§38 : « asset invalide », c'est précisément la cause) ;
     /// - `failed` produite par un passage en ARRIÈRE-PLAN pendant l'encodage
     ///   (§8.1, `didInterruptForBackground`) — interruption normale demandée
     ///   par l'utilisateur lui-même, pas un échec : §38 réserve l'haptique
@@ -1801,9 +2286,12 @@ struct ExportSummaryView: View {
     ///   d'interruption, lui, reste affiché.
     private func playHaptic(for newPhase: ExportPhase) {
         switch newPhase {
-        case .ready(_, let isRestored):
-            guard !isRestored else { break } // §60/§8.1 : aucun succès à annoncer
-            ExportHaptics.success()
+        case .ready(_, let origin):
+            switch origin {
+            case .fresh: ExportHaptics.success()
+            case .truncated: ExportHaptics.error() // §66 : succès PARTIEL, pas un succès
+            case .restored: break // §60/§8.1 : aucun succès à annoncer
+            }
         case .succeeded:
             ExportHaptics.success()
         case .failed:

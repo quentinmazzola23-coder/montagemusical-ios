@@ -11,8 +11,7 @@
 //  CHANGEMENT PRODUIT (contrat complet dans `ExportModels.swift`) : l'aperçu
 //  principal §47.2 n'est plus celui du PRÉFIXE, ni celui d'un SEGMENT unique,
 //  mais celui de la TIMELINE CONCATÉNÉE — toutes les zones remplies mises
-//  bout à bout, les cases vides étant SUPPRIMÉES (vidéo ET musique). On
-//  prévisualise donc EXACTEMENT le fichier qui sera exporté.
+//  bout à bout, les cases vides étant SUPPRIMÉES (vidéo ET musique).
 //
 //  Conséquences pour ce fichier :
 //  - une insertion de musique PAR RUN (et non une par case : inutile, et cela
@@ -26,6 +25,28 @@
 //  aucun écran noir n'est ajouté. La musique SAUTE à chaque jonction entre
 //  runs : conséquence assumée de « n'exporte que les parties avec de la
 //  vidéo ».
+//
+//  ─────────────────────────────────────────────────────────────────────
+//  CE QUE L'APERÇU PROMET — ET CE QU'IL NE PROMET PAS
+//  ─────────────────────────────────────────────────────────────────────
+//
+//  **Identique à l'export** : le DÉCOUPAGE. Les positions de composition et
+//  les portions de musique viennent des MÊMES fonctions du domaine
+//  (`ReadyTimeline.placements` / `.musicInsertions`) que celles que consomme
+//  `ProjectExporter.assemble` — un seul calcul, donc les mêmes instants, les
+//  mêmes coupes, la même durée. La résolution des rushs suit elle aussi le
+//  chemin de l'export (`MediaLibraryActor.exportableVideoURL`), pour qu'un
+//  rush recomposé par Photos (ralenti, timelapse, §52.3) soit visible à
+//  l'aperçu exactement comme il sera exporté, et non refusé — seul le dossier
+//  d'accueil du fichier intermédiaire diffère (`previews/` ici, `temp/` à
+//  l'export, pour la raison expliquée sur `insertVideo`).
+//
+//  **DIFFÉRENT de l'export** : le RENDU. L'aperçu rend à une cadence de
+//  travail (1/30) et dimensionne sur le premier rush de la portée, là où
+//  l'export applique le PROFIL MAÎTRE §52 (résolution, cadence exacte
+//  29,97/59,94, colorimétrie §52.4) puis ré-encode (§55). L'aperçu montre donc
+//  le MONTAGE qui sera exporté, jamais l'IMAGE finale au pixel près : aucune
+//  promesse de « fichier exact » n'est faite ici.
 //
 
 import AVFoundation
@@ -103,8 +124,11 @@ enum PreviewError: Error, Equatable, LocalizedError {
             return "Une vidéo du montage est encore dans iCloud "
                 + "(\(identifier)). Attendez la fin de son téléchargement, puis réessayez."
         case .incompletePrefix:
+            // Le montage n'est plus un « début » : c'est la concaténation de
+            // toutes les zones prêtes, où qu'elles se trouvent dans le
+            // morceau. Le message ne doit plus parler de début.
             return "Le montage n'est pas encore complet. "
-                + "Prévisualisez le début déjà prêt, ou remplissez les cases restantes."
+                + "Prévisualisez les zones déjà prêtes, ou remplissez les cases restantes."
         }
     }
 }
@@ -176,8 +200,9 @@ extension PreviewError {
 ///   AVFoundation côté lecture ;
 /// - aucun objet AVFoundation ne traverse une frontière d'acteur : la
 ///   photothèque ne rend qu'une `URL` (`Sendable`) via
-///   `MediaLibraryActor.videoAssetURL(id:allowNetwork:)`, et chaque
-///   `AVURLAsset` est reconstruit ici.
+///   `MediaLibraryActor.exportableVideoURL(id:allowNetwork:intermediateDirectory:)`
+///   — le MÊME chemin de résolution que l'export —, et chaque `AVURLAsset` est
+///   reconstruit ici.
 ///
 /// Le travail lourd reste hors du fil principal : les chargements
 /// AVFoundation (`loadTracks`, `load(.duration)`, `load(.naturalSize)`) sont
@@ -274,7 +299,7 @@ struct PreviewBuilder: Sendable {
 
         return try await assembleComposition(
             project: project,
-            placements: [Placement(slot: slot, compositionStart: .zero)],
+            placements: [SlotPlacement(slot: slot, compositionStart: .zero)],
             // UNE seule portion de musique : le passage ABSOLU de la case,
             // posé à l'instant 0 (§47.1). L'aperçu local est INCHANGÉ par le
             // changement produit — il ne connaît ni run ni timeline.
@@ -293,17 +318,20 @@ struct PreviewBuilder: Sendable {
     /// Aperçu principal (§47.2), **version changement produit** : c'est
     /// l'aperçu de la TIMELINE CONCATÉNÉE — toutes les zones remplies mises
     /// bout à bout, les cases vides ou non prêtes étant SUPPRIMÉES (vidéo ET
-    /// musique). On prévisualise donc exactement le fichier exporté.
+    /// musique). On prévisualise donc le MONTAGE qui sera exporté : mêmes
+    /// coupes, mêmes instants, même durée (le rendu, lui, diffère — voir
+    /// l'en-tête du fichier).
     ///
     /// La timeline vient de `readyTimeline(slots:)` — jamais recalculée ici.
     /// Chaque case garde son temps musical ABSOLU : aucune n'est réécrite
-    /// (§3.12). Ce qui change, c'est la façon de POSER les portions :
-    /// - musique : UNE insertion PAR RUN — portion
-    ///   `[run.musicStart, run.musicEnd]` du fichier original, posée à
-    ///   `timeline.compositionStart(ofRun:)`. Une insertion par CASE serait
+    /// (§3.12). Ce qui change, c'est la façon de POSER les portions, et ces
+    /// positions sont LUES sur la timeline, jamais recomposées ici :
+    /// - musique : UNE insertion PAR RUN (`timeline.musicInsertions`) —
+    ///   portion `[run.musicStart, run.musicEnd]` du fichier original, posée à
+    ///   la position de composition du run. Une insertion par CASE serait
     ///   inutile (les cases d'un run sont jointives) et multiplierait les
     ///   coupures audio à l'intérieur d'une zone remplie ;
-    /// - vidéo de la case `i` : posée à `timeline.compositionStart(of:)`,
+    /// - vidéo : chaque case à l'instant que lui donne `timeline.placements`,
     ///   soit `.zero` pour la première case du premier run.
     ///
     /// On entend donc EXACTEMENT le passage musical de chaque zone remplie, et
@@ -335,62 +363,26 @@ struct PreviewBuilder: Sendable {
 
         // Concaténation des runs : temps musicaux ABSOLUS conservés dans les
         // cases, position finale calculée en ticks entiers (§9) — jamais par
-        // une réécriture des cases. `runStarts` fait le cumul en UN parcours,
-        // et c'est LE MÊME calcul que l'export (`ReadyTimeline`), donc les
-        // mêmes instants à l'image près.
-        var placements: [Placement] = []
-        var musicInsertions: [MusicInsertion] = []
-        placements.reserveCapacity(timeline.slotCount)
-        musicInsertions.reserveCapacity(timeline.runs.count)
-
-        for (run, runStart) in zip(timeline.runs, timeline.runStarts) {
-            for slot in run.slots {
-                placements.append(
-                    Placement(slot: slot, compositionStart: runStart + run.offset(of: slot))
-                )
-            }
-            musicInsertions.append(
-                MusicInsertion(
-                    sourceStart: run.musicStart,
-                    duration: run.duration,
-                    compositionStart: runStart
-                )
-            )
-        }
-
+        // une réécriture des cases. Ces deux dérivations sont celles du
+        // DOMAINE, littéralement les mêmes fonctions que consomme
+        // `ProjectExporter.assemble` : l'aperçu et l'export ne peuvent pas
+        // diverger, puisqu'il n'existe qu'UN calcul de positions.
         return try await assembleComposition(
             project: project,
-            placements: placements,
-            musicInsertions: musicInsertions
+            placements: timeline.placements,
+            musicInsertions: timeline.musicInsertions
         )
     }
 
     // MARK: - Composition (§48, §54)
 
-    /// Position d'une case dans la composition : la case elle-même et son
-    /// temps de départ DANS la composition (`.zero` pour un aperçu local
-    /// §47.1, `position du run + slot.start - run.musicStart` pour l'aperçu
-    /// principal §47.2 — le temps musical absolu de la case reste intact,
-    /// §53).
-    private struct Placement {
-        let slot: ProjectSlot
-        let compositionStart: MediaTime
-    }
-
-    /// Portion de musique à insérer : le passage ABSOLU
-    /// `[sourceStart, sourceStart + duration]` du fichier original, posé à
-    /// `compositionStart` dans la composition.
-    ///
-    /// Une portion par RUN pour l'aperçu principal (§47.2), une seule pour un
-    /// aperçu local (§47.1). Les portions sont JOINTIVES dans la composition
-    /// par construction (la position d'un run est la somme des durées des
-    /// précédents) : la piste musicale n'a aucun trou, elle SAUTE simplement
-    /// d'un passage du morceau à l'autre.
-    private struct MusicInsertion {
-        let sourceStart: MediaTime
-        let duration: MediaTime
-        let compositionStart: MediaTime
-    }
+    // `SlotPlacement` (case + instant de composition) et `MusicInsertion`
+    // (portion de musique posée à un instant) sont les types du DOMAINE
+    // (`ExportModels.swift`) : l'aperçu principal les reçoit de
+    // `ReadyTimeline.placements` / `.musicInsertions` — exactement comme
+    // l'export — et l'aperçu local §47.1 en construit un seul, posé à l'instant
+    // zéro. Aucun type local ne les duplique : deux définitions parallèles
+    // seraient deux occasions de diverger.
 
     /// Segment vidéo inséré : plage occupée dans la composition et géométrie
     /// source, mémorisées pour construire les instructions (§54.6/§54.7)
@@ -406,7 +398,7 @@ struct PreviewBuilder: Sendable {
     /// mis en cache (§48) : pistes + plan de rendu géométrique.
     private func assembleComposition(
         project: ProjectSnapshot,
-        placements: [Placement],
+        placements: [SlotPlacement],
         musicInsertions: [MusicInsertion]
     ) async throws -> CachedComposition {
         guard !placements.isEmpty else { throw PreviewError.emptyScope }
@@ -428,7 +420,11 @@ struct PreviewBuilder: Sendable {
         var segments: [Segment] = []
         segments.reserveCapacity(placements.count)
         for placement in placements {
-            segments.append(try await insertVideo(placement, into: videoTrack))
+            segments.append(try await insertVideo(
+                placement,
+                projectID: project.projectID,
+                into: videoTrack
+            ))
         }
 
         let musicEnd = try await insertMusic(
@@ -472,6 +468,28 @@ struct PreviewBuilder: Sendable {
     ///    absolu de la case RAMENÉ dans la timeline concaténée, §53) ;
     /// 5. ignorer les pistes audio source (§48 : aucune piste audio de rush).
     ///
+    /// **Résolution ALIGNÉE sur l'export.** La preview passait autrefois par
+    /// `MediaLibraryActor.videoAssetURL`, qui REFUSE un rush recomposé par
+    /// PhotoKit (ralenti, timelapse, montage Photos appliqué — livré comme
+    /// `AVComposition`, §52.3) : un rush parfaitement exportable était alors
+    /// annoncé « indisponible » à l'aperçu, et l'utilisateur n'avait aucun
+    /// moyen de voir ce qu'il allait exporter. `exportableVideoURL` est le
+    /// chemin de l'export : un rush livré comme fichier est utilisé TEL QUEL
+    /// (aucune copie, cas courant), et seul un rush recomposé est matérialisé.
+    /// `allowNetwork: false` reste vrai (§44 : jamais de téléchargement iCloud
+    /// surprise pendant une lecture).
+    ///
+    /// **Le fichier intermédiaire va dans `previews/`, PAS dans `temp/`
+    /// (§11).** L'export vide `temp/` à chaque passage
+    /// (`clearTemporaryFiles`) : une composition d'aperçu MISE EN CACHE (§48)
+    /// qui y pointerait deviendrait muette après le premier export, sans que
+    /// rien ne l'invalide. `previews/` est justement le dossier des matières
+    /// d'aperçu ; le nom du fichier est déterministe, donc il n'est
+    /// matérialisé qu'UNE fois par rush et réutilisé par tous les aperçus
+    /// suivants. Le prix payé est une matérialisation de plus que l'export
+    /// (qui garde la sienne dans `temp/`), pour les seuls rushs recomposés —
+    /// et le dossier disparaît avec le projet (§31).
+    ///
     /// Les échecs de photothèque sont DISCRIMINÉS (§40, §44, §64) : accès
     /// refusé, rush encore dans iCloud, ou rush à remplacer — trois actions
     /// utilisateur différentes, trois messages différents. Un échec inconnu
@@ -479,7 +497,8 @@ struct PreviewBuilder: Sendable {
     /// case est en cause. L'annulation (§8) est propagée telle quelle, jamais
     /// déguisée en erreur d'asset.
     private func insertVideo(
-        _ placement: Placement,
+        _ placement: SlotPlacement,
+        projectID: UUID,
         into videoTrack: AVMutableCompositionTrack
     ) async throws -> Segment {
         guard let assignment = placement.slot.assignment else {
@@ -493,7 +512,17 @@ struct PreviewBuilder: Sendable {
             // téléchargement iCloud surprise. Un fichier évincé depuis
             // devient `assetUnavailable` (§48 : « un asset devient
             // indisponible » invalide le cache).
-            let url = try await mediaLibrary.videoAssetURL(id: identifier, allowNetwork: false)
+            //
+            // MÊME résolution que l'export (§52.3, §54 étape 1) : un rush
+            // recomposé par Photos est matérialisé au lieu d'être refusé.
+            // Destination `previews/` et non `temp/` : l'export vide `temp/`,
+            // ce qui rendrait muette une composition mise en cache (§48) —
+            // voir la documentation de cette méthode.
+            let url = try await mediaLibrary.exportableVideoURL(
+                id: identifier,
+                allowNetwork: false,
+                intermediateDirectory: fileStore.subdirectoryURL(.previews, for: projectID)
+            )
             let asset = AVURLAsset(url: url)
 
             let videoTracks = try await asset.loadTracks(withMediaType: .video)

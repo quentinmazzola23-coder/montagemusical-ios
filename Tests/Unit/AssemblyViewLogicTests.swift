@@ -16,6 +16,21 @@
 //    (`exportedZonePositions` / `exportedZoneIndexes`) et énoncé VoiceOver
 //    associé.
 //
+//  RELECTURE ADVERSARIALE (13 août 2026) — trois familles de tests ajoutées :
+//  - **zones de l'interface == runs du DOMAINE** : deux découpages en zones
+//    coexistent (le domaine `readyTimeline(slots:)`, qui pilote réellement
+//    l'export, et l'interface `exportedZonePositions(items:)`, qui dessine les
+//    crochets §35.3 et nomme le montage). Rien ne les comparait. Une MATRICE
+//    d'arrangements vérifie désormais qu'ils rendent exactement les mêmes
+//    bornes et le même nombre de plans par zone — c'est la seule garantie que
+//    l'utilisateur voit ce qui part vraiment ;
+//  - **compte de plans faisant autorité** (`exportedSlotCount`) : il ne se
+//    déduit plus de la largeur des plages d'index, qui compte les index
+//    manquants ;
+//  - **§64 cause du blocage** (`nothingReadyCause`) : une case REMPLIE mais non
+//    prête n'appelle pas le même geste qu'une case vide, et les deux
+//    vocabulaires (états d'affichage, statuts §13.3) doivent conclure pareil.
+//
 //  ÉCART PRODUIT — EXPORT CONCATÉNÉ DES ZONES REMPLIES (13 août 2026, demande
 //  utilisateur postérieure à la spécification). Les tests d'export ont changé
 //  de VERDICT, pas seulement de nom :
@@ -75,6 +90,61 @@ final class AssemblyViewLogicTests: XCTestCase {
     /// Suite de cases d'affichage à partir d'états, index contigus depuis 0.
     private func makeItems(_ states: [AssemblySlotState]) -> [AssemblySlotItem] {
         states.enumerated().map { makeItem(index: $0.offset, state: $0.element) }
+    }
+
+    /// Le MÊME arrangement vu des deux côtés : cases du domaine
+    /// (`ProjectSlot`, ce que l'export lit) et cases d'affichage
+    /// (`AssemblySlotItem`, ce que l'écran dessine). Les index et les durées
+    /// sont identiques des deux côtés — seule la dérivation d'état diffère,
+    /// et c'est précisément ce qu'on veut comparer.
+    private func makeArrangement(
+        _ statuses: [ClipAssignmentStatus?],
+        firstIndex: Int = 0
+    ) -> (slots: [ProjectSlot], items: [AssemblySlotItem]) {
+        var slots: [ProjectSlot] = []
+        var items: [AssemblySlotItem] = []
+        var startTicks: Int64 = 0
+        for (position, status) in statuses.enumerated() {
+            let index = firstIndex + position
+            slots.append(makeSlot(
+                index: index,
+                startTicks: startTicks,
+                endTicks: startTicks + 45_000,
+                status: status
+            ))
+            items.append(AssemblySlotItem(
+                id: slots[position].id,
+                index: index,
+                start: MediaTime(ticks: startTicks),
+                end: MediaTime(ticks: startTicks + 45_000),
+                state: AssemblySlotState.from(assignmentStatusRaw: status?.rawValue)
+            ))
+            startTicks += 45_000
+        }
+        return (slots, items)
+    }
+
+    /// Matrice d'arrangements couvrant tout ce qui peut arriver à une case :
+    /// vide, en cours (§44), prête, bloquée (§64, §3.8), aux extrémités comme
+    /// au milieu, en une zone comme en plusieurs.
+    private var arrangements: [[ClipAssignmentStatus?]] {
+        [
+            [],
+            [nil],
+            [.ready],
+            [.downloading],
+            [nil, .ready],
+            [.ready, nil],
+            [.ready, nil, .ready],
+            [.ready, .ready, nil, .ready, .ready],
+            [.downloading, .ready],
+            [nil, .resolving, .unavailable],
+            [.ready, .ready, .tooShort, .ready],
+            [nil, .ready, .ready, nil, .ready, .ready],
+            [.ready, .unavailable, .ready, .downloading, .ready, nil, .ready],
+            [.tooShort, .resolving, .downloading, .unavailable, nil],
+            [.ready, .ready, .ready, .ready]
+        ]
     }
 
     // MARK: - Clamp de l'index actif (§60)
@@ -334,32 +404,160 @@ final class AssemblyViewLogicTests: XCTestCase {
         // variante « snapshots » (source du domaine) doivent rendre le MÊME
         // verdict : sans cela, le dock proposerait un export que l'écran
         // suivant refuserait.
-        let arrangements: [[ClipAssignmentStatus?]] = [
-            [],
-            [nil],
-            [.ready],
-            [nil, .ready],
-            [.ready, nil, .ready],
-            [.downloading, .ready],
-            [nil, .resolving, .unavailable],
-            [.ready, .ready, .tooShort, .ready]
-        ]
         for statuses in arrangements {
-            var startTicks: Int64 = 0
-            var slots: [ProjectSlot] = []
-            for (index, status) in statuses.enumerated() {
-                slots.append(makeSlot(
-                    index: index,
-                    startTicks: startTicks,
-                    endTicks: startTicks + 45_000,
-                    status: status
-                ))
-                startTicks += 45_000
-            }
-            let items = makeItems(statuses.map { AssemblySlotState.from(assignmentStatusRaw: $0?.rawValue) })
+            let arrangement = makeArrangement(statuses)
             XCTAssertEqual(
-                AssemblyViewLogic.isExportEnabled(slots: slots),
-                AssemblyViewLogic.isExportEnabled(items: items),
+                AssemblyViewLogic.isExportEnabled(slots: arrangement.slots),
+                AssemblyViewLogic.isExportEnabled(items: arrangement.items),
+                "arrangement : \(statuses)"
+            )
+        }
+    }
+
+    // MARK: - Zones de l'INTERFACE == runs du DOMAINE (relecture 13 août 2026)
+
+    func testInterfaceZonesMatchDomainRunsOnEveryArrangement() {
+        // LE test qui manquait : deux découpages en zones coexistent — celui du
+        // DOMAINE (`readyTimeline(slots:)`, qui décide de ce qui est
+        // réellement encodé) et celui de l'INTERFACE
+        // (`exportedZoneIndexes(items:)`, qui dessine les crochets §35.3 et
+        // nomme le montage « Plans 28 à 50 »). Ils sont écrits séparément :
+        // rien n'obligeait le second à suivre le premier. S'ils divergeaient,
+        // l'utilisateur verrait des zones qui ne partent pas — ou n'en verrait
+        // pas qui partent.
+        for statuses in arrangements {
+            let arrangement = makeArrangement(statuses)
+            let domainRuns = readyTimeline(slots: arrangement.slots).runs
+            let interfaceZones = AssemblyViewLogic.exportedZoneIndexes(items: arrangement.items)
+
+            XCTAssertEqual(
+                interfaceZones.count,
+                domainRuns.count,
+                "nombre de zones — arrangement : \(statuses)"
+            )
+            XCTAssertEqual(
+                interfaceZones,
+                domainRuns.map { $0.startIndex...$0.endIndex },
+                "bornes des zones — arrangement : \(statuses)"
+            )
+            // Même nombre de plans PAR zone : deux découpages peuvent partager
+            // leurs bornes et ne pas contenir le même nombre de cases.
+            let interfacePositions = AssemblyViewLogic.exportedZonePositions(items: arrangement.items)
+            XCTAssertEqual(
+                interfacePositions.map(\.count),
+                domainRuns.map(\.slotCount),
+                "plans par zone — arrangement : \(statuses)"
+            )
+            // Et le même TOTAL, celui qui s'affiche (§56).
+            XCTAssertEqual(
+                AssemblyViewLogic.exportedSlotCount(items: arrangement.items),
+                readyTimeline(slots: arrangement.slots).slotCount,
+                "total de plans — arrangement : \(statuses)"
+            )
+        }
+    }
+
+    func testInterfaceZonesMatchDomainRunsWhenIndexesDoNotStartAtZero() {
+        // L'exemple de la demande commence à la case 28 : la traduction
+        // position → index ne doit pas décaler les zones de l'interface par
+        // rapport aux runs du domaine.
+        for statuses in arrangements {
+            let arrangement = makeArrangement(statuses, firstIndex: 28)
+            XCTAssertEqual(
+                AssemblyViewLogic.exportedZoneIndexes(items: arrangement.items),
+                readyTimeline(slots: arrangement.slots).runs.map { $0.startIndex...$0.endIndex },
+                "arrangement : \(statuses)"
+            )
+        }
+    }
+
+    // MARK: - Compte de plans faisant autorité (relecture 13 août 2026)
+
+    func testExportedSlotCountIsTheNumberOfReadySlots() {
+        XCTAssertEqual(AssemblyViewLogic.exportedSlotCount(items: []), 0)
+        XCTAssertEqual(
+            AssemblyViewLogic.exportedSlotCount(
+                items: makeItems([.empty, .downloading, .unavailable, .tooShort, .resolving])
+            ),
+            0
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.exportedSlotCount(
+                items: makeItems([.ready, .ready, .empty, .ready])
+            ),
+            3
+        )
+    }
+
+    func testAuthoritativeCountIgnoresMissingIndexesInsideAZone() {
+        // LE cas qui séparait les deux comptes : les index d'une zone ne sont
+        // pas contigus (28, 29, 31). La LARGEUR de la plage d'index vaut 4,
+        // alors que la zone ne contient que 3 plans — c'est le nombre de PLANS
+        // qui doit être annoncé, jamais la largeur de l'intervalle.
+        let items = [
+            makeItem(index: 28, state: .ready),
+            makeItem(index: 29, state: .ready),
+            makeItem(index: 31, state: .ready),
+            makeItem(index: 32, state: .empty),
+            makeItem(index: 34, state: .ready)
+        ]
+        let zones = AssemblyViewLogic.exportedZoneIndexes(items: items)
+
+        XCTAssertEqual(zones, [28...31, 34...34])
+        XCTAssertEqual(zones.reduce(0) { $0 + $1.count }, 5, "la largeur des plages compte 5…")
+        XCTAssertEqual(AssemblyViewLogic.exportedSlotCount(items: items), 4, "…mais il n'y a que 4 plans")
+
+        // L'énoncé VoiceOver dit le compte FAISANT AUTORITÉ, pas la largeur.
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportedZones(
+                zones: zones,
+                slotCount: AssemblyViewLogic.exportedSlotCount(items: items)
+            ),
+            "4 plans exportables en 2 zones"
+        )
+    }
+
+    // MARK: - §64 : pourquoi rien n'est prêt (relecture 13 août 2026)
+
+    func testNothingReadyCauseDistinguishesEmptyFromFilledButNotReady() {
+        // §64 : une case REMPLIE mais non prête n'appelle pas le même geste
+        // qu'une case vide — attendre ou remplacer, jamais « remplissez ».
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.empty, .empty])),
+            .nothingFilled
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.empty, .downloading])),
+            .pending
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.resolving])),
+            .pending
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.unavailable, .empty])),
+            .blocked
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.tooShort])),
+            .blocked
+        )
+        XCTAssertEqual(
+            AssemblyViewLogic.nothingReadyCause(items: makeItems([.downloading, .unavailable])),
+            .pendingAndBlocked
+        )
+    }
+
+    func testNothingReadyCauseAgreesBetweenItemsAndSnapshots() {
+        // Le résumé §56 lit un instantané, l'écran d'assemblage lit des états
+        // d'affichage : les deux doivent conseiller le MÊME geste pour la même
+        // situation, sinon l'utilisateur reçoit deux consignes contradictoires
+        // à un écran d'intervalle.
+        for statuses in arrangements {
+            let arrangement = makeArrangement(statuses)
+            XCTAssertEqual(
+                AssemblyViewLogic.nothingReadyCause(items: arrangement.items),
+                ExportSummaryLogic.nothingReadyCause(slots: arrangement.slots),
                 "arrangement : \(statuses)"
             )
         }
@@ -440,20 +638,20 @@ final class AssemblyViewLogicTests: XCTestCase {
     // MARK: - Énoncé VoiceOver des zones (§39)
 
     func testSpokenExportedZonesIsNilWhenNothingIsExported() {
-        XCTAssertNil(AssemblyViewLogic.spokenExportedZones(zones: []))
+        XCTAssertNil(AssemblyViewLogic.spokenExportedZones(zones: [], slotCount: 0))
     }
 
     func testSpokenSingleZoneKeepsTheRangeWording() {
         // « plans 28 à 50 exportables » à partir des index 27…49 (0-based).
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportedZones(zones: [27...49]),
+            AssemblyViewLogic.spokenExportedZones(zones: [27...49], slotCount: 23),
             "plans 28 à 50 exportables"
         )
     }
 
     func testSpokenSingleZoneIsSingularForASingleSlot() {
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportedZones(zones: [27...27]),
+            AssemblyViewLogic.spokenExportedZones(zones: [27...27], slotCount: 1),
             "plan 28 exportable"
         )
     }
@@ -463,11 +661,11 @@ final class AssemblyViewLogicTests: XCTestCase {
         // crochet dessiné est invisible pour VoiceOver : la valeur doit dire
         // COMBIEN de plans partent et en COMBIEN de zones.
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportedZones(zones: [27...34, 39...49]),
+            AssemblyViewLogic.spokenExportedZones(zones: [27...34, 39...49], slotCount: 19),
             "19 plans exportables en 2 zones"
         )
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportedZones(zones: [0...0, 2...2, 4...4]),
+            AssemblyViewLogic.spokenExportedZones(zones: [0...0, 2...2, 4...4], slotCount: 3),
             "3 plans exportables en 3 zones"
         )
     }
@@ -475,7 +673,7 @@ final class AssemblyViewLogicTests: XCTestCase {
     func testSpokenSingleZoneIsDefensiveAboutNegativeIndexes() {
         // Index négatif (jamais attendu) : jamais « plan 0 ».
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportedZones(zones: [(-4)...(-4)]),
+            AssemblyViewLogic.spokenExportedZones(zones: [(-4)...(-4)], slotCount: 1),
             "plan 1 exportable"
         )
     }

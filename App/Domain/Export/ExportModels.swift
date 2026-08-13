@@ -40,13 +40,15 @@
 //    du même run ;
 //  - **MUSIQUE** : pour chaque run, la portion `[run.musicStart, run.musicEnd]`
 //    du fichier audio ORIGINAL est insérée à la position de composition du
-//    run. La musique est donc CONTINUE à l'intérieur d'un run et **SAUTE à
-//    chaque jonction entre runs** — conséquence ASSUMÉE et DOCUMENTÉE de la
-//    demande : supprimer les cases vides du montage, c'est supprimer le
-//    passage musical qu'elles couvraient ;
+//    run (`ReadyTimeline.musicInsertions`). La musique est donc CONTINUE à
+//    l'intérieur d'un run et **SAUTE à chaque jonction entre runs** —
+//    conséquence ASSUMÉE et DOCUMENTÉE de la demande : supprimer les cases
+//    vides du montage, c'est supprimer le passage musical qu'elles
+//    couvraient ;
 //  - **VIDÉO** : la case `i` est placée à
 //    `(position du run) + (slot.start - run.musicStart)`
-//    (`ReadyTimeline.compositionStart(of:)`) ;
+//    (`ReadyTimeline.placements`, dont `compositionStart(of:)` n'est qu'une
+//    lecture ponctuelle) ;
 //  - **durée totale du montage** = somme des durées de toutes les cases
 //    prêtes (§28.1 : les cases d'un run pavent la musique sans trou, donc
 //    `run.duration == musicEnd - musicStart == somme des durées de ses
@@ -62,7 +64,8 @@
 //    est SUPPRIMÉ ;
 //  - les cases gardent leurs temps musicaux ABSOLUS (§9, §53) : `slots` n'est
 //    jamais recompacté ni réécrit. La concaténation n'existe qu'au moment de
-//    construire la composition, calculée par `compositionStart(of:)` ;
+//    construire la composition, calculée par `placements` /
+//    `musicInsertions` ;
 //  - tout reste en **TICKS entiers** (§9) : aucune conversion en secondes,
 //    aucun arrondi cumulatif, quel que soit le nombre de runs ;
 //  - si aucune case n'est prête, l'export reste IMPOSSIBLE (bouton désactivé)
@@ -100,6 +103,16 @@ enum ExportScope: Sendable {
 // MARK: - Résultat d'export
 
 // Non defini par la specification — definition minimale V1.
+/// Ce qui a RÉELLEMENT été écrit sur le disque.
+///
+/// **Les trois mesures décrivent le FICHIER, jamais l'intention.** Quand un
+/// rush devient indisponible pendant l'assemblage (§66), le montage est
+/// TRONQUÉ : `duration`, `slotCount` et `masterProfile` sont alors ceux du
+/// montage réduit, pas ceux annoncés par le résumé avant export (§56).
+/// L'interface peut donc comparer ce qu'elle a annoncé et ce qui a été produit,
+/// et prévenir l'utilisateur d'un écart au lieu de le laisser croire qu'il a
+/// obtenu ce qu'il avait validé (§3 : jamais de résultat silencieusement
+/// différent).
 struct ExportResult: Codable, Sendable {
     let outputURL: URL
     /// Durée du fichier produit = SOMME des durées de toutes les cases
@@ -108,6 +121,16 @@ struct ExportResult: Codable, Sendable {
     let duration: MediaTime
     /// Nombre TOTAL de plans exportés, tous runs confondus.
     let slotCount: Int
+    /// Profil maître §52 **réellement utilisé pour encoder ce fichier** :
+    /// résolution de rendu, cadence et colorimétrie du clip maître retenu.
+    ///
+    /// Il est calculé sur les clips CONSERVÉS après troncature §66, alors que
+    /// le profil ANNONCÉ avant export (`ProjectExporter.masterProfile(project:)`,
+    /// §56) porte sur la timeline complète : les deux peuvent différer
+    /// (résolution, cadence, HDR) dès qu'un rush a disparu en cours d'export.
+    /// C'est CE profil qui décrit le fichier livré — c'est donc lui que
+    /// l'interface doit afficher, et lui qu'elle doit comparer à l'annonce.
+    let masterProfile: MasterProfile
 }
 
 // MARK: - Snapshots (support)
@@ -152,6 +175,11 @@ struct ProjectSnapshot: Codable, Sendable {
 /// morceau. C'est l'unité de concaténation : le montage exporté est la suite
 /// des runs mis bout à bout.
 ///
+/// « Contiguës » a un sens STRICT, imposé par `readyTimeline(slots:)` : index
+/// consécutifs ET cases jointives (`précédente.end == suivante.start`). Ce
+/// n'est pas un détail — c'est ce qui rend `duration` égale à la somme des
+/// durées des cases (voir `duration`).
+///
 /// Les cases conservent leurs temps musicaux ABSOLUS (§9, §53) : `slots` n'est
 /// jamais recompacté, jamais décalé. Le décalage n'existe qu'au moment de
 /// construire la composition, et il est calculé par
@@ -188,9 +216,12 @@ struct ReadyRun: Sendable, Equatable {
 
     /// Durée du run, en ticks exacts (§9) : `musicEnd - musicStart`.
     ///
-    /// Les cases d'un run étant jointives par construction (§28.1 : la
-    /// partition pave la musique sans trou), cette durée vaut exactement la
-    /// SOMME des durées de ses cases.
+    /// Cette durée vaut exactement la SOMME des durées des cases du run —
+    /// invariant garanti par `readyTimeline(slots:)`, qui FERME un run dès
+    /// qu'une case ne le prolonge pas (index non consécutif ou début différent
+    /// de la fin précédente). Ce n'est donc pas une supposition tirée de §28.1
+    /// mais une propriété du découpage, et c'est elle qui rend légitime
+    /// d'annoncer (§56), d'estimer (§57) et d'encoder cette durée.
     var duration: MediaTime { musicEnd - musicStart }
 
     /// Index de la PREMIÈRE case du run — pour l'affichage « Plans 28 à 35 ».
@@ -210,14 +241,78 @@ struct ReadyRun: Sendable, Equatable {
     }
 }
 
+// MARK: - Dérivations de composition (SOURCE UNIQUE export + aperçu)
+
+// Non defini par la specification — definition minimale V1.
+/// Une case et l'instant EXACT où elle est posée dans le montage concaténé.
+///
+/// C'est la sortie de `ReadyTimeline.placements` : le SEUL endroit du code où
+/// `(position du run) + (slot.start - run.musicStart)` est calculé. L'export
+/// (`ProjectExporter.assemble`) et l'aperçu principal
+/// (`PreviewBuilder.makeTimelineComposition`) la consomment tels quels — ils ne
+/// refont plus le calcul chacun de leur côté, ce qui rend impossible qu'ils
+/// divergent d'un run entier sans qu'aucun test ne le voie.
+struct SlotPlacement: Sendable, Equatable {
+
+    /// La case exportée, avec ses temps musicaux ABSOLUS intacts (§9, §53).
+    let slot: ProjectSlot
+
+    /// Instant de départ de la case DANS la composition.
+    let compositionStart: MediaTime
+
+    init(slot: ProjectSlot, compositionStart: MediaTime) {
+        self.slot = slot
+        self.compositionStart = compositionStart
+    }
+
+    /// Identité de la case placée (§13.2).
+    var slotID: UUID { slot.id }
+
+    /// Durée occupée dans la composition = durée de la case (`end - start`).
+    var duration: MediaTime { slot.duration }
+
+    /// Fin de la case dans la composition — début de la case suivante du
+    /// montage, jonctions entre runs comprises.
+    var compositionEnd: MediaTime { compositionStart + duration }
+}
+
+// Non defini par la specification — definition minimale V1.
+/// Une portion de musique à insérer : le passage ABSOLU
+/// `[sourceStart, sourceStart + duration]` du fichier ORIGINAL (§11, §16.1),
+/// posé à `compositionStart` dans la composition.
+///
+/// UNE portion par RUN pour le montage (§53) — jamais une par case : les cases
+/// d'un run sont jointives, une insertion par case multiplierait les coupures
+/// audio sans rien changer au son. L'aperçu local §47.1 en construit une seule,
+/// posée à l'instant zéro.
+struct MusicInsertion: Sendable, Equatable {
+
+    /// Instant ABSOLU, dans le morceau, où commence le passage à insérer.
+    let sourceStart: MediaTime
+
+    /// Durée du passage inséré.
+    let duration: MediaTime
+
+    /// Instant de la composition où ce passage est posé.
+    let compositionStart: MediaTime
+
+    init(sourceStart: MediaTime, duration: MediaTime, compositionStart: MediaTime) {
+        self.sourceStart = sourceStart
+        self.duration = duration
+        self.compositionStart = compositionStart
+    }
+}
+
 // MARK: - Timeline exportable : les runs concaténés (changement produit)
 
 /// Montage réellement exporté : TOUTES les zones remplies, concaténées dans
 /// l'ordre des index.
 ///
 /// Modèle temporel complet en tête de ce fichier. En résumé :
-/// - `compositionStart(ofRun:)` = somme des durées des runs précédents ;
-/// - `compositionStart(of: slot)` = position du run + `slot.start - run.musicStart` ;
+/// - `placements` = chaque case exportée à `position du run + (slot.start -
+///   run.musicStart)` — **la dérivation que l'export ET l'aperçu consomment** ;
+/// - `musicInsertions` = une portion de musique par run, posée à la position
+///   du run ;
 /// - `duration` = somme des durées des runs = somme des durées de TOUTES les
 ///   cases exportées ;
 /// - la musique est insérée PAR RUN : continue à l'intérieur d'un run, elle
@@ -262,21 +357,76 @@ struct ReadyTimeline: Sendable, Equatable {
         runs.flatMap(\.slots)
     }
 
-    /// Position de composition de CHAQUE run, dans l'ordre — le même calcul
-    /// que `compositionStart(ofRun:)`, mais en UN seul parcours.
+    /// **LE calcul du changement produit** : chaque case exportée et son
+    /// instant de composition `(position de son run) + (slot.start -
+    /// run.musicStart)`, dans l'ordre du montage.
     ///
-    /// C'est la forme à utiliser pour assembler une composition : elle évite
-    /// le parcours quadratique qu'un appel par run produirait, et garantit que
-    /// l'aperçu et l'export posent les runs aux MÊMES instants.
-    var runStarts: [MediaTime] {
-        var starts: [MediaTime] = []
-        starts.reserveCapacity(runs.count)
-        var cumulated = MediaTime.zero
+    /// Fonction PURE, sans AVFoundation — et surtout **le seul chemin de
+    /// calcul du produit** : `ProjectExporter.assemble` et
+    /// `PreviewBuilder.makeTimelineComposition` la consomment tels quels au
+    /// lieu de recomposer chacun `runStart + run.offset(of:)`. Un décalage
+    /// d'un run entier ne peut donc plus passer entre les mailles : il n'existe
+    /// qu'ICI, et les tests portent dessus.
+    ///
+    /// Garanties, vérifiées par les tests avec des littéraux calculés à la
+    /// main sur une fixture à durées INÉGALES :
+    /// - la première case du premier run tombe exactement à `.zero` ;
+    /// - à l'intérieur d'un run, l'écart entre deux cases reste rigoureusement
+    ///   celui de la musique (§53) ;
+    /// - entre deux runs il n'y a AUCUN trou : le run suivant commence là où
+    ///   le précédent finit ;
+    /// - la fin de la dernière case vaut exactement `duration`.
+    ///
+    /// Arithmétique en ticks entiers (§9) : aucun arrondi, aucune dérive, quel
+    /// que soit le nombre de runs.
+    var placements: [SlotPlacement] {
+        var result: [SlotPlacement] = []
+        result.reserveCapacity(slotCount)
+        var runStart = MediaTime.zero
         for run in runs {
-            starts.append(cumulated)
-            cumulated = cumulated + run.duration
+            for slot in run.slots {
+                result.append(
+                    SlotPlacement(slot: slot, compositionStart: runStart + run.offset(of: slot))
+                )
+            }
+            runStart = runStart + run.duration
         }
-        return starts
+        return result
+    }
+
+    /// Portions de musique du montage : UNE par run — `[run.musicStart,
+    /// run.musicEnd]` du fichier ORIGINAL, posée à la position de composition
+    /// du run.
+    ///
+    /// Même statut que `placements` : source UNIQUE consommée par l'export et
+    /// par l'aperçu. Les portions sont JOINTIVES dans la composition (la
+    /// position d'un run est la somme des durées des précédents) : la piste
+    /// audio n'a aucun trou, elle SAUTE simplement d'un passage du morceau à
+    /// l'autre — conséquence assumée de la suppression des zones vides.
+    var musicInsertions: [MusicInsertion] {
+        var result: [MusicInsertion] = []
+        result.reserveCapacity(runs.count)
+        var runStart = MediaTime.zero
+        for run in runs {
+            result.append(
+                MusicInsertion(
+                    sourceStart: run.musicStart,
+                    duration: run.duration,
+                    compositionStart: runStart
+                )
+            )
+            runStart = runStart + run.duration
+        }
+        return result
+    }
+
+    /// Position de composition de CHAQUE run, dans l'ordre.
+    ///
+    /// Simple lecture de `musicInsertions` : la position d'un run EST celle de
+    /// sa portion de musique — un seul cumul, donc aucune possibilité que les
+    /// deux divergent.
+    var runStarts: [MediaTime] {
+        musicInsertions.map(\.compositionStart)
     }
 
     /// Position du run `index` dans le montage : somme des durées de tous les
@@ -288,39 +438,19 @@ struct ReadyTimeline: Sendable, Equatable {
     ///   valeur inventée.
     func compositionStart(ofRun index: Int) -> MediaTime {
         guard index > 0 else { return .zero }
-        var cumulated = MediaTime.zero
-        for run in runs.prefix(index) {
-            cumulated = cumulated + run.duration
-        }
-        return cumulated
+        guard index < runs.count else { return duration }
+        return runStarts[index]
     }
 
-    /// Instant de composition FINAL d'une case exportée :
-    /// `(position de son run) + (slot.start - run.musicStart)`.
-    ///
-    /// **C'est LE calcul du changement produit**, isolé ici pour être testable
-    /// sans AVFoundation : la case garde son temps musical absolu, seule la
-    /// timeline exportée est recomposée. La première case du premier run tombe
-    /// exactement à `.zero` ; à l'intérieur d'un run l'écart entre deux cases
-    /// reste rigoureusement celui de la musique (§53) ; entre deux runs il n'y
-    /// a AUCUN trou (le run suivant commence là où le précédent finit).
-    ///
-    /// Arithmétique en ticks entiers (§9) : aucun arrondi, aucune dérive, quel
-    /// que soit le nombre de runs.
+    /// Instant de composition FINAL d'une case exportée — lecture ponctuelle
+    /// de `placements`, jamais un second calcul.
     ///
     /// - Returns: `nil` si la case n'appartient à AUCUN run de cette timeline
     ///   (case vide, non prête, ou d'un autre projet) — une case non exportée
     ///   n'a pas d'instant de composition, et l'appelant ne doit pas en
     ///   inventer un.
     func compositionStart(of slot: ProjectSlot) -> MediaTime? {
-        var cumulated = MediaTime.zero
-        for run in runs {
-            if run.slots.contains(where: { $0.id == slot.id }) {
-                return cumulated + run.offset(of: slot)
-            }
-            cumulated = cumulated + run.duration
-        }
-        return nil
+        placements.first { $0.slotID == slot.id }?.compositionStart
     }
 
     /// Timeline RÉDUITE aux `count` premières cases exportées (§66 : un rush
@@ -364,32 +494,58 @@ struct ReadyTimeline: Sendable, Equatable {
 ///   `ready` contiguës forme un run ;
 /// - une case vide, `resolving`, `downloading`, `unavailable` ou `tooShort`
 ///   FERME le run en cours et n'est jamais exportée ;
+/// - **une case prête ferme elle aussi le run en cours si elle ne le PROLONGE
+///   pas exactement** : index non consécutif, ou début différent de la fin de
+///   la case précédente (voir ci-dessous) ;
 /// - TOUS les runs sont conservés, dans l'ordre : plus aucune zone remplie
 ///   n'est abandonnée (c'est exactement la demande « n'exporte que les parties
 ///   avec de la vidéo ») ;
 /// - aucune case n'est déplacée : les temps restent ABSOLUS, la concaténation
-///   est calculée par `ReadyTimeline.compositionStart(of:)` ;
+///   est calculée par `ReadyTimeline.placements` ;
 /// - aucun écran noir n'est ajouté : les zones vides sont SUPPRIMÉES, musique
 ///   comprise ;
 /// - aucun run → timeline vide → export et aperçu principal désactivés.
+///
+/// **Pourquoi la jointivité est vérifiée et pas supposée.** `ReadyRun.duration`
+/// vaut `musicEnd - musicStart`, et c'est cette durée qui est annoncée (§56),
+/// estimée (§57) et encodée (la portion de musique du run). Elle n'est égale à
+/// la somme des durées des cases du run QUE si celles-ci sont jointives. §28.1
+/// garantit que la partition pave la musique sans trou, mais une partition
+/// d'une version antérieure (§61) ou une base altérée suffirait à le
+/// démentir : un run silencieusement plus long que ses cases produirait un
+/// fichier où la musique dépasse la vidéo. Fermer le run sur le moindre écart
+/// rend l'invariant vrai **par construction** — deux cases prêtes non
+/// jointives forment simplement deux zones concaténées, ce qui reste exact.
 func readyTimeline(slots: [ProjectSlot]) -> ReadyTimeline {
     var runs: [ReadyRun] = []
     var current: [ProjectSlot] = []
 
-    // Tri par index AVANT toute décision : l'ordre du montage est celui des
-    // index, jamais celui de la collection reçue.
-    for slot in slots.sorted(by: { $0.index < $1.index }) {
-        if slot.assignment?.status == .ready {
-            current.append(slot)
-        } else if let run = ReadyRun(slots: current) {
+    /// Clôt la zone en cours (si elle existe) et la conserve.
+    func closeCurrentRun() {
+        if let run = ReadyRun(slots: current) {
             // Fin d'une zone remplie : le run est clos et CONSERVÉ (c'est ce
             // qui distingue la timeline du segment unique, qui s'arrêtait ici).
             runs.append(run)
             current = []
         }
     }
-    if let run = ReadyRun(slots: current) {
-        runs.append(run) // dernière zone remplie, close par la fin du montage
+
+    // Tri par index AVANT toute décision : l'ordre du montage est celui des
+    // index, jamais celui de la collection reçue.
+    for slot in slots.sorted(by: { $0.index < $1.index }) {
+        guard slot.assignment?.status == .ready else {
+            closeCurrentRun()
+            continue
+        }
+        if let previous = current.last,
+           previous.end != slot.start || previous.index + 1 != slot.index {
+            // La case est prête mais ne PROLONGE pas la zone en cours : elle
+            // en ouvre une nouvelle. `duration == musicEnd - musicStart`
+            // reste donc la somme des durées des cases de chaque run.
+            closeCurrentRun()
+        }
+        current.append(slot)
     }
+    closeCurrentRun() // dernière zone remplie, close par la fin du montage
     return ReadyTimeline(runs: runs)
 }

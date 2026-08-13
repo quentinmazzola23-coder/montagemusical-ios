@@ -29,6 +29,18 @@
 //  source unique, `ProjectExporter.masterProfile(project:)` — plus rien à
 //  tester ici de ce côté.
 //
+//  RELECTURE ADVERSARIALE (13 août 2026) — trois familles de tests ajoutées :
+//  - **§66 export TRONQUÉ** (`divergence`, `readyTitle/readyMessage(origin:)`,
+//    `truncatedExportMessage`) : un fichier qui ne contient pas le montage
+//    annoncé n'est plus présenté comme un succès plein. Le message dit ce qui
+//    a été écrit, pourquoi, et quoi faire ;
+//  - **compte de plans faisant autorité** : `exportedPlansLabel` reçoit le
+//    nombre de plans au lieu de le redériver de la largeur des plages d'index
+//    (les deux divergent dès qu'un index manque dans une zone) ;
+//  - **§64 cause du blocage** : « Remplissez au moins une case » n'est plus la
+//    réponse universelle — une case remplie mais non prête s'attend ou se
+//    remplace.
+//
 
 import XCTest
 @testable import MontageMusical
@@ -218,7 +230,7 @@ final class ExportSummaryLogicTests: XCTestCase {
     func testExportedPlansLabelIsNilWithoutAnyZone() {
         // Aucune case prête : il n'y a rien à nommer — l'écran affiche alors
         // « Aucun plan n'est encore prêt. » (§66), pas une plage vide.
-        XCTAssertNil(ExportSummaryLogic.exportedPlansLabel(zones: []))
+        XCTAssertNil(ExportSummaryLogic.exportedPlansLabel(zones: [], slotCount: 0))
         XCTAssertNil(ExportSummaryLogic.zoneRangesLabel(zones: []))
         XCTAssertNil(ExportSummaryLogic.spokenZoneRanges(zones: []))
     }
@@ -227,7 +239,7 @@ final class ExportSummaryLogicTests: XCTestCase {
         // Une seule zone : le montage est d'un seul tenant, la plage le décrit
         // exactement — formulation CONSERVÉE (« Plans 28 à 50 »).
         XCTAssertEqual(
-            ExportSummaryLogic.exportedPlansLabel(zones: [27...49]),
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...49], slotCount: 23),
             "Plans 28 à 50"
         )
         // Et rien n'est listé en petit : la ligne au-dessus le dit déjà.
@@ -235,8 +247,30 @@ final class ExportSummaryLogicTests: XCTestCase {
     }
 
     func testExportedPlansLabelOfAZoneMadeOfASinglePlan() {
-        XCTAssertEqual(ExportSummaryLogic.exportedPlansLabel(zones: [27...27]), "Plan 28")
-        XCTAssertEqual(ExportSummaryLogic.exportedPlansLabel(zones: [0...0]), "Plan 1")
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...27], slotCount: 1),
+            "Plan 28"
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [0...0], slotCount: 1),
+            "Plan 1"
+        )
+    }
+
+    func testExportedPlansLabelUsesTheAuthoritativeCountNotTheRangeWidth() {
+        // RELECTURE (13 août 2026) : le compte venait de la somme des LARGEURS
+        // des intervalles d'index. Ici la première zone couvre les index 28 à
+        // 31 mais ne contient que 3 plans (l'index 30 n'existe pas) : la ligne
+        // « N plans » du résumé §56 et cette ligne-ci doivent annoncer le même
+        // nombre — celui du domaine, passé en paramètre.
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...30, 33...33], slotCount: 4),
+            "4 plans en 2 zones"
+        )
+        XCTAssertNotEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...30, 33...33], slotCount: 4),
+            "5 plans en 2 zones"
+        )
     }
 
     func testExportedPlansLabelCountsAllZonesFromTwo() {
@@ -244,11 +278,11 @@ final class ExportSummaryLogicTests: XCTestCase {
         // 27…34 et 39…49) → 8 + 11 = 19 plans, en 2 zones. Une plage unique
         // mentirait : les cases 36 à 39 ne sont PAS dans le fichier.
         XCTAssertEqual(
-            ExportSummaryLogic.exportedPlansLabel(zones: [27...34, 39...49]),
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...34, 39...49], slotCount: 19),
             "19 plans en 2 zones"
         )
         XCTAssertEqual(
-            ExportSummaryLogic.exportedPlansLabel(zones: [0...0, 2...2, 6...8]),
+            ExportSummaryLogic.exportedPlansLabel(zones: [0...0, 2...2, 6...8], slotCount: 5),
             "5 plans en 3 zones"
         )
         // Accord au singulier des DEUX nombres.
@@ -320,14 +354,84 @@ final class ExportSummaryLogicTests: XCTestCase {
         // §66 relu par l'écart produit : n'importe quelle case remplie suffit
         // — ce n'est plus « la première » qu'il faut nommer.
         XCTAssertTrue(ExportSummaryLogic.nothingReadyTitle.contains("Aucun plan"))
-        XCTAssertTrue(
-            ExportSummaryLogic.nothingReadyHint.contains("au moins une case"),
-            ExportSummaryLogic.nothingReadyHint
+        let hint = ExportSummaryLogic.nothingReadyHint(.nothingFilled)
+        XCTAssertTrue(hint.contains("au moins une case"), hint)
+        XCTAssertFalse(hint.contains("première case"), hint)
+    }
+
+    // MARK: - §64 : le geste dépend de la CAUSE (relecture 13 août 2026)
+
+    func testNothingReadyCauseIsDerivedFromAssignmentStatuses() {
+        func slot(_ index: Int, _ status: ClipAssignmentStatus?) -> ProjectSlot {
+            ProjectSlot(
+                id: UUID(),
+                index: index,
+                start: MediaTime(ticks: Int64(index) * 45_000),
+                end: MediaTime(ticks: Int64(index + 1) * 45_000),
+                assignment: status.map {
+                    ClipAssignmentSnapshot(id: UUID(), assetLocalIdentifier: "a\(index)", status: $0)
+                }
+            )
+        }
+
+        XCTAssertEqual(ExportSummaryLogic.nothingReadyCause(slots: []), .nothingFilled)
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, nil), slot(1, nil)]),
+            .nothingFilled
         )
-        XCTAssertFalse(
-            ExportSummaryLogic.nothingReadyHint.contains("première case"),
-            ExportSummaryLogic.nothingReadyHint
+        // Une case PRÊTE ne compte pas comme une cause de blocage : ce chemin
+        // n'est atteint que lorsqu'il n'y en a aucune.
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, .downloading), slot(1, nil)]),
+            .pending
         )
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, .resolving)]),
+            .pending
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, .unavailable)]),
+            .blocked
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, .tooShort)]),
+            .blocked
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyCause(slots: [slot(0, .downloading), slot(1, .tooShort)]),
+            .pendingAndBlocked
+        )
+    }
+
+    func testEachCauseNamesADifferentGesture() {
+        // §64 : « Remplissez au moins une case » était la réponse universelle,
+        // y compris quand toutes les cases étaient REMPLIES mais non prêtes —
+        // le mauvais geste. Chaque cause nomme désormais le sien.
+        let filled = ExportSummaryLogic.nothingReadyHint(.nothingFilled)
+        let pending = ExportSummaryLogic.nothingReadyHint(.pending)
+        let blocked = ExportSummaryLogic.nothingReadyHint(.blocked)
+        let both = ExportSummaryLogic.nothingReadyHint(.pendingAndBlocked)
+
+        XCTAssertTrue(filled.contains("Remplissez"), filled)
+        XCTAssertTrue(pending.contains("attendez"), pending)
+        XCTAssertFalse(pending.contains("Remplissez"), pending)
+        XCTAssertTrue(blocked.contains("remplacez"), blocked)
+        XCTAssertTrue(both.contains("attendez") && both.contains("remplacez"), both)
+
+        // Quatre gestes, quatre phrases distinctes — écran ET VoiceOver.
+        let hints = [filled, pending, blocked, both]
+        XCTAssertEqual(Set(hints).count, hints.count, "Deux causes partagent le même message")
+        let shortHints = [
+            ExportSummaryLogic.nothingReadyShortHint(.nothingFilled),
+            ExportSummaryLogic.nothingReadyShortHint(.pending),
+            ExportSummaryLogic.nothingReadyShortHint(.blocked),
+            ExportSummaryLogic.nothingReadyShortHint(.pendingAndBlocked)
+        ]
+        XCTAssertEqual(Set(shortHints).count, shortHints.count)
+        for shortHint in shortHints {
+            // Hint d'un bouton (§39) : une phrase, pas un paragraphe.
+            XCTAssertLessThan(shortHint.count, 100, shortHint)
+        }
     }
 
     func testDurationUsesHundredthsOfADisplayRoundingOnly() {
@@ -536,29 +640,206 @@ final class ExportSummaryLogicTests: XCTestCase {
         // reproposé (partage §66, Photos §40/§55). §8.1 interdit qu'il soit
         // annoncé comme un export qui vient d'aboutir : titre ET message
         // doivent différer.
-        XCTAssertEqual(ExportSummaryLogic.readyTitle(isRestored: false), "Montage prêt")
-        XCTAssertEqual(ExportSummaryLogic.readyTitle(isRestored: true), "Montage déjà exporté")
+        XCTAssertEqual(ExportSummaryLogic.readyTitle(origin: .fresh), "Montage prêt")
+        XCTAssertEqual(ExportSummaryLogic.readyTitle(origin: .restored), "Montage déjà exporté")
         XCTAssertNotEqual(
-            ExportSummaryLogic.readyTitle(isRestored: true),
-            ExportSummaryLogic.readyTitle(isRestored: false),
+            ExportSummaryLogic.readyTitle(origin: .restored),
+            ExportSummaryLogic.readyTitle(origin: .fresh),
             "Un export restauré ne porte jamais le titre d'un export qui vient de finir (§8.1)"
         )
         XCTAssertNotEqual(
-            ExportSummaryLogic.readyMessage(isRestored: true),
-            ExportSummaryLogic.readyMessage(isRestored: false)
+            ExportSummaryLogic.readyMessage(origin: .restored),
+            ExportSummaryLogic.readyMessage(origin: .fresh)
         )
 
         // Le message restauré SITUE l'export dans le passé — c'est ce qui
         // empêche de le lire comme une réussite immédiate.
         XCTAssertTrue(
-            ExportSummaryLogic.readyMessage(isRestored: true).contains("session précédente"),
+            ExportSummaryLogic.readyMessage(origin: .restored).contains("session précédente"),
             "Le message dit que l'export date d'avant (§60)"
         )
         // Les deux messages nomment les gestes possibles (§40/§55/§66).
-        for isRestored in [true, false] {
-            let message = ExportSummaryLogic.readyMessage(isRestored: isRestored)
+        for origin in [ExportSummaryLogic.ReadyOrigin.restored, .fresh] {
+            let message = ExportSummaryLogic.readyMessage(origin: origin)
             XCTAssertTrue(message.contains("Photos"), "L'enregistrement dans Photos est nommé")
             XCTAssertFalse(message.isEmpty)
         }
+        // Trois origines, trois icônes (§39 : l'état n'est pas porté par le
+        // seul texte).
+        let images = [
+            ExportSummaryLogic.readySystemImage(origin: .fresh),
+            ExportSummaryLogic.readySystemImage(origin: .restored),
+            ExportSummaryLogic.readySystemImage(
+                origin: .truncated(Self.truncatedDivergence)
+            )
+        ]
+        XCTAssertEqual(Set(images).count, 3, "Trois origines, trois icônes")
+    }
+
+    // MARK: - §66 : export TRONQUÉ (relecture adversariale du 13 août 2026)
+
+    /// Profil §52 de comparaison (même initialiseur que l'export : cadence
+    /// normalisée, dimensions paires).
+    private static func profile(width: Int, height: Int, frameRate: Double, isHDR: Bool) -> MasterProfile {
+        MasterProfile(
+            renderWidth: width,
+            renderHeight: height,
+            frameRate: frameRate,
+            isHDR: isHDR
+        )
+    }
+
+    /// Écart type : 19 plans annoncés, 12 écrits (un rush devenu indisponible
+    /// pendant l'encodage §66).
+    private static let truncatedDivergence = ExportSummaryLogic.ExportDivergence(
+        announcedSlotCount: 19,
+        producedSlotCount: 12,
+        announcedDuration: MediaTime(ticks: 60_000 * 19),
+        producedDuration: MediaTime(ticks: 60_000 * 12),
+        announcedProfile: nil,
+        producedProfile: nil
+    )
+
+    func testNoDivergenceWhenTheFileMatchesWhatWasAnnounced() {
+        // Cas NORMAL : ce qui a été annoncé a été écrit — aucun écart, donc
+        // aucun message d'alerte (l'export est un succès plein).
+        XCTAssertNil(
+            ExportSummaryLogic.divergence(
+                announcedSlotCount: 19,
+                announcedDuration: MediaTime(ticks: 570_000),
+                announcedProfile: nil,
+                producedSlotCount: 19,
+                producedDuration: MediaTime(ticks: 570_000),
+                producedProfile: nil
+            )
+        )
+    }
+
+    func testATruncatedExportIsDetectedOnPlanCountAndDuration() {
+        // §66 « asset en téléchargement : export limité avant lui » : le
+        // fichier contient MOINS que ce qui a été validé — c'est mesurable, et
+        // c'est mesuré.
+        let divergence = ExportSummaryLogic.divergence(
+            announcedSlotCount: 19,
+            announcedDuration: MediaTime(ticks: 570_000),
+            announcedProfile: nil,
+            producedSlotCount: 12,
+            producedDuration: MediaTime(ticks: 360_000),
+            producedProfile: nil
+        )
+        XCTAssertNotNil(divergence)
+        XCTAssertTrue(divergence?.hasFewerSlots ?? false)
+        XCTAssertTrue(divergence?.hasDifferentDuration ?? false)
+        XCTAssertFalse(divergence?.hasDifferentProfile ?? true, "Aucun profil connu : rien à comparer")
+    }
+
+    func testADifferentProfileAloneIsAlreadyADivergence() {
+        // §52/§56 : la ligne technique annoncée décrivait le montage complet.
+        // Si le clip maître retenu change, le fichier n'a plus la résolution
+        // promise — même avec le bon nombre de plans.
+        let announced = Self.profile(width: 2160, height: 3840, frameRate: 60, isHDR: true)
+        let produced = Self.profile(width: 1080, height: 1920, frameRate: 30, isHDR: false)
+        let divergence = ExportSummaryLogic.divergence(
+            announcedSlotCount: 19,
+            announcedDuration: MediaTime(ticks: 570_000),
+            announcedProfile: announced,
+            producedSlotCount: 19,
+            producedDuration: MediaTime(ticks: 570_000),
+            producedProfile: produced
+        )
+        XCTAssertNotNil(divergence)
+        XCTAssertFalse(divergence?.hasFewerSlots ?? true)
+        XCTAssertTrue(divergence?.hasDifferentProfile ?? false)
+    }
+
+    func testAnUnknownProducedProfileNeverInventsADivergence() {
+        // On ne compare jamais l'annonce à une valeur inconnue : un profil
+        // « différent » inventé serait exactement le mensonge que ce correctif
+        // supprime.
+        XCTAssertNil(
+            ExportSummaryLogic.divergence(
+                announcedSlotCount: 5,
+                announcedDuration: MediaTime(ticks: 300_000),
+                announcedProfile: Self.profile(width: 1080, height: 1920, frameRate: 30, isHDR: false),
+                producedSlotCount: 5,
+                producedDuration: MediaTime(ticks: 300_000),
+                producedProfile: nil
+            )
+        )
+    }
+
+    func testTruncatedMessageSaysWhatWasWrittenWhyAndWhatToDo() {
+        // §66 + §8.1 : les trois informations, dans cet ordre. Le fichier
+        // n'est jamais présenté comme perdu, et le projet est dit intact.
+        let message = ExportSummaryLogic.truncatedExportMessage(Self.truncatedDivergence)
+
+        // 1. Ce qui a été écrit, et ce qui avait été annoncé.
+        XCTAssertTrue(message.contains("12 plans"), message)
+        XCTAssertTrue(message.contains("19 plans"), message)
+        // 2. Pourquoi.
+        XCTAssertTrue(message.contains("indisponible"), message)
+        // 3. Quoi faire.
+        XCTAssertTrue(message.contains("relancez l'export"), message)
+        XCTAssertTrue(message.contains("intact"), message)
+        // §8.1 : jamais présenté comme un succès plein.
+        XCTAssertFalse(message.lowercased().contains("votre montage est exporté"), message)
+    }
+
+    func testTruncatedMessageNamesBothProfilesWhenTheyDiffer() {
+        let announced = Self.profile(width: 2160, height: 3840, frameRate: 60, isHDR: true)
+        let produced = Self.profile(width: 1080, height: 1920, frameRate: 30, isHDR: false)
+        let divergence = ExportSummaryLogic.ExportDivergence(
+            announcedSlotCount: 19,
+            producedSlotCount: 19,
+            announcedDuration: MediaTime(ticks: 570_000),
+            producedDuration: MediaTime(ticks: 570_000),
+            announcedProfile: announced,
+            producedProfile: produced
+        )
+        let message = ExportSummaryLogic.truncatedExportMessage(divergence)
+
+        XCTAssertTrue(message.contains("1080 × 1920"), message)
+        XCTAssertTrue(message.contains("2160 × 3840"), message)
+        XCTAssertTrue(message.contains("HDR"), message)
+        XCTAssertTrue(message.contains("SDR"), message)
+        // Aucun plan perdu : le geste proposé n'est pas « attendre le retour
+        // d'une vidéo », c'est simplement de pouvoir relancer.
+        XCTAssertFalse(message.contains("de nouveau disponible"), message)
+        // …et rien ne compare « 19 plans » à « 19 plans » : la phrase qui n'a
+        // rien à dire n'est pas écrite.
+        XCTAssertFalse(message.contains("au lieu des"), message)
+        // « Incomplet » serait faux : aucun plan ne manque.
+        XCTAssertEqual(
+            ExportSummaryLogic.readyTitle(origin: .truncated(divergence)),
+            "Export différent de l'annonce"
+        )
+    }
+
+    func testATruncatedExportIsNeverAnnouncedAsAFullSuccess() {
+        // LE défaut corrigé : la phase `ready` disait « Votre montage est
+        // exporté. » quel que soit le contenu du fichier.
+        let origin = ExportSummaryLogic.ReadyOrigin.truncated(Self.truncatedDivergence)
+
+        XCTAssertEqual(ExportSummaryLogic.readyTitle(origin: origin), "Export incomplet")
+        XCTAssertNotEqual(
+            ExportSummaryLogic.readyTitle(origin: origin),
+            ExportSummaryLogic.readyTitle(origin: .fresh)
+        )
+        XCTAssertNotEqual(
+            ExportSummaryLogic.readyMessage(origin: origin),
+            ExportSummaryLogic.freshReadyMessage
+        )
+        XCTAssertFalse(origin.isRestored, "Un export tronqué vient bien de se terminer (§60)")
+    }
+
+    func testTechnicalSummaryReadsLikeTheSummaryBlock() {
+        // §56 : la même façon de dire un profil, en une ligne — pour comparer
+        // deux profils dans une phrase sans inventer un second vocabulaire.
+        XCTAssertEqual(
+            ExportSummaryLogic.technicalSummary(
+                Self.profile(width: 2160, height: 3840, frameRate: 60, isHDR: false)
+            ),
+            "2160 × 3840 • Vertical • 60 i/s • SDR"
+        )
     }
 }

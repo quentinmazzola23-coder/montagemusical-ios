@@ -103,8 +103,34 @@ actor ExportActor {
     /// L'état observable du projet est REMIS À ZÉRO au démarrage d'un export
     /// réel (erreur et dernier résultat effacés) : plus aucune issue
     /// précédente ne peut être confondue avec celle du nouvel export.
+    ///
+    /// - Parameter snapshot: montage à encoder. **Quand il est fourni, c'est
+    ///   EXACTEMENT lui qui est encodé** — aucune relecture de la base n'a
+    ///   lieu.
+    ///
+    ///   C'est le contrat du résumé avant export (§56) : l'utilisateur y voit
+    ///   un montage PRÉCIS (« 19 plans • 9,50 s », résolution, cadence) et
+    ///   appuie sur `Exporter` pour CELUI-LÀ. Entre l'affichage du résumé et
+    ///   l'appui, l'état du projet peut changer tout seul — une résolution
+    ///   iCloud qui aboutit fait passer une case de `downloading` à `ready`,
+    ///   et une relecture fraîche produirait alors un montage plus long, avec
+    ///   d'autres coupes, éventuellement un autre profil maître (§52). Le
+    ///   fichier livré ne serait plus celui qui a été validé : c'est très
+    ///   exactement la surprise que §3 interdit.
+    ///
+    ///   Passer l'instantané affiché rend l'export DÉTERMINISTE par rapport à
+    ///   l'écran de validation. La case résolue entre-temps n'est pas perdue :
+    ///   elle sera dans le montage au prochain export, avec un résumé qui
+    ///   l'annonce.
+    ///
+    ///   `nil` (défaut) conserve le comportement historique : l'instantané est
+    ///   relu au démarrage. C'est ce qu'il faut pour un déclenchement qui
+    ///   n'affiche aucun résumé (relance automatique, test).
     @discardableResult
-    func startExport(projectID: UUID) async -> ExportStartResult {
+    func startExport(
+        projectID: UUID,
+        snapshot providedSnapshot: ProjectSnapshot? = nil
+    ) async -> ExportStartResult {
         guard !startingProjects.contains(projectID) else {
             logger.info("Export déjà en préparation pour ce projet (§58) — démarrage refusé.")
             return .alreadyRunning
@@ -117,22 +143,30 @@ actor ExportActor {
             // Relance immédiate après une annulation : attendre la fin propre
             // de la tâche annulée (statut restauré, temporaire supprimé) puis
             // RE-VÉRIFIER tous les gardes — l'acteur est réentrant pendant
-            // l'await.
+            // l'await. L'instantané VALIDÉ est reconduit tel quel : la relance
+            // encode le montage que l'utilisateur avait approuvé, pas celui
+            // que la base porte après l'annulation.
             await existing.value
-            return await startExport(projectID: projectID)
+            return await startExport(projectID: projectID, snapshot: providedSnapshot)
         }
 
         startingProjects.insert(projectID)
         defer { startingProjects.remove(projectID) }
 
         let snapshot: ProjectSnapshot
-        do {
-            snapshot = try await projectStore.projectSnapshot(projectID: projectID)
-        } catch {
-            logger.error("Instantané de projet illisible avant export : \(error.localizedDescription)")
-            let failure = ExportError.exportFailed(error.localizedDescription)
-            errorByProject[projectID] = failure
-            return .refused(failure)
+        if let providedSnapshot {
+            // Montage VALIDÉ par l'utilisateur (§56) : encodé tel quel, sans
+            // relecture — voir la documentation du paramètre.
+            snapshot = providedSnapshot
+        } else {
+            do {
+                snapshot = try await projectStore.projectSnapshot(projectID: projectID)
+            } catch {
+                logger.error("Instantané de projet illisible avant export : \(error.localizedDescription)")
+                let failure = ExportError.exportFailed(error.localizedDescription)
+                errorByProject[projectID] = failure
+                return .refused(failure)
+            }
         }
 
         // Rien à exporter → aucun encodage, aucun changement de statut,
@@ -200,13 +234,14 @@ actor ExportActor {
     /// export réussi »).
     ///
     /// Deux origines possibles :
-    /// 1. l'export de la session courante (`isRestored == false`) — durée et
-    ///    nombre de plans sont ceux qui ont été encodés ;
+    /// 1. l'export de la session courante (`isRestored == false`) — durée,
+    ///    nombre de plans et profil maître sont ceux qui ont RÉELLEMENT été
+    ///    encodés (troncature §66 comprise) ;
     /// 2. à défaut, le fichier le plus récent d'`exports/` (§11), RESTAURÉ au
     ///    premier accès après relance (`isRestored == true`). Le schéma §10
     ///    est verbatim : aucune colonne ne décrit un export, le fichier EST la
-    ///    trace durable — sa durée et son nombre de plans ne sont donc pas
-    ///    connus et valent zéro (jamais affichés comme des mesures).
+    ///    trace durable — sa durée, son nombre de plans et son profil ne sont
+    ///    donc pas connus (zéro / `nil`, jamais affichés comme des mesures).
     ///
     /// La valeur restaurée est mémorisée pour que la lecture reste stable ;
     /// elle est PURGÉE au démarrage d'un nouvel export et n'est JAMAIS
@@ -226,6 +261,7 @@ actor ExportActor {
             outputURL: url,
             duration: .zero,
             slotCount: 0,
+            masterProfile: nil, // §60 : le fichier survit, pas ses mesures
             isRestored: true
         )
         outcomeByProject[projectID] = restored
@@ -247,10 +283,15 @@ actor ExportActor {
                 Task { await self.update(progress: fraction, projectID: projectID) }
             }
 
+            // Les mesures publiées décrivent le FICHIER écrit, troncature §66
+            // comprise : durée, nombre de plans ET profil maître réellement
+            // utilisé (§52). L'interface peut donc comparer ce qu'elle avait
+            // annoncé (§56) à ce qui a été produit, et signaler l'écart.
             outcomeByProject[projectID] = ExportOutcome(
                 outputURL: result.outputURL,
                 duration: result.duration,
-                slotCount: result.slotCount
+                slotCount: result.slotCount,
+                masterProfile: result.masterProfile
             )
             errorByProject[projectID] = nil
             // §60 : succès enregistré (statut restauré + `updatedAt`).

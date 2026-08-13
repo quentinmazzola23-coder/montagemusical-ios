@@ -22,6 +22,18 @@
 //  SOMME des durées des cases prêtes, continuité à l'intérieur d'un run et
 //  absence de trou aux jonctions — le tout en TICKS exacts, sans AVFoundation.
 //
+//  DEUX EXIGENCES DE MÉTHODE, tirées d'une relecture adversariale :
+//
+//  1. **On teste ce que la PRODUCTION appelle.** L'export et l'aperçu
+//     consomment `ReadyTimeline.placements` / `.musicInsertions` : ce sont
+//     donc ELLES qui sont vérifiées ici, avec des littéraux calculés à la
+//     main — pas seulement `compositionStart(of:)`, qui n'en est qu'une
+//     lecture ponctuelle.
+//  2. **Les fixtures ont des durées INÉGALES.** Un montage où toutes les
+//     cases durent 30 000 ticks masque toute erreur de cumul (décaler d'une
+//     case ou d'un run donne le même résultat qu'un cumul correct dans trop de
+//     cas). Les cases PAIRES durent ici 30 000 ticks et les IMPAIRES 20 000.
+//
 
 import XCTest
 @testable import MontageMusical
@@ -54,15 +66,33 @@ final class ReadyTimelineTests: XCTestCase {
         )
     }
 
-    /// Montage de `count` cases jointives de 30 000 ticks (0,5 s), pavant la
-    /// musique sans trou (§28.1). `readyIndexes` dit lesquelles sont prêtes ;
-    /// les autres sont VIDES.
+    /// Durée d'une case du montage de référence, en ticks (§9) : **30 000
+    /// (0,5 s) pour un index PAIR, 20 000 (1/3 s) pour un index IMPAIR**.
+    ///
+    /// Des durées INÉGALES sont indispensables : avec des cases toutes égales,
+    /// un cumul décalé d'une case — ou d'un run entier — produit très souvent
+    /// la même valeur qu'un cumul correct, et le test reste vert.
+    private static func durationTicks(ofSlotAt index: Int) -> Int64 {
+        index.isMultiple(of: 2) ? 30_000 : 20_000
+    }
+
+    /// Début ABSOLU de la case `index` : les cases pavent la musique sans trou
+    /// (§28.1), donc `start(i) = somme des durées des cases précédentes`. Une
+    /// PAIRE de cases (une paire + une impaire) dure 50 000 ticks, d'où
+    /// `start(i) = (i / 2) × 50 000 (+ 30 000 si i est impair)`.
+    private static func startTicks(ofSlotAt index: Int) -> Int64 {
+        Int64(index / 2) * 50_000 + (index.isMultiple(of: 2) ? 0 : 30_000)
+    }
+
+    /// Montage de `count` cases JOINTIVES aux durées inégales ci-dessus,
+    /// pavant la musique sans trou (§28.1). `readyIndexes` dit lesquelles sont
+    /// prêtes ; les autres sont VIDES.
     private func makeMontage(count: Int, ready readyIndexes: Set<Int>) -> [ProjectSlot] {
         (0..<count).map { index in
             makeSlot(
                 index: index,
-                startTicks: Int64(index) * 30_000,
-                endTicks: Int64(index + 1) * 30_000,
+                startTicks: Self.startTicks(ofSlotAt: index),
+                endTicks: Self.startTicks(ofSlotAt: index) + Self.durationTicks(ofSlotAt: index),
                 status: readyIndexes.contains(index) ? ClipAssignmentStatus.ready : nil
             )
         }
@@ -162,13 +192,24 @@ final class ReadyTimelineTests: XCTestCase {
 
     // MARK: - EXEMPLE CHIFFRÉ DE L'UTILISATEUR : cases 28…35 + 40…50
 
-    /// 51 cases de 0,5 s (30 000 ticks), cases 28 à 35 et 40 à 50 prêtes,
-    /// cases 36 à 39 VIDES. Valeurs calculées à la main (60 000 ticks/s, §9) :
-    /// - run 1 : cases 28…35, soit 8 plans, `musicStart` = 840 000 ticks ;
-    /// - run 2 : cases 40…50, soit 11 plans, `musicStart` = 1 200 000 ticks ;
-    /// - montage = 8 + 11 = 19 plans, durée = 19 × 30 000 = 570 000 ticks ;
-    /// - la portion de musique des cases 36…39 (120 000 ticks) N'EXISTE PAS
-    ///   dans le fichier exporté.
+    /// 51 cases jointives aux durées INÉGALES (30 000 ticks si l'index est
+    /// pair, 20 000 s'il est impair), cases 28 à 35 et 40 à 50 prêtes, cases
+    /// 36 à 39 VIDES.
+    ///
+    /// Valeurs calculées à la main (60 000 ticks/s, §9) — une paire de cases
+    /// consécutives dure 50 000 ticks, donc `start(i) = (i / 2) × 50 000`
+    /// (+ 30 000 si `i` est impair) :
+    /// - run 1 : cases 28…35, 8 plans, `musicStart` = 14 × 50 000 = 700 000,
+    ///   `musicEnd` = 18 × 50 000 = 900 000, durée = 4 × 30 000 + 4 × 20 000
+    ///   = 200 000 ;
+    /// - run 2 : cases 40…50, 11 plans, `musicStart` = 20 × 50 000 =
+    ///   1 000 000, `musicEnd` = 1 250 000 + 30 000 = 1 280 000, durée =
+    ///   6 × 30 000 + 5 × 20 000 = 280 000 ;
+    /// - montage = 19 plans, durée = 200 000 + 280 000 = **480 000 ticks** ;
+    /// - la portion de musique des cases 36…39 (2 × 30 000 + 2 × 20 000 =
+    ///   100 000 ticks) N'EXISTE PAS dans le fichier exporté — et
+    ///   480 000 + 100 000 = 580 000 = 1 280 000 − 700 000, ce qui referme le
+    ///   compte.
     private var montageWithTwoRuns: [ProjectSlot] {
         makeMontage(count: 51, ready: Set(28...35).union(Set(40...50)))
     }
@@ -181,6 +222,11 @@ final class ReadyTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.runs[1].slots.map(\.index), Array(40...50))
         XCTAssertEqual(timeline.runs[0].slotCount, 8)
         XCTAssertEqual(timeline.runs[1].slotCount, 11)
+        // Bornes musicales ABSOLUES des deux zones, calculées à la main.
+        XCTAssertEqual(timeline.runs[0].musicStart, MediaTime(ticks: 700_000))
+        XCTAssertEqual(timeline.runs[0].musicEnd, MediaTime(ticks: 900_000))
+        XCTAssertEqual(timeline.runs[1].musicStart, MediaTime(ticks: 1_000_000))
+        XCTAssertEqual(timeline.runs[1].musicEnd, MediaTime(ticks: 1_280_000))
         // Nombre TOTAL de plans exportés — l'exemple de l'utilisateur.
         XCTAssertEqual(timeline.slotCount, 19)
         XCTAssertEqual(timeline.allSlots.map(\.index), Array(28...35) + Array(40...50))
@@ -190,13 +236,13 @@ final class ReadyTimelineTests: XCTestCase {
         let timeline = readyTimeline(slots: montageWithTwoRuns)
 
         // Durée = SOMME des durées des cases prêtes, et NON
-        // `dernière.end - première.start` (= 1 530 000 − 840 000 = 690 000).
-        XCTAssertEqual(timeline.duration, MediaTime(ticks: 570_000))
-        XCTAssertEqual(timeline.duration.ticks, 19 * 30_000)
+        // `dernière.end - première.start` (= 1 280 000 − 700 000 = 580 000).
+        XCTAssertEqual(timeline.duration, MediaTime(ticks: 480_000))
+        XCTAssertEqual(timeline.duration.ticks, 10 * 30_000 + 9 * 20_000)
         XCTAssertNotEqual(
             timeline.duration,
-            MediaTime(ticks: 1_530_000 - 840_000),
-            "les 4 cases vides (120 000 ticks) sont SUPPRIMÉES, musique comprise"
+            MediaTime(ticks: 1_280_000 - 700_000),
+            "les 4 cases vides (100 000 ticks) sont SUPPRIMÉES, musique comprise"
         )
         // Contrôle direct : la somme des durées de chaque case exportée.
         let summedTicks = timeline.allSlots.reduce(Int64(0)) { $0 + $1.duration.ticks }
@@ -206,13 +252,14 @@ final class ReadyTimelineTests: XCTestCase {
     func testSecondRunStartsRightAfterTheFirstOne() throws {
         let timeline = readyTimeline(slots: montageWithTwoRuns)
 
-        // Position du run 2 = somme des durées des cases du run 1.
+        // Position du run 2 = somme des durées des cases du run 1 (200 000),
+        // et NON l'écart musical entre les deux zones (300 000).
         XCTAssertEqual(timeline.compositionStart(ofRun: 0), .zero)
-        XCTAssertEqual(timeline.compositionStart(ofRun: 1), MediaTime(ticks: 240_000))
-        XCTAssertEqual(timeline.compositionStart(ofRun: 1).ticks, 8 * 30_000)
+        XCTAssertEqual(timeline.compositionStart(ofRun: 1), MediaTime(ticks: 200_000))
+        XCTAssertEqual(timeline.compositionStart(ofRun: 1).ticks, 4 * 30_000 + 4 * 20_000)
         // `runStarts` fait le même calcul en un parcours : c'est lui qu'utilise
         // l'assemblage, il ne doit jamais diverger.
-        XCTAssertEqual(timeline.runStarts, [MediaTime(ticks: 0), MediaTime(ticks: 240_000)])
+        XCTAssertEqual(timeline.runStarts, [MediaTime(ticks: 0), MediaTime(ticks: 200_000)])
 
         // Bornes hors plage : jamais de valeur inventée.
         XCTAssertEqual(timeline.compositionStart(ofRun: -1), .zero)
@@ -225,17 +272,89 @@ final class ReadyTimelineTests: XCTestCase {
 
         // Première case du montage : instant zéro.
         XCTAssertEqual(timeline.compositionStart(of: slots[28]), MediaTime.zero)
-        // Dernière case du run 1 : 7 × 30 000.
-        XCTAssertEqual(timeline.compositionStart(of: slots[35]), MediaTime(ticks: 210_000))
+        // Dernière case du run 1 : 200 000 − 20 000 (sa propre durée).
+        XCTAssertEqual(timeline.compositionStart(of: slots[35]), MediaTime(ticks: 180_000))
         // Première case du run 2 : elle suit IMMÉDIATEMENT la case 35.
-        XCTAssertEqual(timeline.compositionStart(of: slots[40]), MediaTime(ticks: 240_000))
-        // Dernière case : 240 000 + 10 × 30 000.
-        XCTAssertEqual(timeline.compositionStart(of: slots[50]), MediaTime(ticks: 540_000))
+        XCTAssertEqual(timeline.compositionStart(of: slots[40]), MediaTime(ticks: 200_000))
+        // Dernière case : 480 000 − 30 000 (sa propre durée).
+        XCTAssertEqual(timeline.compositionStart(of: slots[50]), MediaTime(ticks: 450_000))
 
         // Fin du dernier plan == durée du montage : aucune dérive cumulative
         // après 19 cases et une jonction (§9, ticks entiers).
         let lastStart = try XCTUnwrap(timeline.compositionStart(of: slots[50]))
         XCTAssertEqual(lastStart + slots[50].duration, timeline.duration)
+    }
+
+    // MARK: - LE calcul du produit : `placements` et `musicInsertions`
+
+    /// **Le test qui manquait.** L'export (`ProjectExporter.assemble`) et
+    /// l'aperçu (`PreviewBuilder.makeTimelineComposition`) ne consomment plus
+    /// `compositionStart(of:)` case par case : ils lisent `placements`. C'est
+    /// donc cette liste — dans son ORDRE et dans ses VALEURS — qui doit être
+    /// vérifiée, sans quoi un décalage d'un run entier passerait inaperçu.
+    ///
+    /// Les 19 positions sont écrites en toutes lettres, cumulées à la main :
+    /// run 1 depuis 0, run 2 depuis 200 000, en alternant 30 000 et 20 000.
+    func testPlacementsGiveEveryHandComputedPosition() {
+        let timeline = readyTimeline(slots: montageWithTwoRuns)
+
+        let placements = timeline.placements
+
+        XCTAssertEqual(placements.count, 19)
+        XCTAssertEqual(placements.map(\.slot.index), Array(28...35) + Array(40...50))
+        XCTAssertEqual(placements.map(\.compositionStart.ticks), [
+            // Run 1 (cases 28…35) : 30 000 / 20 000 en alternance depuis 0.
+            0, 30_000, 50_000, 80_000, 100_000, 130_000, 150_000, 180_000,
+            // Run 2 (cases 40…50) : reprise à 200 000, jamais à 300 000
+            // (l'écart musical des cases vides est SUPPRIMÉ).
+            200_000, 230_000, 250_000, 280_000, 300_000, 330_000, 350_000,
+            380_000, 400_000, 430_000, 450_000
+        ])
+        XCTAssertEqual(placements.map(\.duration.ticks), [
+            30_000, 20_000, 30_000, 20_000, 30_000, 20_000, 30_000, 20_000,
+            30_000, 20_000, 30_000, 20_000, 30_000, 20_000, 30_000, 20_000,
+            30_000, 20_000, 30_000
+        ])
+        // Chaque case commence là où la précédente finit, jonction comprise,
+        // et la dernière ferme exactement le montage.
+        XCTAssertEqual(
+            placements.dropLast().map(\.compositionEnd),
+            placements.dropFirst().map(\.compositionStart)
+        )
+        XCTAssertEqual(placements.last?.compositionEnd, timeline.duration)
+        // `compositionStart(of:)` n'est qu'une lecture de cette liste.
+        XCTAssertEqual(
+            placements.map { timeline.compositionStart(of: $0.slot) },
+            placements.map { Optional($0.compositionStart) }
+        )
+    }
+
+    /// UNE portion de musique par zone remplie, avec ses bornes ABSOLUES dans
+    /// le morceau et sa position dans le montage — l'autre moitié du calcul
+    /// que l'export et l'aperçu consomment tels quels.
+    func testMusicInsertionsAreOnePortionPerZoneWithAbsoluteSourceBounds() {
+        let timeline = readyTimeline(slots: montageWithTwoRuns)
+
+        XCTAssertEqual(timeline.musicInsertions, [
+            MusicInsertion(
+                sourceStart: MediaTime(ticks: 700_000),   // début de la case 28
+                duration: MediaTime(ticks: 200_000),      // 8 cases du run 1
+                compositionStart: .zero
+            ),
+            MusicInsertion(
+                sourceStart: MediaTime(ticks: 1_000_000), // début de la case 40
+                duration: MediaTime(ticks: 280_000),      // 11 cases du run 2
+                compositionStart: MediaTime(ticks: 200_000)
+            )
+        ])
+        // Les portions sont JOINTIVES dans la composition : la musique n'a
+        // aucun trou, elle SAUTE de 900 000 à 1 000 000 dans le morceau.
+        XCTAssertEqual(
+            timeline.musicInsertions.map { ($0.compositionStart + $0.duration).ticks },
+            [200_000, 480_000]
+        )
+        // Une portion par run, jamais une par case.
+        XCTAssertEqual(timeline.musicInsertions.count, timeline.runs.count)
     }
 
     /// Une case NON exportée n'a aucun instant de composition — l'appelant ne
@@ -257,27 +376,35 @@ final class ReadyTimelineTests: XCTestCase {
     // MARK: - Continuité : écarts d'origine DANS un run, aucun trou ENTRE runs
 
     /// À l'intérieur d'un run, l'écart entre deux cases consécutives est
-    /// rigoureusement celui de la musique : la concaténation translate les
-    /// runs, elle n'étire rien (§53).
-    func testPositionsInsideARunKeepTheOriginalSpacing() throws {
-        let timeline = readyTimeline(slots: montageWithTwoRuns)
+    /// rigoureusement celui de la musique ; À LA JONCTION entre deux runs,
+    /// l'écart musical est au contraire SUPPRIMÉ.
+    ///
+    /// Tout est écrit en littéraux ABSOLUS, des deux côtés. La version
+    /// précédente de ce test comparait `currentStart - previousStart` à
+    /// `current.start - previous.start` : la position du run s'y simplifiait
+    /// des deux côtés, si bien que le test serait resté vert même avec des
+    /// runs posés n'importe où.
+    func testPositionsInsideARunKeepTheOriginalSpacing() {
+        let slots = montageWithTwoRuns
+        let timeline = readyTimeline(slots: slots)
 
-        for (index, run) in timeline.runs.enumerated() {
-            let base = timeline.compositionStart(ofRun: index)
-            XCTAssertEqual(
-                timeline.compositionStart(of: run.slots[0]), base,
-                "chaque run ouvre à sa position de composition"
-            )
-            for (previous, current) in zip(run.slots, run.slots.dropFirst()) {
-                let previousStart = try XCTUnwrap(timeline.compositionStart(of: previous))
-                let currentStart = try XCTUnwrap(timeline.compositionStart(of: current))
-                XCTAssertEqual(
-                    currentStart.ticks - previousStart.ticks,
-                    current.start.ticks - previous.start.ticks,
-                    "écart musical d'origine conservé"
-                )
-            }
-        }
+        // Deux cases VOISINES du run 1 : mêmes 30 000 ticks d'écart dans la
+        // musique (750 000 → 780 000) et dans le montage (50 000 → 80 000).
+        XCTAssertEqual(slots[30].start, MediaTime(ticks: 750_000))
+        XCTAssertEqual(slots[31].start, MediaTime(ticks: 780_000))
+        XCTAssertEqual(timeline.compositionStart(of: slots[30]), MediaTime(ticks: 50_000))
+        XCTAssertEqual(timeline.compositionStart(of: slots[31]), MediaTime(ticks: 80_000))
+
+        // Écart INÉGAL suivant : la case 31 dure 20 000, pas 30 000.
+        XCTAssertEqual(timeline.compositionStart(of: slots[32]), MediaTime(ticks: 100_000))
+
+        // À LA JONCTION : 120 000 ticks séparent les cases 35 et 40 dans la
+        // musique (880 000 → 1 000 000), 20 000 seulement dans le montage
+        // (180 000 → 200 000) — c'est-à-dire la seule durée de la case 35.
+        XCTAssertEqual(slots[35].start, MediaTime(ticks: 880_000))
+        XCTAssertEqual(slots[40].start, MediaTime(ticks: 1_000_000))
+        XCTAssertEqual(timeline.compositionStart(of: slots[35]), MediaTime(ticks: 180_000))
+        XCTAssertEqual(timeline.compositionStart(of: slots[40]), MediaTime(ticks: 200_000))
     }
 
     /// Entre deux runs, AUCUN trou : le run suivant commence exactement là où
@@ -310,17 +437,18 @@ final class ReadyTimelineTests: XCTestCase {
 
         XCTAssertEqual(timeline.runs.map { $0.slots.map(\.index) }, [[1, 2], [5], [9, 10, 11]])
         XCTAssertEqual(timeline.slotCount, 6)
-        XCTAssertEqual(timeline.duration, MediaTime(ticks: 6 * 30_000))
-        XCTAssertEqual(timeline.runStarts.map(\.ticks), [0, 60_000, 90_000])
+        // 20 000 + 30 000 | 20 000 | 20 000 + 30 000 + 20 000 = 140 000.
+        XCTAssertEqual(timeline.duration, MediaTime(ticks: 140_000))
+        XCTAssertEqual(timeline.runStarts.map(\.ticks), [0, 50_000, 70_000])
 
         // Un run d'UNE case a des bornes cohérentes.
         let single = timeline.runs[1]
         XCTAssertEqual(single.slotCount, 1)
         XCTAssertEqual(single.startIndex, 5)
         XCTAssertEqual(single.endIndex, 5)
-        XCTAssertEqual(single.musicStart, MediaTime(ticks: 150_000))
-        XCTAssertEqual(single.musicEnd, MediaTime(ticks: 180_000))
-        XCTAssertEqual(single.duration, MediaTime(ticks: 30_000))
+        XCTAssertEqual(single.musicStart, MediaTime(ticks: 130_000))
+        XCTAssertEqual(single.musicEnd, MediaTime(ticks: 150_000))
+        XCTAssertEqual(single.duration, MediaTime(ticks: 20_000))
         XCTAssertEqual(single.offset(of: single.slots[0]), .zero)
     }
 
@@ -331,7 +459,8 @@ final class ReadyTimelineTests: XCTestCase {
 
         XCTAssertEqual(timeline.runs.count, 1)
         XCTAssertEqual(timeline.allSlots.map(\.index), [3])
-        XCTAssertEqual(timeline.duration, MediaTime(ticks: 30_000))
+        XCTAssertEqual(timeline.duration, MediaTime(ticks: 20_000), "case impaire")
+        XCTAssertEqual(timeline.runs[0].musicStart, MediaTime(ticks: 80_000))
     }
 
     // MARK: - §70 : trou au milieu / cases après le trou
@@ -428,7 +557,8 @@ final class ReadyTimelineTests: XCTestCase {
         XCTAssertEqual(truncated.runs[0].slots.map(\.index), Array(28...35))
         XCTAssertEqual(truncated.runs[1].slots.map(\.index), [40, 41])
         XCTAssertEqual(truncated.slotCount, 10)
-        XCTAssertEqual(truncated.duration, MediaTime(ticks: 300_000))
+        // 200 000 (run 1) + 30 000 (case 40) + 20 000 (case 41).
+        XCTAssertEqual(truncated.duration, MediaTime(ticks: 250_000))
         // Les cases conservées n'ont pas bougé : même position qu'avant.
         XCTAssertEqual(
             truncated.compositionStart(of: truncated.allSlots[9]),
@@ -443,7 +573,7 @@ final class ReadyTimelineTests: XCTestCase {
 
         XCTAssertEqual(truncated.runs.count, 1, "le second run est abandonné")
         XCTAssertEqual(truncated.slotCount, 8)
-        XCTAssertEqual(truncated.duration, MediaTime(ticks: 240_000))
+        XCTAssertEqual(truncated.duration, MediaTime(ticks: 200_000))
     }
 
     func testTruncationBoundsAreSafe() {
@@ -453,5 +583,152 @@ final class ReadyTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.truncated(toFirst: -3), .empty)
         XCTAssertEqual(timeline.truncated(toFirst: 19), timeline)
         XCTAssertEqual(timeline.truncated(toFirst: 999), timeline)
+    }
+
+    // MARK: - Invariant de RUN : index consécutifs ET cases jointives
+
+    /// Deux cases prêtes d'index CONSÉCUTIFS mais NON JOINTIVES forment DEUX
+    /// runs, pas un seul.
+    ///
+    /// C'est l'invariant qui rend `ReadyRun.duration` (`musicEnd -
+    /// musicStart`) égale à la somme des durées des cases du run — la durée
+    /// qui est annoncée (§56), estimée (§57) et encodée (portion de musique).
+    /// Sans cette fermeture, le run [4, 5] ci-dessous durerait 70 000 ticks
+    /// pour 50 000 ticks de vidéo : la musique dépasserait l'image de
+    /// 20 000 ticks, silencieusement.
+    func testTwoConsecutiveIndexesThatDoNotTouchFormTwoRuns() {
+        let first = makeSlot(index: 4, startTicks: 100_000, endTicks: 130_000)
+        let second = makeSlot(index: 5, startTicks: 150_000, endTicks: 170_000)
+
+        let timeline = readyTimeline(slots: [first, second])
+
+        XCTAssertEqual(timeline.runs.map { $0.slots.map(\.index) }, [[4], [5]])
+        XCTAssertEqual(timeline.duration, MediaTime(ticks: 50_000), "30 000 + 20 000")
+        XCTAssertNotEqual(
+            timeline.duration,
+            MediaTime(ticks: 70_000),
+            "170 000 − 100 000 inclurait les 20 000 ticks de vide entre les deux cases"
+        )
+        XCTAssertEqual(timeline.placements.map(\.compositionStart.ticks), [0, 30_000])
+        // Deux zones ⇒ deux portions de musique, prélevées à leurs temps
+        // ABSOLUS respectifs : le vide de la musique n'est pas encodé.
+        XCTAssertEqual(timeline.musicInsertions, [
+            MusicInsertion(
+                sourceStart: MediaTime(ticks: 100_000),
+                duration: MediaTime(ticks: 30_000),
+                compositionStart: .zero
+            ),
+            MusicInsertion(
+                sourceStart: MediaTime(ticks: 150_000),
+                duration: MediaTime(ticks: 20_000),
+                compositionStart: MediaTime(ticks: 30_000)
+            )
+        ])
+    }
+
+    /// Deux cases prêtes JOINTIVES mais d'index NON consécutifs (une case a
+    /// été retirée de la partition sans que les temps bougent) forment elles
+    /// aussi deux runs : l'ordre du montage est celui des index, un saut
+    /// d'index n'est pas une continuité.
+    func testTwoTouchingSlotsWithNonConsecutiveIndexesFormTwoRuns() {
+        let first = makeSlot(index: 4, startTicks: 100_000, endTicks: 130_000)
+        let second = makeSlot(index: 6, startTicks: 130_000, endTicks: 150_000)
+
+        let timeline = readyTimeline(slots: [first, second])
+
+        XCTAssertEqual(timeline.runs.map { $0.slots.map(\.index) }, [[4], [6]])
+        XCTAssertEqual(timeline.slotCount, 2)
+        XCTAssertEqual(timeline.duration, MediaTime(ticks: 50_000))
+        // Les cases restent JOINTIVES dans le montage : deux runs ne créent
+        // aucun trou, ils changent seulement le découpage de la musique.
+        XCTAssertEqual(timeline.placements.map(\.compositionStart.ticks), [0, 30_000])
+    }
+
+    /// L'invariant vaut pour CHAQUE run de la fixture de référence.
+    func testEveryRunDurationEqualsTheSumOfItsSlotDurations() {
+        let timeline = readyTimeline(slots: montageWithTwoRuns)
+
+        for run in timeline.runs {
+            XCTAssertEqual(
+                run.duration.ticks,
+                run.slots.reduce(Int64(0)) { $0 + $1.duration.ticks },
+                "run \(run.startIndex)…\(run.endIndex)"
+            )
+        }
+    }
+
+    // MARK: - Propriété : AUCUNE case prête n'est jamais omise
+
+    /// Les six états possibles d'une case : vide, puis les cinq statuts.
+    private static let everySlotState: [ClipAssignmentStatus?] = [
+        nil, .ready, .resolving, .downloading, .unavailable, .tooShort
+    ]
+
+    /// Matrice EXHAUSTIVE d'arrangements : de 0 à 6 cases, chacune prenant
+    /// tour à tour les six états ci-dessus (55 987 montages). Elle contient
+    /// donc par construction les trous en tête, au milieu et en fin, les trous
+    /// CONSÉCUTIFS, les runs d'une seule case, les montages entièrement prêts
+    /// et les montages sans aucune case prête.
+    private func forEachArrangement(_ body: ([ProjectSlot]) -> Void) {
+        for count in 0...6 {
+            var arrangements = 1
+            for _ in 0..<count { arrangements *= Self.everySlotState.count }
+
+            for code in 0..<arrangements {
+                var remaining = code
+                var slots: [ProjectSlot] = []
+                slots.reserveCapacity(count)
+                for index in 0..<count {
+                    let state = Self.everySlotState[remaining % Self.everySlotState.count]
+                    remaining /= Self.everySlotState.count
+                    slots.append(makeSlot(
+                        index: index,
+                        startTicks: Self.startTicks(ofSlotAt: index),
+                        endTicks: Self.startTicks(ofSlotAt: index)
+                            + Self.durationTicks(ofSlotAt: index),
+                        status: state
+                    ))
+                }
+                body(slots)
+            }
+        }
+    }
+
+    /// Test de PROPRIÉTÉ sur toute la matrice.
+    ///
+    /// L'invariant central tient en une ligne — « aucune case prête n'est
+    /// omise, aucune autre n'entre » : `allSlots` est EXACTEMENT la suite des
+    /// cases `ready` triées par index. Il est vérifié sur le tableau donné ET
+    /// sur le tableau INVERSÉ : le tri par index précède toute décision de
+    /// découpage.
+    ///
+    /// Deux invariants de durée l'accompagnent sur la même matrice, parce
+    /// qu'ils portent la même promesse produite : le montage dure la somme des
+    /// durées des cases prêtes, et chaque run dure la somme des durées de SES
+    /// cases (c'est cette dernière égalité qui rend la portion de musique d'un
+    /// run exacte).
+    func testEveryArrangementKeepsExactlyTheReadySlotsSortedByIndex() {
+        forEachArrangement { slots in
+            let readySlots = slots.filter { $0.assignment?.status == .ready }
+            let timeline = readyTimeline(slots: slots)
+
+            XCTAssertEqual(timeline.allSlots.map(\.id), readySlots.map(\.id))
+            XCTAssertEqual(
+                readyTimeline(slots: Array(slots.reversed())).allSlots.map(\.id),
+                readySlots.map(\.id),
+                "tableau désordonné : le tri par index précède le découpage"
+            )
+            XCTAssertEqual(
+                timeline.duration.ticks,
+                readySlots.reduce(Int64(0)) { $0 + $1.duration.ticks }
+            )
+            for run in timeline.runs {
+                XCTAssertEqual(
+                    run.duration.ticks,
+                    run.slots.reduce(Int64(0)) { $0 + $1.duration.ticks },
+                    "run \(run.startIndex)…\(run.endIndex) : durée ≠ somme de ses cases"
+                )
+            }
+        }
     }
 }
