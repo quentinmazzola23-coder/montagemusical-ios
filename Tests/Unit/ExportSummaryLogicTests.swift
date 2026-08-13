@@ -41,6 +41,12 @@
 //    réponse universelle — une case remplie mais non prête s'attend ou se
 //    remplace.
 //
+//  SECOND PASSAGE (même jour) : cette table des gestes est aussi celle du
+//  LECTEUR D'APERÇU, qui imposait encore « Remplissez au moins une case ».
+//  `nothingReadyHint(_:action:)` ne fait varier que le but nommé en fin de
+//  phrase (exporter / prévisualiser) — jamais le geste, sinon deux écrans
+//  conseilleraient deux choses pour la même situation.
+//
 
 import XCTest
 @testable import MontageMusical
@@ -274,9 +280,11 @@ final class ExportSummaryLogicTests: XCTestCase {
     }
 
     func testExportedPlansLabelCountsAllZonesFromTwo() {
-        // L'exemple de la demande : cases 28..35 et 40..50 prêtes (index
-        // 27…34 et 39…49) → 8 + 11 = 19 plans, en 2 zones. Une plage unique
-        // mentirait : les cases 36 à 39 ne sont PAS dans le fichier.
+        // L'exemple de la demande, dans SA numérotation (plans AFFICHÉS,
+        // 1-based — convention en tête d'ExportModels.swift) : plans 28 à 35 et
+        // 40 à 50 prêts, soit les index 27…34 et 39…49 → 8 + 11 = 19 plans, en
+        // 2 zones. Une plage unique mentirait : les plans 36 à 39 ne sont PAS
+        // dans le fichier.
         XCTAssertEqual(
             ExportSummaryLogic.exportedPlansLabel(zones: [27...34, 39...49], slotCount: 19),
             "19 plans en 2 zones"
@@ -432,6 +440,50 @@ final class ExportSummaryLogicTests: XCTestCase {
             // Hint d'un bouton (§39) : une phrase, pas un paragraphe.
             XCTAssertLessThan(shortHint.count, 100, shortHint)
         }
+    }
+
+    func testTheSameCauseNamesTheSameGestureForThePreviewAndForTheExport() {
+        // §64, second passage de relecture (13 août 2026) : le lecteur d'aperçu
+        // disait encore « Remplissez au moins une case » quelle que soit la
+        // cause. Il partage désormais CETTE table — une seule, sinon deux
+        // écrans conseilleraient deux gestes différents pour la même situation.
+        // Seul le BUT nommé en fin de phrase change ; le geste, jamais.
+        for cause in [
+            ExportSummaryLogic.NothingReadyCause.nothingFilled,
+            .pending,
+            .blocked,
+            .pendingAndBlocked
+        ] {
+            let export = ExportSummaryLogic.nothingReadyHint(cause, action: .export)
+            let preview = ExportSummaryLogic.nothingReadyHint(cause, action: .preview)
+
+            // Le défaut est `.export` : aucun libellé existant ne bouge.
+            XCTAssertEqual(ExportSummaryLogic.nothingReadyHint(cause), export, "\(cause)")
+            // Aucun message d'aperçu ne parle d'exporter…
+            XCTAssertFalse(
+                preview.localizedCaseInsensitiveContains("export"),
+                "message d'aperçu qui parle d'export : \(preview)"
+            )
+            // …et le GESTE reste le même des deux côtés (premier segment de
+            // phrase, avant le but).
+            for gesture in ["Remplissez", "attendez", "remplacez"] {
+                XCTAssertEqual(
+                    export.localizedCaseInsensitiveContains(gesture),
+                    preview.localizedCaseInsensitiveContains(gesture),
+                    "geste « \(gesture) » présent d'un seul côté pour \(cause)"
+                )
+            }
+        }
+
+        // Le lecteur d'aperçu compose « constat + geste » comme le résumé §56.
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyHint(.nothingFilled, action: .preview),
+            "Remplissez au moins une case pour pouvoir prévisualiser le montage."
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.nothingReadyHint(.nothingFilled, action: .export),
+            "Remplissez au moins une case pour pouvoir exporter."
+        )
     }
 
     func testDurationUsesHundredthsOfADisplayRoundingOnly() {

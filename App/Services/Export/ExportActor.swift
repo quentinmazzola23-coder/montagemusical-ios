@@ -56,6 +56,30 @@ enum ExportStartResult: Sendable, Equatable {
 /// annulé ou échoué ne peut donc jamais laisser d'asset Photos incomplet.
 actor ExportActor {
 
+    // Non defini par la specification — definition minimale V1.
+    /// Ce qui a été ANNONCÉ au démarrage d'un export (§56), mémorisé ICI et
+    /// non dans une vue.
+    ///
+    /// CORRECTIF (second passage de relecture, 13 août 2026) : l'annonce ne
+    /// vivait que dans l'instance d'`ExportSummaryView` qui avait lancé
+    /// l'export. Fermer puis rouvrir le résumé pendant l'encodage la perdait,
+    /// et l'écran rouvert n'avait plus rien à comparer : un export TRONQUÉ
+    /// (§66 — un rush devenu indisponible pendant l'encodage) était alors
+    /// annoncé « Montage prêt / Votre montage est exporté », alors que
+    /// `ExportOutcome` portait le montage réduit. L'information ne manquait
+    /// pas : l'acteur DÉTIENT l'instantané qu'il encode. Elle est donc
+    /// conservée avec lui.
+    struct AnnouncedMontage: Sendable, Equatable {
+        /// Nombre de plans de la timeline validée (`ReadyTimeline.slotCount`).
+        let slotCount: Int
+        /// Durée annoncée = somme des durées des cases exportées (§9, §56).
+        let duration: MediaTime
+        /// Profil maître §52 affiché par l'écran qui a lancé l'export — `nil`
+        /// quand l'appelant ne l'a pas fourni (démarrage sans résumé) ou qu'il
+        /// n'avait pas pu être lu : on ne compare jamais à une valeur inconnue.
+        let profile: MasterProfile?
+    }
+
     private let exporter: ProjectExporter
     private let projectStore: ProjectStore
     private let fileStore: ProjectFileStore
@@ -75,6 +99,9 @@ actor ExportActor {
     /// Dernière erreur exposée par projet (§58 : l'interruption et l'échec
     /// sont annoncés, jamais avalés).
     private var errorByProject: [UUID: ExportError] = [:]
+    /// Montage ANNONCÉ au démarrage du dernier export lancé, par projet
+    /// (§56, §66) — voir `AnnouncedMontage`.
+    private var announcedByProject: [UUID: AnnouncedMontage] = [:]
 
     init(exporter: ProjectExporter, projectStore: ProjectStore, fileStore: ProjectFileStore) {
         self.exporter = exporter
@@ -126,10 +153,16 @@ actor ExportActor {
     ///   `nil` (défaut) conserve le comportement historique : l'instantané est
     ///   relu au démarrage. C'est ce qu'il faut pour un déclenchement qui
     ///   n'affiche aucun résumé (relance automatique, test).
+    /// - Parameter announcedProfile: profil maître §52 tel qu'il a été AFFICHÉ
+    ///   par l'appelant, s'il en a affiché un. Il complète l'annonce mémorisée
+    ///   (`announcedMontage(projectID:)`), dont le nombre de plans et la durée
+    ///   sont dérivés de l'instantané encodé. `nil` = rien n'a été promis de ce
+    ///   côté, il n'y aura rien à comparer.
     @discardableResult
     func startExport(
         projectID: UUID,
-        snapshot providedSnapshot: ProjectSnapshot? = nil
+        snapshot providedSnapshot: ProjectSnapshot? = nil,
+        announcedProfile: MasterProfile? = nil
     ) async -> ExportStartResult {
         guard !startingProjects.contains(projectID) else {
             logger.info("Export déjà en préparation pour ce projet (§58) — démarrage refusé.")
@@ -147,7 +180,11 @@ actor ExportActor {
             // encode le montage que l'utilisateur avait approuvé, pas celui
             // que la base porte après l'annulation.
             await existing.value
-            return await startExport(projectID: projectID, snapshot: providedSnapshot)
+            return await startExport(
+                projectID: projectID,
+                snapshot: providedSnapshot,
+                announcedProfile: announcedProfile
+            )
         }
 
         startingProjects.insert(projectID)
@@ -206,6 +243,15 @@ actor ExportActor {
         errorByProject[projectID] = nil
         outcomeByProject[projectID] = nil
         progressByProject[projectID] = 0
+        // §56/§66 : CE QUI EST ANNONCÉ, mémorisé hors de toute vue — un résumé
+        // fermé puis rouvert pendant l'encodage retrouve ainsi de quoi
+        // comparer le fichier écrit à ce qui avait été promis. Les mesures
+        // viennent de la timeline RÉELLEMENT encodée, jamais d'un affichage.
+        announcedByProject[projectID] = AnnouncedMontage(
+            slotCount: timeline.slotCount,
+            duration: timeline.duration,
+            profile: announcedProfile
+        )
         runningTasks[projectID] = Task {
             await self.runExport(snapshot: snapshot, scope: scope, projectID: projectID)
         }
@@ -273,6 +319,20 @@ actor ExportActor {
     /// export s'est bien terminé ou si aucun export n'a été tenté.
     func lastError(projectID: UUID) -> ExportError? {
         errorByProject[projectID]
+    }
+
+    /// Montage ANNONCÉ au démarrage du dernier export lancé pour ce projet
+    /// (§56), ou `nil` si aucun export n'a été lancé depuis le démarrage de
+    /// l'application.
+    ///
+    /// L'écran de résumé s'en sert quand il n'a pas fait l'annonce lui-même —
+    /// typiquement lorsqu'il a été fermé puis rouvert pendant l'encodage (§58 :
+    /// il reprend le suivi au lieu de relancer). Sans cette valeur, il
+    /// concluait `.fresh` et annonçait « Montage prêt » pour un fichier
+    /// TRONQUÉ §66. La valeur SURVIT à la fin de l'export (c'est justement
+    /// à l'issue qu'on la compare) et n'est remplacée qu'au démarrage suivant.
+    func announcedMontage(projectID: UUID) -> AnnouncedMontage? {
+        announcedByProject[projectID]
     }
 
     // MARK: - Exécution

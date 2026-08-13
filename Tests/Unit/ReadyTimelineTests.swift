@@ -190,11 +190,22 @@ final class ReadyTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.duration, MediaTime(ticks: 155_000))
     }
 
-    // MARK: - EXEMPLE CHIFFRÉ DE L'UTILISATEUR : cases 28…35 + 40…50
+    // MARK: - FORME DE L'EXEMPLE DE L'UTILISATEUR : 8 plans + 4 trous + 11 plans
 
     /// 51 cases jointives aux durées INÉGALES (30 000 ticks si l'index est
-    /// pair, 20 000 s'il est impair), cases 28 à 35 et 40 à 50 prêtes, cases
-    /// 36 à 39 VIDES.
+    /// pair, 20 000 s'il est impair), cases d'INDEX 28…35 et 40…50 prêtes,
+    /// cases d'index 36…39 VIDES.
+    ///
+    /// NUMÉROTATION (convention en tête d'ExportModels.swift) : ces nombres
+    /// sont des **index 0-based**, pas les numéros de plan affichés. La
+    /// fixture reproduit la FORME de l'exemple de la demande — 8 plans, 4
+    /// cases vides, 11 plans — avec des valeurs calculées à la main sur des
+    /// durées inégales ; à l'écran, ces cases s'annoncent « plans 29 à 36 » et
+    /// « plans 41 à 51 » (index + 1, §35.1). L'exemple de la demande lui-même
+    /// (« plans 28 à 35 et 40 à 50 ») porte sur les index 27…34 et 39…49 : le
+    /// décalage d'un index est SANS effet sur ce qui est vérifié ici (runs,
+    /// concaténation, durées), et le conserver évite de réécrire des dizaines
+    /// de littéraux calculés à la main.
     ///
     /// Valeurs calculées à la main (60 000 ticks/s, §9) — une paire de cases
     /// consécutives dure 50 000 ticks, donc `start(i) = (i / 2) × 50 000`
@@ -227,7 +238,7 @@ final class ReadyTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.runs[0].musicEnd, MediaTime(ticks: 900_000))
         XCTAssertEqual(timeline.runs[1].musicStart, MediaTime(ticks: 1_000_000))
         XCTAssertEqual(timeline.runs[1].musicEnd, MediaTime(ticks: 1_280_000))
-        // Nombre TOTAL de plans exportés — l'exemple de l'utilisateur.
+        // Nombre TOTAL de plans exportés — 8 + 11, la forme de l'exemple.
         XCTAssertEqual(timeline.slotCount, 19)
         XCTAssertEqual(timeline.allSlots.map(\.index), Array(28...35) + Array(40...50))
     }

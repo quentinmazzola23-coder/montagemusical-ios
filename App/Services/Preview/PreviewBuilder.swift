@@ -109,8 +109,15 @@ enum PreviewError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyScope:
-            return "Il n'y a rien à prévisualiser pour l'instant : "
-                + "remplissez au moins une case du montage."
+            // §64 : la portée peut être vide pour TROIS raisons — aucune case
+            // remplie, cases remplies mais en cours (§44), ou bloquées (§43,
+            // §64). Imposer « remplissez une case » nommait le geste d'UNE
+            // seule d'entre elles. Cette description générique reste un repli :
+            // l'écran, qui connaît l'instantané, affiche la cause exacte
+            // (`ExportSummaryLogic.nothingReadyHint`).
+            return "Aucun plan n'est encore prêt. Remplissez au moins une case, "
+                + "attendez la fin des téléchargements en cours, "
+                + "ou remplacez les vidéos indisponibles."
         case .missingAudio:
             return "La musique du projet est introuvable ou illisible. "
                 + "Réimportez la musique pour prévisualiser le montage."
@@ -469,13 +476,15 @@ struct PreviewBuilder: Sendable {
     /// 5. ignorer les pistes audio source (§48 : aucune piste audio de rush).
     ///
     /// **Résolution ALIGNÉE sur l'export.** La preview passait autrefois par
-    /// `MediaLibraryActor.videoAssetURL`, qui REFUSE un rush recomposé par
-    /// PhotoKit (ralenti, timelapse, montage Photos appliqué — livré comme
-    /// `AVComposition`, §52.3) : un rush parfaitement exportable était alors
-    /// annoncé « indisponible » à l'aperçu, et l'utilisateur n'avait aucun
-    /// moyen de voir ce qu'il allait exporter. `exportableVideoURL` est le
-    /// chemin de l'export : un rush livré comme fichier est utilisé TEL QUEL
-    /// (aucune copie, cas courant), et seul un rush recomposé est matérialisé.
+    /// une résolution qui REFUSAIT un rush recomposé par PhotoKit (ralenti,
+    /// timelapse, montage Photos appliqué — livré comme `AVComposition`,
+    /// §52.3) : un rush parfaitement exportable était alors annoncé
+    /// « indisponible » à l'aperçu, et l'utilisateur n'avait aucun moyen de
+    /// voir ce qu'il allait exporter. (Cette méthode,
+    /// `MediaLibraryActor.videoAssetURL`, n'avait plus aucun appelant : elle a
+    /// été supprimée.) `exportableVideoURL` est le chemin de l'export : un
+    /// rush livré comme fichier est utilisé TEL QUEL (aucune copie, cas
+    /// courant), et seul un rush recomposé est matérialisé.
     /// `allowNetwork: false` reste vrai (§44 : jamais de téléchargement iCloud
     /// surprise pendant une lecture).
     ///
@@ -485,10 +494,20 @@ struct PreviewBuilder: Sendable {
     /// qui y pointerait deviendrait muette après le premier export, sans que
     /// rien ne l'invalide. `previews/` est justement le dossier des matières
     /// d'aperçu ; le nom du fichier est déterministe, donc il n'est
-    /// matérialisé qu'UNE fois par rush et réutilisé par tous les aperçus
-    /// suivants. Le prix payé est une matérialisation de plus que l'export
-    /// (qui garde la sienne dans `temp/`), pour les seuls rushs recomposés —
-    /// et le dossier disparaît avec le projet (§31).
+    /// matérialisé qu'UNE fois par version de rush et réutilisé par tous les
+    /// aperçus suivants. Le prix payé est une matérialisation de plus que
+    /// l'export (qui garde la sienne dans `temp/`), pour les seuls rushs
+    /// recomposés.
+    ///
+    /// **Ce fichier a une FIN DE VIE** (correctif du second passage de
+    /// relecture, 13 août 2026) : `previews/` est vidé par
+    /// `PreviewCache.invalidateAll(projectID:)`
+    /// (`ProjectFileStore.clearPreviewIntermediates`), c'est-à-dire dès qu'une
+    /// association, la géométrie ou une autorisation change — et le dossier
+    /// disparaît avec le projet (§31). De plus, le nom porte la date de
+    /// modification de l'asset : un rush RETOUCHÉ dans Photos ne peut pas être
+    /// rejoué dans sa version périmée pendant que l'export, lui, encoderait la
+    /// nouvelle.
     ///
     /// Les échecs de photothèque sont DISCRIMINÉS (§40, §44, §64) : accès
     /// refusé, rush encore dans iCloud, ou rush à remplacer — trois actions

@@ -81,12 +81,15 @@ final class AppEnvironment {
     /// jamais un `AVPlayerItem`, qui ne peut être rattaché qu'à un seul
     /// lecteur : l'item est reconstruit à chaque présentation. Invalidé par
     /// `invalidateAll(projectID:)` dès qu'une association ou la géométrie
-    /// change.
+    /// change — ce qui purge du même coup les sources d'aperçu matérialisées
+    /// dans `previews/` (§11).
     let previewCache: PreviewCache
 
-    /// Construction et encodage du montage exporté (Jalon 10, §51 préfixe,
-    /// §52 profil maître, §53 exactitude temporelle, §54 composition, §55
-    /// encodage unique, §57 estimation de taille). Type concret `@MainActor`
+    /// Construction et encodage du montage exporté (Jalon 10, timeline
+    /// CONCATÉNÉE des zones remplies — écart produit du 13 août 2026 qui
+    /// remplace le préfixe §51 —, §52 profil maître, §53 exactitude
+    /// temporelle, §54 composition, §55 encodage unique, §57 estimation de
+    /// taille). Type concret `@MainActor`
     /// — il porte la signature §7 `ProjectExporting` sans nécessairement
     /// déclarer la conformance (même choix documenté qu'au Jalon 9 pour
     /// `PreviewBuilder`).
@@ -145,7 +148,12 @@ final class AppEnvironment {
         self.mediaLibrary = mediaLibrary
         self.thumbnailProvider = ThumbnailProvider()
         self.previewBuilder = PreviewBuilder(fileStore: fileStore, mediaLibrary: mediaLibrary)
-        self.previewCache = PreviewCache()
+        // Le cache reçoit les fichiers du projet : invalider une composition,
+        // c'est aussi jeter les SOURCES d'aperçu matérialisées dans
+        // `previews/` (§11, §48) — sans quoi un rush recomposé (ralenti,
+        // timelapse) laisserait son ré-encodage sur le disque pour toute la
+        // vie du projet.
+        self.previewCache = PreviewCache(fileStore: fileStore)
         let projectExporter = ProjectExporter(fileStore: fileStore, mediaLibrary: mediaLibrary)
         self.projectExporter = projectExporter
         // §8/§58 : l'acteur sérialise les exports par projet et porte les

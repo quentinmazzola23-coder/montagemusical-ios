@@ -226,7 +226,14 @@ final class PreviewCache {
     /// Ordre d'utilisation, du plus ancien au plus récent (éviction LRU).
     private var usageOrder: [PreviewCacheKey] = []
 
-    init() {}
+    /// Fichiers du projet (§11) — sert UNIQUEMENT à purger `previews/` en même
+    /// temps que la mémoire (voir `invalidateAll`). `nil` dans les tests de
+    /// cache pur, qui ne touchent aucun disque.
+    private let fileStore: ProjectFileStore?
+
+    init(fileStore: ProjectFileStore? = nil) {
+        self.fileStore = fileStore
+    }
 
     /// Composition en cache pour cette clé, ou `nil`.
     ///
@@ -249,12 +256,24 @@ final class PreviewCache {
         }
     }
 
-    /// Invalide TOUTES les compositions d'un projet (§48).
+    /// Invalide TOUTES les compositions d'un projet (§48), **en mémoire ET sur
+    /// le disque**.
     ///
     /// Filet de sécurité explicite lorsqu'un changement ne se voit pas dans
     /// l'empreinte : musique remplacée, projet dupliqué, retour depuis les
     /// Réglages après un changement d'autorisation photothèque (§40, §65).
     /// Les autres projets ne sont pas touchés.
+    ///
+    /// CORRECTIF (relecture du 13 août 2026, second passage) : la purge
+    /// s'arrêtait à la mémoire. Depuis que l'aperçu résout ses rushs par le
+    /// chemin de l'export, un rush recomposé par Photos (ralenti, timelapse)
+    /// laisse un ré-encodage complet dans `previews/`
+    /// (`MediaLibraryActor.exportableVideoURL`) — que RIEN ne supprimait :
+    /// `clearTemporaryFiles` ne vide que `temp/`. Ce dossier est donc vidé
+    /// ici, au seul moment où l'on sait que les matières d'aperçu ne valent
+    /// plus rien. Une composition encore lue par un lecteur n'est pas
+    /// concernée : les entrées mémoire viennent d'être retirées, et la
+    /// prochaine lecture reconstruit tout (§48).
     func invalidateAll(projectID: UUID) {
         // Clés collectées AVANT la mutation : jamais d'itération sur la vue
         // `keys` d'un dictionnaire en cours de modification.
@@ -263,6 +282,7 @@ final class PreviewCache {
             compositions[key] = nil
         }
         usageOrder.removeAll { $0.projectID == projectID }
+        fileStore?.clearPreviewIntermediates(projectID: projectID)
     }
 
     /// Replace la clé en fin de liste d'utilisation (position « la plus

@@ -192,7 +192,35 @@ struct ProjectFileStore: Sendable {
     /// Vide `temp/` du projet (§69A : supprimer les temporaires au prochain
     /// lancement après un crash). Silencieux si le dossier est absent.
     func clearTemporaryFiles(projectID: UUID) {
-        let url = subdirectoryURL(.temp, for: projectID)
+        clearContents(of: .temp, projectID: projectID)
+    }
+
+    /// Vide `previews/` du projet — les SOURCES matérialisées de l'aperçu
+    /// (`source-<rush>-<version>.mov`, `MediaLibraryActor.exportableVideoURL`).
+    ///
+    /// CORRECTIF (relecture du 13 août 2026, second passage) : depuis que
+    /// l'aperçu résout ses rushs par le chemin de l'export, un rush recomposé
+    /// par Photos (ralenti, timelapse) est ré-encodé dans `previews/`. Rien ne
+    /// supprimait jamais ce fichier : `clearTemporaryFiles` ne touche que
+    /// `temp/` et `PreviewCache.invalidateAll` ne purgeait que la mémoire. Le
+    /// ré-encodage restait donc sur le disque pour toute la vie du projet,
+    /// hors de l'estimation §57.
+    ///
+    /// Appelée par `PreviewCache.invalidateAll(projectID:)` — l'invalidation
+    /// du cache §48 est exactement le moment où une association ou un asset a
+    /// changé, donc où les matières d'aperçu déjà calculées ne valent plus
+    /// rien. Silencieux si le dossier est absent.
+    ///
+    /// Ne touche PAS `exports/` (§60 : le dernier export est restauré à la
+    /// réouverture) ni `analysis/` (§69 : les checkpoints survivent).
+    func clearPreviewIntermediates(projectID: UUID) {
+        clearContents(of: .previews, projectID: projectID)
+    }
+
+    /// Supprime le contenu d'un sous-dossier §11 sans supprimer le dossier
+    /// lui-même (l'arbre reste valide). Silencieux si le dossier est absent.
+    private func clearContents(of subdirectory: Subdirectory, projectID: UUID) {
+        let url = subdirectoryURL(subdirectory, for: projectID)
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: nil

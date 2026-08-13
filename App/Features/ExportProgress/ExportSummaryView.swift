@@ -25,12 +25,16 @@
 //  la case 0, arrêt au premier trou ; première case vide → export
 //  impossible). L'export CONCATÈNE désormais TOUTES les zones remplies : les
 //  cases vides ou non prêtes sont supprimées du montage — vidéo ET musique
-//  (cases 28..35 et 40..50 prêtes → 19 plans mis bout à bout).
+//  (plans 28 à 35 et 40 à 50 prêts → 19 plans mis bout à bout).
 //  Conséquences pour CET écran :
 //  - le résumé §56 dit ce qui part VRAIMENT : nombre total de plans, nombre
 //    de ZONES et durée. Une seule zone garde la formulation de plage
 //    (« Plans 28 à 50 ») ; à partir de deux, « 19 plans en 2 zones » avec les
 //    plages listées en petit (« 28–35, 40–50 ») ;
+//    NUMÉROTATION (convention en tête d'ExportModels.swift) : les nombres de
+//    ce paragraphe sont des numéros de PLAN AFFICHÉS, 1-based (§35.1) — ils
+//    correspondent aux index 27…34 et 39…49 que porte `exportedZones`, et
+//    c'est `ExportSummaryLogic` qui ajoute le +1, une seule fois, au libellé ;
 //  - une MENTION honnête est ajoutée sous le résumé dès qu'il y a plusieurs
 //    zones : elles sont mises bout à bout et la musique passe directement de
 //    l'une à l'autre. C'est le comportement DEMANDÉ, dit sobrement plutôt que
@@ -62,6 +66,12 @@
 //     faire (relancer quand la vidéo sera revenue). §8.1 interdit d'annoncer
 //     un succès qui n'a pas eu lieu ; un succès PARTIEL annoncé comme plein
 //     est le même mensonge.
+//     SECOND PASSAGE (même jour) : cette annonce ne vivait que dans
+//     l'INSTANCE de vue qui avait appuyé sur « Exporter ». Fermer puis rouvrir
+//     le résumé pendant l'encodage la perdait, et l'export tronqué redevenait
+//     un succès plein. Elle est désormais figée par `ExportActor` au démarrage
+//     (`announcedMontage(projectID:)`, dérivée de la timeline réellement
+//     encodée) et cet écran s'y rabat quand il n'a rien annoncé lui-même.
 //
 //  DÉCISION Jalon 10 — le profil §52 vient d'une SOURCE UNIQUE.
 //  Le résumé n'a plus AUCUN calcul de profil qui lui soit propre : il lit
@@ -325,9 +335,9 @@ enum ExportSummaryLogic {
     ///   exactement le montage, qui est alors d'un seul tenant ;
     /// - **deux zones ou plus** → « 19 plans en 2 zones » : le nombre TOTAL de
     ///   plans exportés et le nombre de morceaux. Une plage unique mentirait
-    ///   (« Plans 28 à 50 » laisserait croire que les cases 36 à 39 sont dans
-    ///   le fichier) ; les plages exactes sont listées juste en dessous par
-    ///   `zoneRangesLabel`.
+    ///   (« Plans 28 à 50 » laisserait croire que les plans 36 à 39 — index
+    ///   35…38 — sont dans le fichier) ; les plages exactes sont listées juste
+    ///   en dessous par `zoneRangesLabel`.
     ///
     /// Source UNIQUE de cette formulation : le résumé §56, le titre de la
     /// feuille d'aperçu §47.2 et le hint du bouton « Prévisualiser le
@@ -505,18 +515,54 @@ enum ExportSummaryLogic {
         return .from(hasPending: hasPending, hasBlocked: hasBlocked)
     }
 
-    /// Geste à faire pour débloquer l'export, SELON la cause (§64).
+    // Non defini par la specification — definition minimale V1.
+    /// L'action que l'utilisateur cherchait à faire quand rien n'est prêt :
+    /// exporter (§56) ou prévisualiser (§47.2). SEULE la fin de phrase change
+    /// — la table des gestes reste unique, sinon deux écrans conseilleraient
+    /// deux choses différentes pour la même situation (§64).
+    enum BlockedAction: Equatable {
+        case export
+        case preview
+
+        /// « … pour pouvoir exporter » / « … pour pouvoir prévisualiser ».
+        var goal: String {
+            switch self {
+            case .export: "exporter"
+            case .preview: "prévisualiser le montage"
+            }
+        }
+
+        /// Ce qu'il faut refaire une fois le blocage levé.
+        var retry: String {
+            switch self {
+            case .export: "relancez l'export"
+            case .preview: "réessayez"
+            }
+        }
+    }
+
+    /// Geste à faire pour débloquer l'export — ou l'aperçu —, SELON la cause
+    /// (§64).
     ///
     /// Une case vide se remplit ; une vidéo en cours de téléchargement
     /// s'attend ; une vidéo indisponible ou trop courte se remplace. Le
     /// libellé nomme le geste RÉELLEMENT attendu, jamais un geste par défaut.
-    static func nothingReadyHint(_ cause: NothingReadyCause) -> String {
+    ///
+    /// `action` ne change QUE le but nommé en fin de phrase : le lecteur
+    /// d'aperçu (§47.2) partage cette table plutôt que d'en écrire une seconde
+    /// (correctif du second passage de relecture, 13 août 2026 — il disait
+    /// encore « Remplissez au moins une case » alors que la seule case du
+    /// projet pouvait être en téléchargement).
+    static func nothingReadyHint(
+        _ cause: NothingReadyCause,
+        action: BlockedAction = .export
+    ) -> String {
         switch cause {
         case .nothingFilled:
-            "Remplissez au moins une case pour pouvoir exporter."
+            "Remplissez au moins une case pour pouvoir \(action.goal)."
         case .pending:
             "Une vidéo choisie n'est pas encore prête : attendez la fin de son téléchargement, "
-                + "puis relancez l'export."
+                + "puis \(action.retry)."
         case .blocked:
             "Les vidéos choisies ne peuvent pas remplir leur case (indisponible ou trop courte) : "
                 + "remplacez-les, ou remplissez une autre case."
@@ -1005,7 +1051,11 @@ struct ExportSummaryView: View {
     /// « Exporter » (§56), figé pour être comparé au fichier réellement écrit
     /// (§66). Sans cette photographie, l'écran comparerait le résultat à un
     /// résumé qui a pu changer entre-temps.
-    private struct AnnouncedMontage {
+    ///
+    /// Miroir local d'`ExportActor.AnnouncedMontage` : l'acteur porte la
+    /// MÊME annonce, mémorisée au démarrage de l'encodage, et cet écran s'y
+    /// rabat quand il n'a rien annoncé lui-même (`announcement(from:)`).
+    private struct AnnouncedMontage: Sendable, Equatable {
         let slotCount: Int
         let duration: MediaTime
         /// Profil §52 tel qu'affiché — `nil` s'il n'avait pas encore pu être
@@ -1052,8 +1102,10 @@ struct ExportSummaryView: View {
     @State private var phase: ExportPhase = .summary
     /// Résumé §56 EXACT au moment de l'appui sur « Exporter » — comparé au
     /// fichier écrit par `finish()` (§66). `nil` tant qu'aucun export n'a été
-    /// lancé DEPUIS CET ÉCRAN : reprendre le suivi d'un encodage déjà en
-    /// cours (§58) n'annonce rien, il n'y a donc rien à comparer.
+    /// lancé DEPUIS CETTE INSTANCE de l'écran : reprendre le suivi d'un
+    /// encodage déjà en cours (§58) n'annonce rien ici. `finish()` se rabat
+    /// alors sur l'annonce mémorisée par l'acteur
+    /// (`ExportActor.announcedMontage`), qui survit à la fermeture de l'écran.
     @State private var announced: AnnouncedMontage?
     /// Progression d'encodage `0...1` (§58) — valeur MESURÉE.
     @State private var progress: Double = 0
@@ -1774,10 +1826,12 @@ struct ExportSummaryView: View {
         if let current = await environment.exportActor.currentProgress(projectID: projectID) {
             progress = current
             phase = .exporting
-            // Encodage lancé AVANT l'ouverture de cet écran : rien n'a été
-            // annoncé ici (`announced` reste nil), il n'y aura donc rien à
-            // comparer à l'issue — l'écran ne peut pas reprocher un écart à
-            // une annonce qu'il n'a pas faite (§66).
+            // Encodage lancé AVANT l'ouverture de cet écran : CETTE instance
+            // n'a rien annoncé (`announced` reste nil), mais l'acteur, lui, a
+            // figé l'annonce au démarrage (`ExportActor.announcedMontage`) —
+            // `finish()` s'y rabat, sans quoi un export TRONQUÉ §66 serait
+            // présenté comme un succès plein à cause d'une simple fermeture
+            // d'écran (correctif du second passage de relecture).
             monitorExport(snapshotToEncode: nil)
         } else {
             await restoreLastOutcome()
@@ -1812,22 +1866,33 @@ struct ExportSummaryView: View {
     /// le fichier est la seule trace). Le résumé §56 continue d'afficher les
     /// valeurs du PROJET, jamais celles de l'export d'avant.
     ///
-    /// LIMITE ASSUMÉE (§66) : un fichier retrouvé n'est jamais annoncé comme
-    /// TRONQUÉ, même s'il l'était. L'écart ne se mesure que par rapport à une
-    /// ANNONCE, et l'annonce vit le temps de cet écran (`announced`) ; comparer
-    /// un fichier d'avant au montage d'aujourd'hui inventerait des écarts à
-    /// chaque case ajoutée depuis. L'écran qui a lancé l'export a, lui, dit la
-    /// vérité au moment où elle était vérifiable.
+    /// LIMITE ASSUMÉE (§66) : un fichier RESTAURÉ depuis `exports/` après
+    /// relance n'est jamais annoncé comme TRONQUÉ, même s'il l'était. L'écart
+    /// ne se mesure que par rapport à une ANNONCE, et plus aucune annonce n'a
+    /// survécu à la relance ; comparer un fichier d'avant au montage
+    /// d'aujourd'hui inventerait des écarts à chaque case ajoutée depuis.
+    ///
+    /// En revanche, un export de la SESSION courante (`isRestored == false`,
+    /// écran fermé puis rouvert APRÈS son succès) est bien comparé : l'acteur
+    /// a gardé l'annonce du run correspondant (`announcedMontage`), REMPLACÉE
+    /// au démarrage suivant à l'instant même où l'issue précédente est purgée.
+    /// Les deux décrivent donc toujours le même encodage — sinon un export
+    /// tronqué §66 redevenait un « Montage prêt » par simple fermeture d'écran.
     private func restoreLastOutcome() async {
         guard case .summary = phase else { return }
         if await environment.exportActor.lastError(projectID: projectID) != nil { return }
         guard let outcome = await environment.exportActor.lastOutcome(projectID: projectID) else {
             return
         }
+        let effectiveAnnouncement = await announcement(from: environment.exportActor)
         guard !Task.isCancelled else { return } // écran fermé (§8)
-        // §60 : ce fichier ne décrit aucun encodage de cette session — ni
-        // succès à annoncer, ni écart à mesurer (ses mesures valent zéro).
-        phase = .ready(url: outcome.outputURL, origin: outcome.isRestored ? .restored : .fresh)
+        // §60 : un fichier RESTAURÉ ne décrit aucun encodage de cette session —
+        // ni succès à annoncer, ni écart à mesurer (ses mesures valent zéro) ;
+        // `readyOrigin` le reconnaît à `isRestored` et ne compare rien.
+        phase = .ready(
+            url: outcome.outputURL,
+            origin: readyOrigin(for: outcome, announced: effectiveAnnouncement)
+        )
     }
 
     /// Profil maître §52 — lu auprès de l'EXPORTATEUR, source UNIQUE.
@@ -1938,15 +2003,22 @@ struct ExportSummaryView: View {
     ///
     /// Un SEUL suivi vit à la fois (`monitorTask`) : deux suivis simultanés
     /// pourraient présenter deux issues contradictoires.
+    ///
+    /// L'annonce §56 est TRANSMISE à l'acteur en même temps que l'instantané
+    /// (`announcedProfile`) : elle survit ainsi à la fermeture de cet écran,
+    /// et un résumé rouvert pendant l'encodage a de quoi comparer le fichier
+    /// écrit à ce qui avait été promis (§66 — voir `readyOrigin(for:announced:)`).
     private func monitorExport(snapshotToEncode: ProjectSnapshot?) {
         let exportActor = environment.exportActor
         let id = projectID
+        let announcedProfile = announced?.profile
         monitorTask?.cancel()
         monitorTask = Task {
             if let snapshotToEncode {
                 let startResult = await exportActor.startExport(
                     projectID: id,
-                    snapshot: snapshotToEncode
+                    snapshot: snapshotToEncode,
+                    announcedProfile: announcedProfile
                 )
                 // Suivi annulé PENDANT l'attente (écran fermé §8, passage en
                 // arrière-plan §8.1) : ne rien réécrire — un `phase` posé ici
@@ -2003,9 +2075,10 @@ struct ExportSummaryView: View {
     /// PENDANT l'encodage, l'exportateur TRONQUE le montage (§66 : « asset en
     /// téléchargement : export limité avant lui ») — le fichier existe, mais
     /// il n'est pas celui qui a été validé. Ces mesures sont donc comparées à
-    /// l'annonce figée à l'appui (`announced`), et tout écart devient une
-    /// origine `.truncated` : l'écran dit ce qui a été écrit, pourquoi, et
-    /// quoi faire.
+    /// l'annonce figée à l'appui (`announced`, ou celle que l'acteur a gardée
+    /// si cet écran a été rouvert entre-temps — `announcement(from:)`), et tout
+    /// écart devient une origine `.truncated` : l'écran dit ce qui a été écrit,
+    /// pourquoi, et quoi faire.
     private func finish() async {
         let exportActor = environment.exportActor
         let lastError = await exportActor.lastError(projectID: projectID)
@@ -2028,21 +2101,55 @@ struct ExportSummaryView: View {
                 : .failed(message: ExportSummaryLogic.genericInterruptionMessage)
             return
         }
+        // L'annonce de CET écran, ou à défaut celle que l'acteur a mémorisée au
+        // démarrage de l'encodage (§66) : sans ce repli, un résumé fermé puis
+        // rouvert pendant l'export n'avait plus rien à comparer et annonçait
+        // « Montage prêt » pour un fichier tronqué.
+        let effectiveAnnouncement = await announcement(from: exportActor)
+        guard !Task.isCancelled else { return }
         progress = 1
         // §8.1 : le succès n'est annoncé qu'ICI, sur confirmation effective de
         // l'écriture du fichier par l'acteur. Un fichier remonté d'`exports/`
         // (§60) ne devient pas l'issue du run qui vient de se terminer.
-        phase = .ready(url: outcome.outputURL, origin: readyOrigin(for: outcome))
+        phase = .ready(
+            url: outcome.outputURL,
+            origin: readyOrigin(for: outcome, announced: effectiveAnnouncement)
+        )
+    }
+
+    /// Ce qui a été annoncé pour l'export dont on lit l'issue.
+    ///
+    /// PRIORITÉ à l'annonce de cet écran : c'est elle que l'utilisateur a eue
+    /// sous les yeux en appuyant. À défaut — encodage lancé AVANT l'ouverture
+    /// de ce résumé, ou écran rouvert entre-temps —, celle que l'acteur a
+    /// figée au démarrage, dérivée de la timeline réellement encodée
+    /// (`ExportActor.announcedMontage`). `nil` seulement si aucun export n'a
+    /// été lancé depuis le démarrage de l'application : il n'y a alors rien à
+    /// comparer, et rien n'est inventé.
+    private func announcement(from exportActor: ExportActor) async -> AnnouncedMontage? {
+        if let announced { return announced }
+        guard let stored = await exportActor.announcedMontage(projectID: projectID) else {
+            return nil
+        }
+        return AnnouncedMontage(
+            slotCount: stored.slotCount,
+            duration: stored.duration,
+            profile: stored.profile
+        )
     }
 
     /// Origine à annoncer pour un fichier produit (§60, §66) — voir
     /// `finish()`.
     ///
-    /// L'écart n'est cherché que si CET écran a annoncé quelque chose
-    /// (`announced`) et que l'issue décrit bien un encodage de cette session
-    /// (`isRestored == false` : les mesures d'un fichier restauré valent zéro,
-    /// les comparer inventerait une troncature à tous les coups).
-    private func readyOrigin(for outcome: ExportOutcome) -> ReadyOrigin {
+    /// L'écart n'est cherché que si quelque chose a été annoncé (par cet écran
+    /// ou par l'acteur, voir `announcement(from:)`) et que l'issue décrit bien
+    /// un encodage de cette session (`isRestored == false` : les mesures d'un
+    /// fichier restauré valent zéro, les comparer inventerait une troncature à
+    /// tous les coups).
+    private func readyOrigin(
+        for outcome: ExportOutcome,
+        announced: AnnouncedMontage?
+    ) -> ReadyOrigin {
         guard !outcome.isRestored, let announced else {
             return outcome.isRestored ? .restored : .fresh
         }

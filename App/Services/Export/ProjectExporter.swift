@@ -104,8 +104,16 @@ enum ExportError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyPrefix:
-            return "Il n'y a rien à exporter pour l'instant : "
-                + "remplissez au moins une case du montage."
+            // §64/§66 : aucune case prête peut vouloir dire trois choses —
+            // rien de rempli, des cases en cours (§44), ou des cases bloquées
+            // (§43, §64). Le message nommait le geste de la PREMIÈRE cause
+            // seulement, même quand toutes les cases étaient remplies. Il
+            // constate d'abord, puis nomme les trois gestes possibles ;
+            // l'écran de résumé, qui connaît l'instantané, affiche la cause
+            // exacte (`ExportSummaryLogic.nothingReadyHint`).
+            return "Aucun plan n'est encore prêt. Remplissez au moins une case, "
+                + "attendez la fin des téléchargements en cours, "
+                + "ou remplacez les vidéos indisponibles, puis relancez l'export."
         case .firstAssetUnavailable(let identifier, let isStillDownloading):
             // La cause RÉELLE, jamais « remplissez une case » : le montage est
             // rempli, c'est le premier plan qui n'a plus de vidéo lisible.

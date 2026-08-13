@@ -373,58 +373,27 @@ actor MediaLibraryActor {
         }
     }
 
-    // MARK: - URL locale du rush (Jalon 9 — prévisualisation §47/§48)
+    // MARK: - URL locale du rush (aperçu §47/§48 ET export §54)
 
-    /// URL du FICHIER local d'un rush, pour construire la composition de
-    /// prévisualisation (§48) et d'export (§54).
-    ///
-    /// Pourquoi une URL et non un `AVAsset` : un `AVAsset` n'est pas
-    /// `Sendable` et ne traverse JAMAIS la frontière de l'acteur (§8, règle
-    /// de frontière du fichier). Une `URL` est `Sendable` : elle est extraite
-    /// DANS le rappel PhotoKit (`avAsset as? AVURLAsset`) et c'est la seule
-    /// valeur qui en sort. L'appelant reconstruit son propre `AVURLAsset`
-    /// dans SON domaine d'isolation, sans partage d'objet.
-    ///
-    /// Aucune boîte `@unchecked Sendable` n'est nécessaire ici, contrairement
-    /// à `resolvedVideoAsset` : la lecture est SYNCHRONE dans le rappel
-    /// (aucune `Task` capturant l'asset).
-    ///
-    /// Continuation UNIQUE garantie par `SingleResumeGuard` (PhotoKit peut
-    /// rappeler son handler : versions dégradées, annulation).
-    ///
-    /// Limite documentée : un asset PhotoKit sans fichier unique
-    /// (ralenti/timelapse recomposé, montage iCloud) est livré comme
-    /// `AVComposition` et non comme `AVURLAsset` → `assetNotFound`. La
-    /// PRÉVISUALISATION refuse alors ce rush (l'appelant le traduit en
-    /// « asset indisponible ») plutôt que d'afficher une image fausse.
-    /// L'EXPORT, lui, ne peut pas se contenter de ce refus (§52.3 : « respecter
-    /// la cadence de lecture, pas seulement la cadence de capture ralentie »
-    /// suppose que ces rushs soient exportables) : il utilise
-    /// `exportableVideoURL(id:allowNetwork:intermediateDirectory:)`, qui
-    /// matérialise un fichier intermédiaire pour ces cas.
-    ///
-    /// - Parameters:
-    ///   - id: identifiant local PhotoKit du rush.
-    ///   - allowNetwork: autorise le téléchargement iCloud à la demande
-    ///     (§44). Une case `ready` a déjà été résolue : la prévisualisation
-    ///     passe `false` pour ne jamais déclencher un téléchargement
-    ///     surprise pendant une lecture.
-    func videoAssetURL(id: String, allowNetwork: Bool) async throws -> URL {
-        try requireReadAccess()
-        let phAsset = try requireVideoAsset(id: id)
-        guard let url = try await requestFileURL(for: phAsset, allowNetwork: allowNetwork) else {
-            // Rush recomposé par Photos (ralenti/timelapse) : aucun fichier
-            // unique à lire — refus documenté ci-dessus.
-            throw MediaLibraryError.assetNotFound
-        }
-        return url
-    }
+    // SUPPRIMÉ le 13 août 2026 : `videoAssetURL(id:allowNetwork:)`.
+    //
+    // Cette résolution REFUSAIT tout rush recomposé par Photos (ralenti,
+    // timelapse, montage appliqué — livré comme `AVComposition` et non comme
+    // `AVURLAsset`) : sa seule cliente, la prévisualisation, annonçait donc
+    // « indisponible » un rush parfaitement exportable. Depuis que l'aperçu
+    // passe par `exportableVideoURL(id:allowNetwork:intermediateDirectory:)`
+    // — le MÊME chemin que l'export —, elle n'avait plus aucun appelant, ni en
+    // production ni en test. Une API morte dont la documentation décrivait un
+    // comportement disparu vaut moins que rien : elle est retirée plutôt que
+    // conservée « au cas où ». Son unique chemin propre,
+    // `requestFileURL(for:allowNetwork:)`, sert toujours ci-dessous.
 
-    // MARK: - URL exploitable à l'EXPORT (§52.3, §54, §66)
+    // MARK: - URL exploitable à l'EXPORT ET à l'APERÇU (§52.3, §54, §66)
 
     /// URL d'un fichier lisible par AVFoundation pour ce rush, **quel que
     /// soit son mode de livraison PhotoKit** — c'est la résolution utilisée
-    /// par l'export (§54 étape 1).
+    /// par l'export (§54 étape 1) ET par l'aperçu (§48), qui ne doivent jamais
+    /// voir deux images différentes du même rush.
     ///
     /// Deux chemins :
     /// 1. rush livré comme `AVURLAsset` (cas courant) → son URL, telle
@@ -433,8 +402,8 @@ actor MediaLibraryActor {
     ///    appliqué — livré comme `AVComposition` : PhotoKit fournit alors une
     ///    session d'export (`requestExportSession`) qui APPLIQUE le montage,
     ///    donc la cadence de LECTURE (§52.3). Le résultat est écrit dans
-    ///    `intermediateDirectory` (le `temp/` du projet, §11) et son URL est
-    ///    rendue.
+    ///    `intermediateDirectory` (le `temp/` du projet pour l'export, le
+    ///    `previews/` du projet pour l'aperçu — §11) et son URL est rendue.
     ///
     /// **Pourquoi ce chemin et pas un refus.** Ces rushs ont pu être ASSOCIÉS
     /// (§43 : la résolution `resolveAsset` lit très bien un `AVComposition`) :
@@ -448,17 +417,32 @@ actor MediaLibraryActor {
     /// - le fichier intermédiaire est un ré-encodage supplémentaire pour CES
     ///   rushs uniquement (§55 « une seule ré-encodage final » vise le
     ///   montage : ici il s'agit de matérialiser une SOURCE) ;
-    /// - sa taille n'entre pas dans l'estimation §57 (elle est bornée par le
-    ///   rush source et le fichier est supprimé avec `temp/`) ;
-    /// - le fichier est RÉUTILISÉ s'il existe déjà (nom déterministe) : le
-    ///   résumé §56 et l'export qui le suit ne matérialisent qu'une fois.
+    /// - sa taille n'entre pas dans l'estimation §57 : elle est bornée par le
+    ///   rush source, et le fichier ne survit pas au projet (§31, le dossier
+    ///   entier est supprimé) — celui d'un export disparaît avec `temp/`
+    ///   (`ProjectFileStore.clearTemporaryFiles`, vidé à chaque passage), celui
+    ///   d'un aperçu avec `previews/`
+    ///   (`ProjectFileStore.clearPreviewIntermediates`, appelé par
+    ///   `PreviewCache.invalidateAll`) ;
+    /// - le fichier est RÉUTILISÉ s'il existe déjà : le résumé §56 et l'export
+    ///   qui le suit ne matérialisent qu'une fois.
+    ///
+    /// **Le nom porte la date de modification de l'asset** — voir
+    /// `intermediateFileURL(id:modificationDate:in:)`. Sans elle, un rush
+    /// RETOUCHÉ dans Photos (même identifiant local, §13.2) aurait été rejoué
+    /// éternellement dans sa version périmée par l'aperçu, dont le dossier
+    /// survit entre deux lectures, pendant que l'export — qui vide son `temp/`
+    /// à chaque passage — aurait matérialisé la nouvelle : aperçu et export
+    /// auraient de nouveau divergé, ce que le passage à cette résolution
+    /// unique visait justement à supprimer.
     ///
     /// - Parameters:
     ///   - id: identifiant local PhotoKit du rush.
     ///   - allowNetwork: §44 — l'export passe `false` (une case `ready` a
     ///     déjà été résolue, aucun téléchargement surprise).
     ///   - intermediateDirectory: dossier d'accueil des fichiers
-    ///     intermédiaires (`temp/` du projet, §11) — créé si nécessaire.
+    ///     intermédiaires (`temp/` ou `previews/` du projet, §11) — créé si
+    ///     nécessaire.
     func exportableVideoURL(
         id: String,
         allowNetwork: Bool,
@@ -466,14 +450,30 @@ actor MediaLibraryActor {
     ) async throws -> URL {
         try requireReadAccess()
 
-        // Intermédiaire déjà matérialisé (résumé §56 puis export, ou export
-        // relancé sans nettoyage) : réutilisé tel quel, aucune requête.
-        let intermediateURL = Self.intermediateFileURL(id: id, in: intermediateDirectory)
+        // L'asset est résolu AVANT de chercher un intermédiaire : sa date de
+        // modification entre dans le nom du fichier, un rush retouché ne peut
+        // donc pas rejouer l'ancien (`fetchAssets` est une lecture locale, pas
+        // une requête réseau).
+        //
+        // Conséquence assumée : un rush SUPPRIMÉ de Photos échoue désormais
+        // (§64 `assetNotFound`) même si un intermédiaire traîne encore sur le
+        // disque. C'est ce que fait déjà l'export (son `temp/` est vidé à
+        // chaque passage) — l'aperçu ne peut pas continuer de montrer une
+        // vidéo que l'export refusera.
+        let phAsset = try requireVideoAsset(id: id)
+        let intermediateURL = Self.intermediateFileURL(
+            id: id,
+            modificationDate: phAsset.modificationDate,
+            in: intermediateDirectory
+        )
+
+        // Intermédiaire déjà matérialisé pour CETTE version du rush (résumé
+        // §56 puis export, ou aperçu relancé) : réutilisé tel quel, aucune
+        // requête.
         if FileManager.default.fileExists(atPath: intermediateURL.path(percentEncoded: false)) {
             return intermediateURL
         }
 
-        let phAsset = try requireVideoAsset(id: id)
         if let url = try await requestFileURL(for: phAsset, allowNetwork: allowNetwork) {
             return url
         }
@@ -484,15 +484,30 @@ actor MediaLibraryActor {
         )
     }
 
-    /// Nom DÉTERMINISTE du fichier intermédiaire d'un rush (§11 `temp/`) :
-    /// deux résolutions du même rush désignent le même fichier, donc une
-    /// seule matérialisation. L'identifiant PhotoKit contient des `/`
-    /// (`<uuid>/L0/001`) : tout caractère non alphanumérique devient `-`.
-    static func intermediateFileURL(id: String, in directory: URL) -> URL {
+    /// Nom DÉTERMINISTE du fichier intermédiaire d'un rush (§11 `temp/` ou
+    /// `previews/`) : deux résolutions de la MÊME version du même rush
+    /// désignent le même fichier, donc une seule matérialisation.
+    ///
+    /// L'identifiant PhotoKit contient des `/` (`<uuid>/L0/001`) : tout
+    /// caractère non alphanumérique devient `-`.
+    ///
+    /// `modificationDate` (secondes entières depuis 1970, `0` si PhotoKit ne
+    /// la donne pas) DISCRIMINE les versions successives d'un même rush : une
+    /// retouche dans Photos conserve l'identifiant local mais change la date,
+    /// donc le nom — l'ancien intermédiaire n'est plus jamais rejoué. Les
+    /// résidus disparaissent avec le dossier qui les porte (`temp/` vidé à
+    /// chaque export, `previews/` vidé à chaque invalidation de cache §48, et
+    /// tout le projet à sa suppression §31).
+    static func intermediateFileURL(
+        id: String,
+        modificationDate: Date?,
+        in directory: URL
+    ) -> URL {
         let sanitized = String(id.unicodeScalars.map {
             CharacterSet.alphanumerics.contains($0) ? Character($0) : "-"
         }.prefix(80))
-        return directory.appending(path: "source-\(sanitized).mov")
+        let version = Int64((modificationDate?.timeIntervalSince1970 ?? 0).rounded())
+        return directory.appending(path: "source-\(sanitized)-\(version).mov")
     }
 
     /// PHAsset vidéo du projet, ou erreur §64 (asset supprimé / média non

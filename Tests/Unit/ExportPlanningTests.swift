@@ -223,7 +223,7 @@ final class ExportPlanningTests: XCTestCase {
         }
     }
 
-    // MARK: - Exemple CHIFFRÉ de l'utilisateur : cases 28…35 + 40…50
+    // MARK: - FORME de l'exemple : 8 plans + 4 trous + 11 plans (index 28…50)
 
     /// Durée d'une case du montage de référence : **30 000 ticks (0,5 s) pour
     /// un index PAIR, 20 000 (1/3 s) pour un index IMPAIR**.
@@ -242,7 +242,15 @@ final class ExportPlanningTests: XCTestCase {
     }
 
     /// 51 cases jointives aux durées INÉGALES ci-dessus, pavant la musique sans
-    /// trou (§28.1) : cases 28 à 35 et 40 à 50 prêtes, cases 36 à 39 VIDES.
+    /// trou (§28.1) : cases d'INDEX 28…35 et 40…50 prêtes, cases d'index
+    /// 36…39 VIDES.
+    ///
+    /// NUMÉROTATION (convention en tête d'ExportModels.swift) : index
+    /// **0-based**, pas les numéros de plan affichés — cette fixture reproduit
+    /// la FORME de l'exemple de la demande (8 plans, 4 cases vides, 11 plans),
+    /// qui porte lui, en numéros AFFICHÉS, sur les plans 28 à 35 et 40 à 50
+    /// (index 27…34 et 39…49). À l'écran, les cases ci-dessous s'annoncent
+    /// « plans 29 à 36 » et « plans 41 à 51 ».
     ///
     /// Valeurs calculées à la main (60 000 ticks/s, §9) :
     /// - run 1 : 8 plans (cases 28…35), `musicStart` = 14 × 50 000 = 700 000,
@@ -513,8 +521,8 @@ final class ExportPlanningTests: XCTestCase {
     /// §66 — le tout premier rush du montage devient indisponible pendant
     /// l'assemblage. L'erreur annoncée doit dire la CAUSE RÉELLE.
     ///
-    /// `emptyPrefix` disait « remplissez au moins une case du montage » : faux
-    /// et trompeur, puisque le montage est rempli — c'est la vidéo du premier
+    /// `emptyPrefix` propose « remplissez au moins une case » parmi ses gestes :
+    /// trompeur ici, puisque le montage est rempli — c'est la vidéo du premier
     /// plan qui manque. Les deux causes possibles appellent deux actions
     /// différentes (§44/§64) : attendre un téléchargement iCloud, ou remplacer
     /// le rush / réautoriser l'accès.

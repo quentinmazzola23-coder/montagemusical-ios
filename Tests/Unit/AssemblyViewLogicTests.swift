@@ -27,6 +27,11 @@
 //  - **compte de plans faisant autorité** (`exportedSlotCount`) : il ne se
 //    déduit plus de la largeur des plages d'index, qui compte les index
 //    manquants ;
+//    SECOND PASSAGE (même jour) : la matrice ne fabriquait que des index
+//    contigus et des cases jointives — les seules entrées où les deux
+//    découpages coïncident TRIVIALEMENT. Elle porte désormais les deux
+//    discontinuités qui ferment une zone sans changement d'état (index sauté,
+//    trou temporel), et c'est l'interface qui a été corrigée pour les suivre ;
 //  - **§64 cause du blocage** (`nothingReadyCause`) : une case REMPLIE mais non
 //    prête n'appelle pas le même geste qu'une case vide, et les deux
 //    vocabulaires (états d'affichage, statuts §13.3) doivent conclure pareil.
@@ -92,58 +97,127 @@ final class AssemblyViewLogicTests: XCTestCase {
         states.enumerated().map { makeItem(index: $0.offset, state: $0.element) }
     }
 
+    /// Description d'une case de la matrice d'arrangements : son statut
+    /// (`nil` = case vide) et, éventuellement, une IRRÉGULARITÉ par rapport à
+    /// la case précédente.
+    ///
+    /// RELECTURE (13 août 2026, second passage) : la matrice ne fabriquait que
+    /// des index CONTIGUS et des cases JOINTIVES — exactement les entrées où
+    /// les deux découpages en zones (domaine et interface) coïncident
+    /// trivialement. Elle était donc aveugle au seul cas qui les séparait. Les
+    /// deux irrégularités ci-dessous existent bien : §10.1 et §28.1 les
+    /// interdisent à une partition SAINE, mais une base migrée (§61) ou
+    /// altérée peut les porter, et c'est précisément pour elles que
+    /// `readyTimeline` ferme un run sur toute discontinuité.
+    private struct SlotSpec: CustomStringConvertible {
+        /// Statut d'association ; `nil` = case vide.
+        let status: ClipAssignmentStatus?
+        /// Nombre d'index SAUTÉS avant cette case (1 = une case manque dans la
+        /// partition).
+        let indexJump: Int
+        /// Trou de musique (en ticks) laissé avant cette case : son début ne
+        /// coïncide plus avec la fin de la précédente.
+        let timeGapTicks: Int64
+
+        init(_ status: ClipAssignmentStatus?, indexJump: Int = 0, timeGapTicks: Int64 = 0) {
+            self.status = status
+            self.indexJump = indexJump
+            self.timeGapTicks = timeGapTicks
+        }
+
+        static let empty = SlotSpec(nil)
+        static let ready = SlotSpec(.ready)
+        static let resolving = SlotSpec(.resolving)
+        static let downloading = SlotSpec(.downloading)
+        static let unavailable = SlotSpec(.unavailable)
+        static let tooShort = SlotSpec(.tooShort)
+
+        /// Case prête dont l'INDEX saute : la case d'avant n'existe plus.
+        static let readyAfterMissingIndex = SlotSpec(.ready, indexJump: 1)
+        /// Case prête précédée d'un TROU de musique (cases non jointives).
+        static let readyAfterTimeGap = SlotSpec(.ready, timeGapTicks: 15_000)
+
+        var description: String {
+            var text = status.map { "\($0.rawValue)" } ?? "vide"
+            if indexJump > 0 { text += "+saut\(indexJump)" }
+            if timeGapTicks > 0 { text += "+trou\(timeGapTicks)" }
+            return text
+        }
+    }
+
     /// Le MÊME arrangement vu des deux côtés : cases du domaine
     /// (`ProjectSlot`, ce que l'export lit) et cases d'affichage
     /// (`AssemblySlotItem`, ce que l'écran dessine). Les index et les durées
     /// sont identiques des deux côtés — seule la dérivation d'état diffère,
     /// et c'est précisément ce qu'on veut comparer.
+    ///
+    /// Les irrégularités de `SlotSpec` ne s'appliquent qu'à partir de la
+    /// DEUXIÈME case : rien ne précède la première.
     private func makeArrangement(
-        _ statuses: [ClipAssignmentStatus?],
+        _ specs: [SlotSpec],
         firstIndex: Int = 0
     ) -> (slots: [ProjectSlot], items: [AssemblySlotItem]) {
         var slots: [ProjectSlot] = []
         var items: [AssemblySlotItem] = []
+        var index = firstIndex
         var startTicks: Int64 = 0
-        for (position, status) in statuses.enumerated() {
-            let index = firstIndex + position
+        for (position, spec) in specs.enumerated() {
+            if position > 0 {
+                index += 1 + spec.indexJump
+                startTicks += spec.timeGapTicks
+            }
+            let endTicks = startTicks + 45_000
             slots.append(makeSlot(
                 index: index,
                 startTicks: startTicks,
-                endTicks: startTicks + 45_000,
-                status: status
+                endTicks: endTicks,
+                status: spec.status
             ))
             items.append(AssemblySlotItem(
                 id: slots[position].id,
                 index: index,
                 start: MediaTime(ticks: startTicks),
-                end: MediaTime(ticks: startTicks + 45_000),
-                state: AssemblySlotState.from(assignmentStatusRaw: status?.rawValue)
+                end: MediaTime(ticks: endTicks),
+                state: AssemblySlotState.from(assignmentStatusRaw: spec.status?.rawValue)
             ))
-            startTicks += 45_000
+            startTicks = endTicks
         }
         return (slots, items)
     }
 
     /// Matrice d'arrangements couvrant tout ce qui peut arriver à une case :
     /// vide, en cours (§44), prête, bloquée (§64, §3.8), aux extrémités comme
-    /// au milieu, en une zone comme en plusieurs.
-    private var arrangements: [[ClipAssignmentStatus?]] {
+    /// au milieu, en une zone comme en plusieurs — ET les deux discontinuités
+    /// qui ferment une zone sans changement d'état (index manquant, trou
+    /// temporel), sans lesquelles les tests d'équivalence ne prouvaient rien.
+    private var arrangements: [[SlotSpec]] {
         [
             [],
-            [nil],
+            [.empty],
             [.ready],
             [.downloading],
-            [nil, .ready],
-            [.ready, nil],
-            [.ready, nil, .ready],
-            [.ready, .ready, nil, .ready, .ready],
+            [.empty, .ready],
+            [.ready, .empty],
+            [.ready, .empty, .ready],
+            [.ready, .ready, .empty, .ready, .ready],
             [.downloading, .ready],
-            [nil, .resolving, .unavailable],
+            [.empty, .resolving, .unavailable],
             [.ready, .ready, .tooShort, .ready],
-            [nil, .ready, .ready, nil, .ready, .ready],
-            [.ready, .unavailable, .ready, .downloading, .ready, nil, .ready],
-            [.tooShort, .resolving, .downloading, .unavailable, nil],
-            [.ready, .ready, .ready, .ready]
+            [.empty, .ready, .ready, .empty, .ready, .ready],
+            [.ready, .unavailable, .ready, .downloading, .ready, .empty, .ready],
+            [.tooShort, .resolving, .downloading, .unavailable, .empty],
+            [.ready, .ready, .ready, .ready],
+            // Discontinuités SANS changement d'état : deux cases prêtes qui ne
+            // se prolongent pas forment deux zones, des deux côtés.
+            [.ready, .readyAfterMissingIndex],
+            [.ready, .readyAfterTimeGap],
+            [.ready, .ready, .readyAfterMissingIndex, .ready],
+            [.ready, .ready, .readyAfterTimeGap, .ready],
+            [.ready, .readyAfterMissingIndex, .readyAfterTimeGap, .empty, .ready],
+            // Discontinuité APRÈS une case non prête : l'état a déjà fermé la
+            // zone, le saut ne doit pas en ouvrir une de plus.
+            [.ready, .empty, .readyAfterMissingIndex, .ready],
+            [.downloading, .readyAfterTimeGap, .ready]
         ]
     }
 
@@ -404,12 +478,12 @@ final class AssemblyViewLogicTests: XCTestCase {
         // variante « snapshots » (source du domaine) doivent rendre le MÊME
         // verdict : sans cela, le dock proposerait un export que l'écran
         // suivant refuserait.
-        for statuses in arrangements {
-            let arrangement = makeArrangement(statuses)
+        for specs in arrangements {
+            let arrangement = makeArrangement(specs)
             XCTAssertEqual(
                 AssemblyViewLogic.isExportEnabled(slots: arrangement.slots),
                 AssemblyViewLogic.isExportEnabled(items: arrangement.items),
-                "arrangement : \(statuses)"
+                "arrangement : \(specs)"
             )
         }
     }
@@ -425,20 +499,20 @@ final class AssemblyViewLogicTests: XCTestCase {
         // rien n'obligeait le second à suivre le premier. S'ils divergeaient,
         // l'utilisateur verrait des zones qui ne partent pas — ou n'en verrait
         // pas qui partent.
-        for statuses in arrangements {
-            let arrangement = makeArrangement(statuses)
+        for specs in arrangements {
+            let arrangement = makeArrangement(specs)
             let domainRuns = readyTimeline(slots: arrangement.slots).runs
             let interfaceZones = AssemblyViewLogic.exportedZoneIndexes(items: arrangement.items)
 
             XCTAssertEqual(
                 interfaceZones.count,
                 domainRuns.count,
-                "nombre de zones — arrangement : \(statuses)"
+                "nombre de zones — arrangement : \(specs)"
             )
             XCTAssertEqual(
                 interfaceZones,
                 domainRuns.map { $0.startIndex...$0.endIndex },
-                "bornes des zones — arrangement : \(statuses)"
+                "bornes des zones — arrangement : \(specs)"
             )
             // Même nombre de plans PAR zone : deux découpages peuvent partager
             // leurs bornes et ne pas contenir le même nombre de cases.
@@ -446,13 +520,13 @@ final class AssemblyViewLogicTests: XCTestCase {
             XCTAssertEqual(
                 interfacePositions.map(\.count),
                 domainRuns.map(\.slotCount),
-                "plans par zone — arrangement : \(statuses)"
+                "plans par zone — arrangement : \(specs)"
             )
             // Et le même TOTAL, celui qui s'affiche (§56).
             XCTAssertEqual(
                 AssemblyViewLogic.exportedSlotCount(items: arrangement.items),
                 readyTimeline(slots: arrangement.slots).slotCount,
-                "total de plans — arrangement : \(statuses)"
+                "total de plans — arrangement : \(specs)"
             )
         }
     }
@@ -461,12 +535,12 @@ final class AssemblyViewLogicTests: XCTestCase {
         // L'exemple de la demande commence à la case 28 : la traduction
         // position → index ne doit pas décaler les zones de l'interface par
         // rapport aux runs du domaine.
-        for statuses in arrangements {
-            let arrangement = makeArrangement(statuses, firstIndex: 28)
+        for specs in arrangements {
+            let arrangement = makeArrangement(specs, firstIndex: 28)
             XCTAssertEqual(
                 AssemblyViewLogic.exportedZoneIndexes(items: arrangement.items),
                 readyTimeline(slots: arrangement.slots).runs.map { $0.startIndex...$0.endIndex },
-                "arrangement : \(statuses)"
+                "arrangement : \(specs)"
             )
         }
     }
@@ -489,11 +563,19 @@ final class AssemblyViewLogicTests: XCTestCase {
         )
     }
 
-    func testAuthoritativeCountIgnoresMissingIndexesInsideAZone() {
-        // LE cas qui séparait les deux comptes : les index d'une zone ne sont
-        // pas contigus (28, 29, 31). La LARGEUR de la plage d'index vaut 4,
-        // alors que la zone ne contient que 3 plans — c'est le nombre de PLANS
-        // qui doit être annoncé, jamais la largeur de l'intervalle.
+    func testMissingIndexesSplitTheZoneInsteadOfWideningIt() {
+        // VERDICT CHANGÉ (relecture du 13 août 2026, second passage). Ce test
+        // attendait auparavant `[28...31, 34...34]` : une zone d'index NON
+        // contigus (28, 29, 31), plus large que son nombre de plans. C'était la
+        // divergence elle-même — sur ces mêmes cases, le domaine
+        // (`readyTimeline`) produit TROIS runs, donc trois zones concaténées et
+        // trois coupes musicales à l'export, pendant que l'écran n'en dessinait
+        // que deux. L'interface ferme désormais la zone sur la même
+        // discontinuité : les index d'une zone sont contigus, et la largeur
+        // d'une plage vaut de nouveau son nombre de plans.
+        //
+        // Ce qui ne change pas : le compte annoncé reste `exportedSlotCount`,
+        // seule source (§56) — il ne se redéduit jamais des plages.
         let items = [
             makeItem(index: 28, state: .ready),
             makeItem(index: 29, state: .ready),
@@ -503,9 +585,24 @@ final class AssemblyViewLogicTests: XCTestCase {
         ]
         let zones = AssemblyViewLogic.exportedZoneIndexes(items: items)
 
-        XCTAssertEqual(zones, [28...31, 34...34])
-        XCTAssertEqual(zones.reduce(0) { $0 + $1.count }, 5, "la largeur des plages compte 5…")
-        XCTAssertEqual(AssemblyViewLogic.exportedSlotCount(items: items), 4, "…mais il n'y a que 4 plans")
+        XCTAssertEqual(zones, [28...29, 31...31, 34...34])
+        XCTAssertEqual(zones.reduce(0) { $0 + $1.count }, 4, "largeur des plages == nombre de plans")
+        XCTAssertEqual(AssemblyViewLogic.exportedSlotCount(items: items), 4)
+
+        // Le MÊME découpage que le domaine, sur les mêmes cases (`makeItem`
+        // pose `start = index × 60 000` : la case 31 ne prolonge donc ni
+        // l'index ni le temps de la case 29).
+        let slots = [
+            makeSlot(index: 28, startTicks: 1_680_000, endTicks: 1_740_000),
+            makeSlot(index: 29, startTicks: 1_740_000, endTicks: 1_800_000),
+            makeSlot(index: 31, startTicks: 1_860_000, endTicks: 1_920_000),
+            makeSlot(index: 32, startTicks: 1_920_000, endTicks: 1_980_000, status: nil),
+            makeSlot(index: 34, startTicks: 2_040_000, endTicks: 2_100_000)
+        ]
+        XCTAssertEqual(
+            zones,
+            readyTimeline(slots: slots).runs.map { $0.startIndex...$0.endIndex }
+        )
 
         // L'énoncé VoiceOver dit le compte FAISANT AUTORITÉ, pas la largeur.
         XCTAssertEqual(
@@ -513,7 +610,37 @@ final class AssemblyViewLogicTests: XCTestCase {
                 zones: zones,
                 slotCount: AssemblyViewLogic.exportedSlotCount(items: items)
             ),
-            "4 plans exportables en 2 zones"
+            "4 plans exportables en 3 zones"
+        )
+    }
+
+    func testAZoneClosesOnATimeGapEvenWhenIndexesAreContiguous() {
+        // §28.1 garantit que les cases pavent la musique sans trou, mais
+        // `readyTimeline` ne le SUPPOSE pas : deux cases prêtes non jointives
+        // forment deux zones (sans quoi la durée annoncée d'un run dépasserait
+        // la somme des durées de ses cases). L'interface applique la même
+        // règle, sinon l'écran dessinerait un seul crochet là où l'export coupe.
+        let items = [
+            AssemblySlotItem(
+                id: UUID(), index: 0,
+                start: MediaTime(ticks: 0), end: MediaTime(ticks: 45_000),
+                state: .ready
+            ),
+            AssemblySlotItem(
+                id: UUID(), index: 1,
+                start: MediaTime(ticks: 60_000), end: MediaTime(ticks: 105_000),
+                state: .ready
+            )
+        ]
+        let slots = [
+            makeSlot(index: 0, startTicks: 0, endTicks: 45_000),
+            makeSlot(index: 1, startTicks: 60_000, endTicks: 105_000)
+        ]
+
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [0...0, 1...1])
+        XCTAssertEqual(
+            AssemblyViewLogic.exportedZoneIndexes(items: items),
+            readyTimeline(slots: slots).runs.map { $0.startIndex...$0.endIndex }
         )
     }
 
@@ -553,12 +680,12 @@ final class AssemblyViewLogicTests: XCTestCase {
         // d'affichage : les deux doivent conseiller le MÊME geste pour la même
         // situation, sinon l'utilisateur reçoit deux consignes contradictoires
         // à un écran d'intervalle.
-        for statuses in arrangements {
-            let arrangement = makeArrangement(statuses)
+        for specs in arrangements {
+            let arrangement = makeArrangement(specs)
             XCTAssertEqual(
                 AssemblyViewLogic.nothingReadyCause(items: arrangement.items),
                 ExportSummaryLogic.nothingReadyCause(slots: arrangement.slots),
-                "arrangement : \(statuses)"
+                "arrangement : \(specs)"
             )
         }
     }
@@ -588,9 +715,13 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [0...1, 3...5])
     }
 
-    func testZonesFollowTheExampleOfTheRequest() {
-        // 28..35 prêtes, 36..39 vides, 40..50 prêtes (index 0-based) →
-        // 8 + 11 = 19 plans en 2 zones.
+    func testZonesFollowTheShapeOfTheRequestExample() {
+        // La FORME de l'exemple : 8 plans, 4 cases vides, 11 plans → 19 plans
+        // en 2 zones. Les nombres ci-dessous sont des INDEX 0-based (§10.1,
+        // convention en tête d'ExportModels.swift) : ces cases s'annoncent
+        // « plans 29 à 36 » et « plans 41 à 51 » à l'écran, tandis que
+        // l'exemple de la demande (plans 28 à 35 / 40 à 50) porte sur les index
+        // 27…34 et 39…49. Seule la forme est vérifiée ici.
         var states = [AssemblySlotState](repeating: .empty, count: 51)
         for index in 28...35 { states[index] = .ready }
         for index in 40...50 { states[index] = .ready }

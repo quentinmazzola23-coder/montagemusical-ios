@@ -44,6 +44,15 @@
 //  comprises : c'est le seul endroit où l'utilisateur peut entendre le saut de
 //  musique entre deux zones avant d'exporter.
 //
+//  CORRECTIF (second passage de relecture, 13 août 2026) — §64 : « rien à
+//  prévisualiser » n'appelle plus systématiquement « Remplissez au moins une
+//  case ». Toutes les cases peuvent être REMPLIES et pourtant aucune prête
+//  (téléchargement iCloud §44, rush indisponible §64, rush trop court §43) :
+//  le message dérive donc la CAUSE de l'instantané déjà lu et affiche le geste
+//  correspondant, via la table UNIQUE d'`ExportSummaryLogic` — la même que le
+//  résumé §56, pour que les deux écrans ne conseillent jamais deux gestes
+//  différents dans la même situation.
+//
 
 import AVFoundation
 import AVKit
@@ -370,7 +379,13 @@ struct PreviewPlayerView: View {
             // disparaît.
             return
         } catch let error as PreviewError {
-            errorMessage = Self.message(for: error)
+            // §64 : l'instantané est là — la CAUSE d'une portée vide est donc
+            // connue (rien de rempli, téléchargement en cours, rush bloqué) et
+            // le message peut nommer le bon geste.
+            errorMessage = Self.message(
+                for: error,
+                nothingReadyCause: ExportSummaryLogic.nothingReadyCause(slots: snapshot.slots)
+            )
         } catch {
             environment.logger.error("Construction de l'aperçu impossible : \(error.localizedDescription)")
             errorMessage = "L'aperçu n'a pas pu être préparé. Fermez l'aperçu, puis rouvrez-le."
@@ -389,13 +404,25 @@ struct PreviewPlayerView: View {
     /// Chaque message dit QUOI FAIRE, et les causes qui appellent des gestes
     /// différents sont distinguées (§40 Réglages / §44 attendre iCloud /
     /// §64 remplacer le rush).
-    private static func message(for error: PreviewError) -> String {
+    ///
+    /// - Parameter nothingReadyCause: pourquoi aucune case n'est prête, lu sur
+    ///   l'instantané du projet par l'appelant. Sert au seul cas `.emptyScope`.
+    private static func message(
+        for error: PreviewError,
+        nothingReadyCause: ExportSummaryLogic.NothingReadyCause
+    ) -> String {
         switch error {
         case .emptyScope:
-            // ÉCART PRODUIT : n'importe quelle case remplie suffit désormais
-            // à obtenir un montage — ce n'est plus « la première » qu'il faut
-            // nommer, sinon le message décrirait un blocage qui n'existe plus.
-            "Aucun plan prêt à prévisualiser. Remplissez au moins une case."
+            // CORRECTIF (second passage de relecture, 13 août 2026) — §64.
+            // Le message imposait « Remplissez au moins une case », geste
+            // inutile quand les cases sont REMPLIES mais en téléchargement
+            // (§44), indisponibles (§64) ou trop courtes (§43) : c'est
+            // exactement le défaut corrigé côté export. La table des gestes
+            // est celle du résumé §56 (`ExportSummaryLogic`), UNIQUE — le
+            // lecteur et l'écran d'export ne peuvent pas conseiller deux
+            // choses différentes pour la même situation.
+            ExportSummaryLogic.nothingReadyTitle + " "
+                + ExportSummaryLogic.nothingReadyHint(nothingReadyCause, action: .preview)
         case .missingAudio:
             "La musique du projet est introuvable. Réimportez-la pour prévisualiser."
         case .assetUnavailable:

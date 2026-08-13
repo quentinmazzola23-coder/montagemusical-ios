@@ -19,18 +19,43 @@
 //  et les cases vides (ou non prêtes) sont PUREMENT SUPPRIMÉES du montage —
 //  vidéo ET musique.
 //
-//      Exemple de l'utilisateur : cases 28…35 prêtes, 36…39 vides,
-//      40…50 prêtes → montage = 8 plans + 11 plans = 19 plans mis bout à
+//      Exemple de l'utilisateur : plans 28 à 35 prêts, 36 à 39 vides,
+//      40 à 50 prêts → montage = 8 plans + 11 plans = 19 plans mis bout à
 //      bout, d'une durée égale à la somme des durées de ces 19 cases. La
-//      portion de musique des cases 36…39 n'existe PAS dans le fichier
+//      portion de musique des plans 36 à 39 n'existe PAS dans le fichier
 //      exporté.
+//
+//  ─────────────────────────────────────────────────────────────────────
+//  CONVENTION DE NUMÉROTATION (une seule, valable dans tout le dépôt)
+//  ─────────────────────────────────────────────────────────────────────
+//
+//  - le CODE ne connaît que `ProjectSlot.index`, **0-based** (§10.1) ;
+//  - l'INTERFACE n'affiche que des numéros de PLAN, **1-based** (§35.1
+//    « Plan X sur N ») : elle ajoute +1 à l'index, une seule fois, au moment
+//    du libellé (`ExportSummaryLogic.planRangeLabel` / `zoneRangesLabel`,
+//    `AssemblyViewLogic.spokenExportedZones`, `ProjectExporter` en journal) ;
+//  - l'exemple de l'utilisateur ci-dessus est écrit dans SA numérotation,
+//    celle qu'il lit à l'écran : **plans 28 à 35 et 40 à 50**, c'est-à-dire
+//    les **index 27…34 et 39…49**.
+//
+//  CORRECTIF (relecture du 13 août 2026, second passage) : ces mêmes nombres
+//  étaient écrits à DEUX conventions incompatibles — index 0-based ici et
+//  dans les fixtures du domaine, plans 1-based dans les libellés d'interface
+//  et leurs tests. Les deux ne pouvaient pas être vrais ensemble. Les
+//  fixtures du domaine (`ReadyTimelineTests.montageWithTwoRuns`,
+//  `ExportPlanningTests.snapshotWithTwoZones`) gardent des INDEX 28…35 et
+//  40…50 : elles reproduisent la FORME de l'exemple (8 plans, 4 cases vides,
+//  11 plans) avec des valeurs calculées à la main, et leurs en-têtes disent
+//  désormais qu'il s'agit d'index — donc des plans 29 à 36 et 41 à 51 à
+//  l'écran. Toute nouvelle documentation doit préciser laquelle des deux
+//  numérotations elle emploie.
 //
 //  ─────────────────────────────────────────────────────────────────────
 //  MODÈLE TEMPOREL (le point critique)
 //  ─────────────────────────────────────────────────────────────────────
 //
 //  - un **RUN** (`ReadyRun`) est une suite MAXIMALE de cases prêtes contiguës
-//    (28…35 est un run, 40…50 en est un autre) ;
+//    (les plans 28 à 35 forment un run, les plans 40 à 50 un autre) ;
 //  - les runs sont CONCATÉNÉS dans l'ordre des index ;
 //  - **position de composition du run `r`** = somme des durées de TOUTES les
 //    cases prêtes des runs précédents
@@ -224,7 +249,8 @@ struct ReadyRun: Sendable, Equatable {
     /// d'annoncer (§56), d'estimer (§57) et d'encoder cette durée.
     var duration: MediaTime { musicEnd - musicStart }
 
-    /// Index de la PREMIÈRE case du run — pour l'affichage « Plans 28 à 35 ».
+    /// Index (0-based) de la PREMIÈRE case du run — l'interface l'affiche +1
+    /// (« Plans 28 à 35 » pour les index 27…34, convention en tête de fichier).
     var startIndex: Int { slots[0].index }
 
     /// Index de la DERNIÈRE case du run.

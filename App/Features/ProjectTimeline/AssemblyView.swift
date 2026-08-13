@@ -20,8 +20,10 @@
 //  parties avec de la vidéo ». Une ZONE (un « run ») est une suite maximale
 //  de cases prêtes contiguës ; les cases vides ou non prêtes sont PUREMENT
 //  SUPPRIMÉES du montage — vidéo ET musique.
-//  Exemple : cases 28..35 prêtes, 36..39 vides, 40..50 prêtes → 8 + 11 = 19
+//  Exemple : plans 28 à 35 prêts, 36 à 39 vides, 40 à 50 prêts → 8 + 11 = 19
 //  plans mis bout à bout, durée = somme des durées de ces 19 cases.
+//  (Numérotation AFFICHÉE, 1-based, §35.1 — soit les index 27…34 et 39…49 ;
+//  convention unique en tête d'ExportModels.swift.)
 //  Conséquences pour CET écran :
 //  - « Export » et « Prévisualiser le montage » sont actifs dès qu'AU MOINS
 //    UNE case est prête (`AssemblyViewLogic.isExportEnabled`), plus seulement
@@ -43,6 +45,13 @@
 //    la mini-timeline). Les deux ne coïncident que si les index d'une zone
 //    sont strictement contigus. `AssemblyViewLogic.exportedSlotCount(items:)`
 //    est désormais l'unique compte, passé aux libellés — écran ET VoiceOver ;
+//  - UN SEUL DÉCOUPAGE EN ZONES (relecture du 13 août 2026, second passage).
+//    `exportedZonePositions(items:)` ne fermait une zone que sur un changement
+//    d'ÉTAT, alors que le domaine (`readyTimeline(slots:)`) ferme aussi un run
+//    sur toute DISCONTINUITÉ — index sauté ou trou temporel. L'écran pouvait
+//    donc dessiner un crochet là où l'export produit deux zones concaténées
+//    (donc une coupe musicale de plus). Les deux fonctions appliquent
+//    désormais les mêmes trois règles de fermeture ;
 //  - §64 : LE GESTE PROPOSÉ DÉPEND DE LA CAUSE. Le hint du bouton « Export »
 //    désactivé disait toujours « Remplissez au moins une case », y compris
 //    quand toutes les cases étaient REMPLIES mais non prêtes (téléchargement
@@ -240,24 +249,55 @@ enum AssemblyViewLogic {
     /// 2. chaque case non prête (vide, ou association
     ///    `resolving`/`downloading`/`unavailable`/`tooShort`) ferme la zone en
     ///    cours et sera PUREMENT SUPPRIMÉE du montage — vidéo et musique ;
-    /// 3. toutes les zones partent à l'export, dans l'ordre des index.
+    /// 3. une case prête qui ne PROLONGE pas exactement la zone en cours ferme
+    ///    elle aussi la zone : index non consécutif, ou début différent de la
+    ///    fin de la case précédente ;
+    /// 4. toutes les zones partent à l'export, dans l'ordre des index.
     ///
     /// Tableau VIDE si aucune case n'est prête (export et aperçu principal
     /// indisponibles, §51).
     ///
-    /// MÊME règle que `readyTimeline(slots:)` du domaine, appliquée à la
-    /// projection d'affichage : les deux ne peuvent pas diverger, car
-    /// `AssemblySlotState.ready` est la dérivation unique de
-    /// `ClipAssignmentStatus.ready` (`AssemblySlotState.from`).
+    /// **MÊMES règles que `readyTimeline(slots:)` du domaine** (ExportModels),
+    /// appliquées à la projection d'affichage : une zone se ferme sur un état
+    /// non prêt (règle 2) ET sur toute discontinuité (règle 3), exactement
+    /// comme un run là-bas.
+    ///
+    /// CORRECTIF (relecture du 13 août 2026) : la règle 3 manquait. La
+    /// justification donnée ici (« `AssemblySlotState.ready` est la dérivation
+    /// unique de `ClipAssignmentStatus.ready` ») ne couvrait que l'ÉTAT ; le
+    /// domaine, lui, ferme aussi un run sur toute DISCONTINUITÉ (index sauté,
+    /// trou temporel — voir « Pourquoi la jointivité est vérifiée et pas
+    /// supposée » dans ExportModels.swift). Sur des cases d'index 28, 29, 31,
+    /// l'écran annonçait une zone `28…31` là où l'export en produit deux
+    /// (`28…29` puis `31…31`, avec une coupe musicale de plus) : deux
+    /// découpages, deux vérités. Il n'y en a plus qu'une.
+    ///
+    /// La comparaison n'a de sens que sur un tableau trié par index croissant
+    /// (ordre produit par le store, §10.1) — le domaine, lui, trie lui-même.
     static func exportedZonePositions(items: [AssemblySlotItem]) -> [ClosedRange<Int>] {
         var zones: [ClosedRange<Int>] = []
         var start: Int?
         for (position, item) in items.enumerated() {
-            if item.state == .ready {
-                if start == nil { start = position }
-            } else if let first = start {
+            guard item.state == .ready else {
+                // Case non prête : elle ferme la zone en cours et disparaît du
+                // montage (règle 2).
+                if let first = start {
+                    zones.append(first...(position - 1))
+                    start = nil
+                }
+                continue
+            }
+            guard let first = start else {
+                start = position // ouverture d'une zone
+                continue
+            }
+            // `start != nil` implique que la case précédente est prête : la
+            // seule question restante est de savoir si celle-ci PROLONGE la
+            // zone (règle 3, identique à `readyTimeline`).
+            let previous = items[position - 1]
+            if previous.index + 1 != item.index || previous.end != item.start {
                 zones.append(first...(position - 1))
-                start = nil
+                start = position
             }
         }
         if let first = start {
@@ -268,10 +308,16 @@ enum AssemblyViewLogic {
 
     /// Plages d'INDEX de case (`AssemblySlotItem.index`, 0-based) des zones
     /// exportées — les positions de tableau ci-dessus traduites en index de
-    /// plans, seuls affichables à l'utilisateur (« Plans 28 à 50 »).
+    /// plans. L'affichage les annonce en 1-based (§35.1 « Plan X sur N ») :
+    /// une zone d'index `27…49` se lit « Plans 28 à 50 ».
     ///
     /// Pour une partition complète, position == index ; la traduction reste
     /// explicite pour ne rien supposer d'une projection filtrée.
+    ///
+    /// Depuis la règle 3 d'`exportedZonePositions`, les index d'une zone sont
+    /// CONSÉCUTIFS par construction : la largeur d'une plage vaut donc son
+    /// nombre de plans. Le compte affiché reste malgré tout
+    /// `exportedSlotCount(items:)` — une seule source, voir ci-dessous.
     static func exportedZoneIndexes(items: [AssemblySlotItem]) -> [ClosedRange<Int>] {
         exportedZonePositions(items: items).map { zone in
             items[zone.lowerBound].index...items[zone.upperBound].index
@@ -284,9 +330,11 @@ enum AssemblyViewLogic {
     /// CORRECTIF (relecture adversariale du 13 août 2026) : les libellés le
     /// recalculaient en additionnant les LARGEURS des intervalles d'index
     /// (`zone.count`). Les deux ne coïncident que si les index d'une zone sont
-    /// strictement contigus — vrai par construction (§10.1), mais alors le
-    /// second calcul n'apporte rien, et faux le jour où il ne l'est plus : le
-    /// même écran annoncerait deux comptes différents. Une seule source.
+    /// strictement contigus — ce que la règle 3 d'`exportedZonePositions`
+    /// garantit désormais (second passage : un index sauté SCINDE la zone), mais
+    /// alors le second calcul n'apporte rien, et il redeviendrait faux le jour
+    /// où une plage viendrait d'ailleurs : le même écran annoncerait deux
+    /// comptes différents. Une seule source.
     ///
     /// O(N) en comparaisons d'énumération, sans allocation (§82).
     static func exportedSlotCount(items: [AssemblySlotItem]) -> Int {
