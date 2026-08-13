@@ -8,13 +8,24 @@
 //
 //  Protocole §7 `PreviewBuilding`.
 //
-//  CHANGEMENT PRODUIT (voir `ExportModels.swift`) : l'aperçu principal §47.2
-//  n'est plus celui du PRÉFIXE mais celui du SEGMENT continu de cases prêtes,
-//  où qu'il commence. La musique insérée est la PORTION
-//  `[segment.musicStart, segment.musicEnd]` du fichier original, placée à
-//  l'instant 0 ; la vidéo de chaque case est placée à
-//  `slot.start - segment.musicStart`. Les cases gardent leurs temps musicaux
-//  ABSOLUS — aucune n'est déplacée, aucun écran noir n'est ajouté.
+//  CHANGEMENT PRODUIT (contrat complet dans `ExportModels.swift`) : l'aperçu
+//  principal §47.2 n'est plus celui du PRÉFIXE, ni celui d'un SEGMENT unique,
+//  mais celui de la TIMELINE CONCATÉNÉE — toutes les zones remplies mises
+//  bout à bout, les cases vides étant SUPPRIMÉES (vidéo ET musique). On
+//  prévisualise donc EXACTEMENT le fichier qui sera exporté.
+//
+//  Conséquences pour ce fichier :
+//  - une insertion de musique PAR RUN (et non une par case : inutile, et cela
+//    multiplierait les coupures audio à l'intérieur d'une zone remplie) :
+//    portion `[run.musicStart, run.musicEnd]` posée à la position de
+//    composition du run ;
+//  - la vidéo de la case `i` est posée à
+//    `(position du run) + (slot.start - run.musicStart)` ;
+//  - les instructions de rendu couvrent `[0, durée totale]` sans trou.
+//  Les cases gardent leurs temps musicaux ABSOLUS — aucune n'est déplacée,
+//  aucun écran noir n'est ajouté. La musique SAUTE à chaque jonction entre
+//  runs : conséquence assumée de « n'exporte que les parties avec de la
+//  vidéo ».
 //
 
 import AVFoundation
@@ -33,9 +44,10 @@ import Foundation
 enum PreviewError: Error, Equatable, LocalizedError {
 
     /// Portée vide : aucune case à lire — case introuvable ou non remplie
-    /// (§47.1), ou SEGMENT exportable vide car AUCUNE case n'est prête
-    /// (§47.2 ; changement produit : une première case vide ne suffit plus à
-    /// vider la portée, le segment peut commencer n'importe où).
+    /// (§47.1), ou TIMELINE exportable vide car AUCUNE case n'est prête
+    /// (§47.2 ; changement produit : des cases vides ne vident plus la portée,
+    /// elles sont simplement supprimées du montage — seule l'absence TOTALE de
+    /// case prête laisse la portée vide).
     case emptyScope
 
     /// Musique du projet introuvable ou illisible (§11 `audio/original.<ext>`,
@@ -68,9 +80,9 @@ enum PreviewError: Error, Equatable, LocalizedError {
 
     /// Portée `.complete` demandée alors que le montage n'est pas terminé :
     /// au moins une case reste vide, en téléchargement ou indisponible —
-    /// autrement dit le SEGMENT prêt ne couvre pas TOUTES les cases (§47.2).
-    /// L'appelant se rabat sur `.contiguousPrefix`. Nom du cas conservé pour
-    /// ne pas casser ses appelants.
+    /// autrement dit la TIMELINE prête ne couvre pas TOUTES les cases
+    /// (§47.2). L'appelant se rabat sur `.contiguousPrefix`. Nom du cas
+    /// conservé pour ne pas casser ses appelants.
     case incompletePrefix
 
     var errorDescription: String? {
@@ -174,14 +186,15 @@ extension PreviewError {
 ///
 /// Compositions (§48, §54) :
 /// - `AVMutableComposition` avec UNE piste vidéo et UNE piste audio ;
-/// - piste audio = musique ORIGINALE du projet (§11, §16.1), dont la PORTION
-///   `[musicStart, musicEnd]` de la portée est insérée à l'instant 0 ;
+/// - piste audio = musique ORIGINALE du projet (§11, §16.1), dont UNE PORTION
+///   PAR RUN (`[run.musicStart, run.musicEnd]`) est insérée à la position de
+///   composition du run — une seule portion pour un aperçu local §47.1 ;
 /// - **aucune piste audio de rush** (§48, §54.5 : « ignorer les pistes audio
 ///   source ») ;
 /// - chaque case insère `[0, slotDuration]` de la piste vidéo de son rush à
-///   `slot.start - musicStart` (§53, §54.4) — l'écart entre deux cases reste
-///   celui de la musique, aucun clip n'est déplacé les uns par rapport aux
-///   autres ;
+///   `(position du run) + (slot.start - run.musicStart)` (§53, §54.4) —
+///   l'écart entre deux cases d'un même run reste celui de la musique, et
+///   aucun clip n'est déplacé par rapport à ses voisins de run ;
 /// - une instruction de composition par case, avec orientation + échelle +
 ///   translation (§50, §54.6/§54.7).
 @MainActor
@@ -223,9 +236,9 @@ struct PreviewBuilder: Sendable {
         case .slot(let slotID):
             return try await makeSlotComposition(project: project, slotID: slotID)
         case .contiguousPrefix:
-            return try await makeSegmentComposition(project: project, requiresCompleteMontage: false)
+            return try await makeTimelineComposition(project: project, requiresCompleteMontage: false)
         case .complete:
-            return try await makeSegmentComposition(project: project, requiresCompleteMontage: true)
+            return try await makeTimelineComposition(project: project, requiresCompleteMontage: true)
         }
     }
 
@@ -262,69 +275,93 @@ struct PreviewBuilder: Sendable {
         return try await assembleComposition(
             project: project,
             placements: [Placement(slot: slot, compositionStart: .zero)],
-            musicSourceStart: slot.start,
-            musicDuration: slot.duration
+            // UNE seule portion de musique : le passage ABSOLU de la case,
+            // posé à l'instant 0 (§47.1). L'aperçu local est INCHANGÉ par le
+            // changement produit — il ne connaît ni run ni timeline.
+            musicInsertions: [
+                MusicInsertion(
+                    sourceStart: slot.start,
+                    duration: slot.duration,
+                    compositionStart: .zero
+                )
+            ]
         )
     }
 
-    // MARK: - §47.2 Aperçu principal (segment continu)
+    // MARK: - §47.2 Aperçu principal (timeline concaténée)
 
-    /// Aperçu principal (§47.2), **version changement produit** : commence à
-    /// la PREMIÈRE case prête — où qu'elle soit dans le morceau — et s'arrête
-    /// avant la case non prête suivante. Une case `downloading`,
-    /// `unavailable` ou vide interrompt le segment ; une case non prête
-    /// AVANT le segment ne l'empêche plus (c'est exactement ce qui remplace
-    /// le préfixe §51).
+    /// Aperçu principal (§47.2), **version changement produit** : c'est
+    /// l'aperçu de la TIMELINE CONCATÉNÉE — toutes les zones remplies mises
+    /// bout à bout, les cases vides ou non prêtes étant SUPPRIMÉES (vidéo ET
+    /// musique). On prévisualise donc exactement le fichier exporté.
     ///
-    /// Le segment vient de `contiguousReadySegment(slots:)` — jamais
-    /// recalculé ici. Chaque case garde son temps musical ABSOLU : aucune
-    /// n'est avancée pour combler un trou (§3.12). Seule l'ORIGINE de la
-    /// timeline lue change :
-    /// - musique : la PORTION `[musicStart, musicEnd]` du fichier original,
-    ///   insérée à l'instant 0 de la composition ;
-    /// - vidéo de la case `i` : insérée à `slot.start - musicStart`
-    ///   (`ReadySegment.compositionStart(of:)`), soit `.zero` pour la
-    ///   première case du segment.
+    /// La timeline vient de `readyTimeline(slots:)` — jamais recalculée ici.
+    /// Chaque case garde son temps musical ABSOLU : aucune n'est réécrite
+    /// (§3.12). Ce qui change, c'est la façon de POSER les portions :
+    /// - musique : UNE insertion PAR RUN — portion
+    ///   `[run.musicStart, run.musicEnd]` du fichier original, posée à
+    ///   `timeline.compositionStart(ofRun:)`. Une insertion par CASE serait
+    ///   inutile (les cases d'un run sont jointives) et multiplierait les
+    ///   coupures audio à l'intérieur d'une zone remplie ;
+    /// - vidéo de la case `i` : posée à `timeline.compositionStart(of:)`,
+    ///   soit `.zero` pour la première case du premier run.
     ///
-    /// On entend donc EXACTEMENT le passage musical du segment, et chaque
-    /// coupe tombe au même endroit de la musique que dans le montage final
-    /// (§53 : la musique est l'horloge maîtresse).
+    /// On entend donc EXACTEMENT le passage musical de chaque zone remplie, et
+    /// chaque coupe tombe au même endroit de la musique que dans le montage
+    /// final (§53 : la musique est l'horloge maîtresse). La musique SAUTE aux
+    /// jonctions entre runs : c'est la conséquence assumée de la suppression
+    /// des zones vides.
     ///
-    /// Portée `.complete` (`requiresCompleteMontage`) : identique au segment
-    /// SI celui-ci couvre TOUTES les cases du projet ; sinon
+    /// Portée `.complete` (`requiresCompleteMontage`) : identique à la
+    /// timeline SI celle-ci couvre TOUTES les cases du projet ; sinon
     /// `incompletePrefix` — un montage complet ne peut pas être « presque
     /// complet », l'appelant retombe explicitement sur `.contiguousPrefix`
     /// (§47.2).
-    private func makeSegmentComposition(
+    private func makeTimelineComposition(
         project: ProjectSnapshot,
         requiresCompleteMontage: Bool
     ) async throws -> CachedComposition {
-        let segment = project.contiguousReadySegment // changement produit
+        let timeline = project.readyTimeline // changement produit
         // Complétude vérifiée AVANT la vacuité : demander le montage complet
         // d'un projet dont aucune case n'est prête est un montage
         // INCOMPLET (message « attendez la fin des téléchargements »), pas
         // une portée vide.
-        if requiresCompleteMontage, segment.slotCount != project.slots.count {
+        if requiresCompleteMontage, timeline.slotCount != project.slots.count {
             throw PreviewError.incompletePrefix
         }
-        guard !segment.isEmpty else {
+        guard !timeline.isEmpty else {
             throw PreviewError.emptyScope // aucune case prête
         }
 
-        // Décalage du segment : temps musicaux ABSOLUS conservés dans les
-        // cases, ramenés à l'origine de la composition par une SOUSTRACTION
-        // en ticks entiers (§9) — jamais par une réécriture des cases.
-        let placements = segment.slots.map {
-            Placement(slot: $0, compositionStart: segment.compositionStart(of: $0))
+        // Concaténation des runs : temps musicaux ABSOLUS conservés dans les
+        // cases, position finale calculée en ticks entiers (§9) — jamais par
+        // une réécriture des cases. `runStarts` fait le cumul en UN parcours,
+        // et c'est LE MÊME calcul que l'export (`ReadyTimeline`), donc les
+        // mêmes instants à l'image près.
+        var placements: [Placement] = []
+        var musicInsertions: [MusicInsertion] = []
+        placements.reserveCapacity(timeline.slotCount)
+        musicInsertions.reserveCapacity(timeline.runs.count)
+
+        for (run, runStart) in zip(timeline.runs, timeline.runStarts) {
+            for slot in run.slots {
+                placements.append(
+                    Placement(slot: slot, compositionStart: runStart + run.offset(of: slot))
+                )
+            }
+            musicInsertions.append(
+                MusicInsertion(
+                    sourceStart: run.musicStart,
+                    duration: run.duration,
+                    compositionStart: runStart
+                )
+            )
         }
 
         return try await assembleComposition(
             project: project,
             placements: placements,
-            // La musique lue est la PORTION du morceau couverte par le
-            // segment, posée à l'instant 0 de la composition.
-            musicSourceStart: segment.musicStart,
-            musicDuration: segment.duration
+            musicInsertions: musicInsertions
         )
     }
 
@@ -332,10 +369,26 @@ struct PreviewBuilder: Sendable {
 
     /// Position d'une case dans la composition : la case elle-même et son
     /// temps de départ DANS la composition (`.zero` pour un aperçu local
-    /// §47.1, `slot.start - segment.musicStart` pour l'aperçu principal
-    /// §47.2 — le temps musical absolu de la case reste intact, §53).
+    /// §47.1, `position du run + slot.start - run.musicStart` pour l'aperçu
+    /// principal §47.2 — le temps musical absolu de la case reste intact,
+    /// §53).
     private struct Placement {
         let slot: ProjectSlot
+        let compositionStart: MediaTime
+    }
+
+    /// Portion de musique à insérer : le passage ABSOLU
+    /// `[sourceStart, sourceStart + duration]` du fichier original, posé à
+    /// `compositionStart` dans la composition.
+    ///
+    /// Une portion par RUN pour l'aperçu principal (§47.2), une seule pour un
+    /// aperçu local (§47.1). Les portions sont JOINTIVES dans la composition
+    /// par construction (la position d'un run est la somme des durées des
+    /// précédents) : la piste musicale n'a aucun trou, elle SAUTE simplement
+    /// d'un passage du morceau à l'autre.
+    private struct MusicInsertion {
+        let sourceStart: MediaTime
+        let duration: MediaTime
         let compositionStart: MediaTime
     }
 
@@ -354,8 +407,7 @@ struct PreviewBuilder: Sendable {
     private func assembleComposition(
         project: ProjectSnapshot,
         placements: [Placement],
-        musicSourceStart: MediaTime,
-        musicDuration: MediaTime
+        musicInsertions: [MusicInsertion]
     ) async throws -> CachedComposition {
         guard !placements.isEmpty else { throw PreviewError.emptyScope }
 
@@ -381,8 +433,7 @@ struct PreviewBuilder: Sendable {
 
         let musicEnd = try await insertMusic(
             projectID: project.projectID,
-            sourceStart: musicSourceStart,
-            duration: musicDuration,
+            insertions: musicInsertions,
             into: composition
         )
 
@@ -418,7 +469,7 @@ struct PreviewBuilder: Sendable {
     /// 2. vérifier la durée ;
     /// 3. sélectionner la piste vidéo principale ;
     /// 4. insérer `[0, slotDuration]` à `placement.compositionStart` (temps
-    ///    absolu de la case DÉCALÉ du début du segment, §53) ;
+    ///    absolu de la case RAMENÉ dans la timeline concaténée, §53) ;
     /// 5. ignorer les pistes audio source (§48 : aucune piste audio de rush).
     ///
     /// Les échecs de photothèque sont DISCRIMINÉS (§40, §44, §64) : accès
@@ -432,7 +483,7 @@ struct PreviewBuilder: Sendable {
         into videoTrack: AVMutableCompositionTrack
     ) async throws -> Segment {
         guard let assignment = placement.slot.assignment else {
-            throw PreviewError.emptyScope // filtré en amont (segment §51-bis)
+            throw PreviewError.emptyScope // filtré en amont (timeline exportable)
         }
         let identifier = assignment.assetLocalIdentifier
 
@@ -488,31 +539,32 @@ struct PreviewBuilder: Sendable {
         }
     }
 
-    /// Insère la musique du projet (§48 : « insérer la musique … sur toute la
-    /// portée » ; §53 : la musique est l'horloge maîtresse).
+    /// Insère les portions de musique du projet (§48 : « insérer la musique …
+    /// sur toute la portée » ; §53 : la musique est l'horloge maîtresse).
     ///
     /// La source est l'ORIGINAL inchangé (§11 `audio/original.<ext>`, §16.1 :
     /// « Conserver le fichier original inchangé pour la lecture et
     /// l'export ») — jamais le flux d'analyse normalisé (§16.2).
     ///
-    /// `sourceStart` vaut `segment.musicStart` pour l'aperçu principal
-    /// (changement produit : la portion lue commence à la première case
-    /// prête, plus forcément à zéro) et `slot.start` pour un aperçu local
-    /// (§47.1 : « le passage musical correspondant »). Dans les deux cas la
-    /// portion est posée à l'instant 0 de la composition.
+    /// **Une portion par RUN** pour l'aperçu principal (changement produit) :
+    /// chaque zone remplie apporte son propre passage du morceau, posé à la
+    /// position de composition de son run. Une seule portion pour un aperçu
+    /// local (§47.1 : « le passage musical correspondant »), posée à
+    /// l'instant 0. Les portions sont JOINTIVES dans la composition : la piste
+    /// audio est continue, elle saute simplement d'un passage à l'autre aux
+    /// jonctions.
     ///
-    /// Rend la FIN de la piste musicale dans la composition (la musique est
-    /// toujours insérée à `.zero`, la fin vaut donc la durée réellement
-    /// insérée) — nécessaire pour couvrir toute la durée par des
-    /// instructions de rendu.
+    /// Rend la FIN de la piste musicale dans la composition — nécessaire pour
+    /// couvrir toute la durée par des instructions de rendu.
     @discardableResult
     private func insertMusic(
         projectID: UUID,
-        sourceStart: MediaTime,
-        duration: MediaTime,
+        insertions: [MusicInsertion],
         into composition: AVMutableComposition
     ) async throws -> CMTime {
-        guard duration.ticks > 0 else { throw PreviewError.emptyScope }
+        guard insertions.contains(where: { $0.duration.ticks > 0 }) else {
+            throw PreviewError.emptyScope
+        }
         guard let audioURL = fileStore.audioFileURL(projectID: projectID) else {
             throw PreviewError.missingAudio
         }
@@ -528,21 +580,42 @@ struct PreviewBuilder: Sendable {
                 throw PreviewError.missingAudio
             }
 
-            // Frontière §9 : conversion en `CMTime` seulement ici.
-            var sourceRange = CMTimeRange(start: sourceStart.cmTime, duration: duration.cmTime)
             let audioDuration = try await audioAsset.load(.duration)
-            if audioDuration.isNumeric, sourceRange.end > audioDuration {
-                // Garde-fou : une portée dépassant la fin de la musique
-                // (fichier remplacé hors app) est tronquée plutôt que de
-                // faire échouer l'insertion. Jamais attendu : les cases sont
-                // engendrées À PARTIR de cette musique (§28).
-                sourceRange = CMTimeRange(start: sourceRange.start, end: audioDuration)
+            var musicEnd = CMTime.zero
+            for insertion in insertions {
+                // Frontière §9 : conversion en `CMTime` seulement ici.
+                var sourceRange = CMTimeRange(
+                    start: insertion.sourceStart.cmTime,
+                    duration: insertion.duration.cmTime
+                )
+                if audioDuration.isNumeric, sourceRange.end > audioDuration {
+                    // Garde-fou : une portion dépassant la fin de la musique
+                    // (fichier remplacé hors app) est tronquée plutôt que de
+                    // faire échouer l'insertion. Jamais attendu : les cases
+                    // sont engendrées À PARTIR de cette musique (§28).
+                    sourceRange = CMTimeRange(start: sourceRange.start, end: audioDuration)
+                }
+                guard sourceRange.duration > .zero else {
+                    // Portion entièrement hors du fichier : la musique s'arrête
+                    // là. On N'INSÈRE PAS les portions suivantes, qui
+                    // tomberaient après un trou et désynchroniseraient tout ce
+                    // qui suit ; la vidéo, elle, reste posée et le rendu
+                    // demeure défini (instructions de fond §54.8).
+                    break
+                }
+                try musicTrack.insertTimeRange(
+                    sourceRange,
+                    of: sourceTrack,
+                    at: insertion.compositionStart.cmTime
+                )
+                let insertedRange = CMTimeRange(
+                    start: insertion.compositionStart.cmTime,
+                    duration: sourceRange.duration
+                )
+                musicEnd = CMTimeMaximum(musicEnd, insertedRange.end)
             }
-            guard sourceRange.duration > .zero else { throw PreviewError.missingAudio }
-
-            try musicTrack.insertTimeRange(sourceRange, of: sourceTrack, at: .zero)
-            // Insérée à `.zero` : la fin dans la composition est la durée.
-            return sourceRange.duration
+            guard musicEnd > .zero else { throw PreviewError.missingAudio }
+            return musicEnd
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as PreviewError {
@@ -609,13 +682,14 @@ struct PreviewBuilder: Sendable {
         // déplacés les uns par rapport aux autres — combler un trou avec la
         // vidéo suivante désynchroniserait le montage de la musique, §53).
         //
-        // Ceinture de sécurité : les cases du SEGMENT sont jointives par
-        // construction (§28.1 — la partition pave la musique sans trou) et le
-        // décalage `slot.start - musicStart` fait tomber la première case
-        // exactement à zéro (aperçu local : zéro également). Aucun trou n'est
-        // donc attendu ; cette boucle garantit que s'il en apparaissait un
-        // (partition d'une version antérieure §61, plage tronquée), le rendu
-        // resterait défini.
+        // Ceinture de sécurité : les cases d'un RUN sont jointives par
+        // construction (§28.1 — la partition pave la musique sans trou), la
+        // position d'un run est la SOMME des durées des runs précédents, et la
+        // première case tombe exactement à zéro (aperçu local : zéro
+        // également). Les instructions couvrent donc `[0, durée totale]` sans
+        // trou, y compris AUX JONCTIONS entre runs. Cette boucle garantit que
+        // s'il en apparaissait un (partition d'une version antérieure §61,
+        // plage tronquée), le rendu resterait défini.
         var coveredUntil = CMTime.zero
         for segment in segments {
             if segment.timeRange.start > coveredUntil {

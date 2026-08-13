@@ -18,7 +18,7 @@ import Foundation
 /// Ce qu'il est advenu d'un appel à `ExportActor.startExport` (§58).
 ///
 /// Sans ce retour, un démarrage refusé (réentrance, export déjà en cours,
-/// aucun segment prêt, instantané illisible) était SILENCIEUX : l'appelant croyait
+/// aucune case prête, instantané illisible) était SILENCIEUX : l'appelant croyait
 /// avoir lancé un export et lisait ensuite l'issue du run PRÉCÉDENT.
 enum ExportStartResult: Sendable, Equatable {
 
@@ -33,7 +33,7 @@ enum ExportStartResult: Sendable, Equatable {
     case alreadyRunning
 
     /// Aucun encodage n'a été lancé et le projet est strictement intact :
-    /// préfixe vide (§66), instantané illisible, statut non enregistrable.
+    /// timeline vide (§66), instantané illisible, statut non enregistrable.
     /// L'erreur est aussi exposée par `lastError(projectID:)`.
     case refused(ExportError)
 }
@@ -93,8 +93,9 @@ actor ExportActor {
     /// d'observer `currentProgress(projectID:)` au lieu de lire l'issue d'un
     /// run qui n'est pas le sien.
     ///
-    /// Aucun segment prêt → aucun export lancé (écart produit : une première
-    /// case vide ne bloque plus l'export, contrairement à §66) ;
+    /// Aucune case prête → aucun export lancé (écart produit : des cases vides
+    /// ne bloquent plus l'export, elles sont supprimées du montage,
+    /// contrairement à §66) ;
     /// `.refused(.emptyPrefix)` est rendu ET exposé par
     /// `lastError` pour que le dock puisse l'expliquer plutôt que rester
     /// inerte.
@@ -138,20 +139,21 @@ actor ExportActor {
         // projet strictement intact.
         //
         // ÉCART PRODUIT (demande utilisateur postérieure à la spec) : le
-        // montage exporté est le premier SEGMENT continu de cases prêtes, où
-        // qu'il commence — une première case vide ne bloque donc plus
-        // l'export, contrairement à §51/§66.
-        let segment = snapshot.contiguousReadySegment
-        guard !segment.isEmpty else {
-            logger.info("Export demandé sans segment exportable — refusé.")
+        // montage exporté CONCATÈNE toutes les zones remplies, les cases vides
+        // étant supprimées — des cases vides ne bloquent donc plus l'export,
+        // contrairement à §51/§66. Seule l'absence TOTALE de case prête le
+        // refuse.
+        let timeline = snapshot.readyTimeline
+        guard !timeline.isEmpty else {
+            logger.info("Export demandé sans aucune case prête — refusé.")
             errorByProject[projectID] = .emptyPrefix
             return .refused(.emptyPrefix)
         }
-        // Portée informative : `.complete` quand le segment couvre TOUT le
+        // Portée informative : `.complete` quand la timeline couvre TOUT le
         // montage, `.contiguousPrefix` sinon (nom de cas conservé — il
-        // désigne désormais le segment ; les deux portées encodent le même
-        // segment).
-        let scope: ExportScope = segment.slotCount == snapshot.slots.count ? .complete : .contiguousPrefix
+        // désigne désormais la timeline concaténée ; les deux portées
+        // encodent le même montage).
+        let scope: ExportScope = timeline.slotCount == snapshot.slots.count ? .complete : .contiguousPrefix
 
         // §10 : statut `exporting` pendant l'encodage.
         do {

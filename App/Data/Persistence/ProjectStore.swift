@@ -1077,24 +1077,23 @@ extension ProjectStore {
     /// index, association de chaque case, géométrie verrouillée.
     ///
     /// Seule forme du projet qui traverse la frontière de l'acteur (§8) :
-    /// aucun `PersistentModel` n'en sort. C'est l'entrée du préfixe
-    /// exportable (`contiguousReadySegment`, §51 amendé par l'écart produit),
-    /// de la prévisualisation
-    /// (§47) et de l'export (§7 `ProjectExporting`).
+    /// aucun `PersistentModel` n'en sort. C'est l'entrée de la timeline
+    /// exportable (`readyTimeline`, §51 amendé par l'écart produit), de la
+    /// prévisualisation (§47) et de l'export (§7 `ProjectExporting`).
     ///
     /// Cases retenues : celles du rythme CHOISI (après §34, `selectPace`
     /// n'en persiste pas d'autres — le filtre est une simple ceinture de
     /// sécurité).
     ///
     /// AUCUN rythme choisi → instantané SANS cases : aucun montage n'est en
-    /// cours, donc aucun préfixe exportable (§51 — export et aperçu principal
+    /// cours, donc aucune timeline exportable (export et aperçu principal
     /// désactivés). Renvoyer toutes les cases mélangerait les cases de
     /// plusieurs modes dans un même instantané (indices en doublon, temps qui
     /// se chevauchent) — un « montage » que l'utilisateur n'a jamais demandé.
     ///
     /// Statut d'association illisible (base corrompue, jamais attendu) →
     /// `unavailable` : le repli ne peut JAMAIS valoir `ready`, donc une
-    /// donnée douteuse n'entre jamais dans un préfixe exportable (§51).
+    /// donnée douteuse n'entre jamais dans la timeline exportable (§51).
     func projectSnapshot(projectID: UUID) throws -> ProjectSnapshot {
         let project = try requireProject(projectID)
 
@@ -1193,17 +1192,18 @@ extension ProjectStore {
     }
 
     /// Statut à restaurer après un export (§10) : `complete` si le montage
-    /// est intégralement prêt (le préfixe §51 couvre toutes les cases),
-    /// `assembling` sinon — un montage partiellement rempli n'est pas
+    /// est intégralement prêt (la timeline exportable couvre toutes les
+    /// cases), `assembling` sinon — un montage partiellement rempli n'est pas
     /// « terminé » parce qu'un export partiel a réussi.
     private func restoredStatusRaw(projectID: UUID) throws -> String {
         let snapshot = try projectSnapshot(projectID: projectID)
-        // Écart produit : le montage exporté est le SEGMENT continu de cases
-        // prêtes (où qu'il commence), plus le préfixe. Le critère de
-        // « terminé » est inchangé : TOUTES les cases doivent être prêtes —
-        // un segment partiel, même exporté, ne rend pas le projet complet.
-        let readySegmentCount = snapshot.contiguousReadySegment.slotCount
-        let isComplete = readySegmentCount > 0 && readySegmentCount == snapshot.slots.count
+        // Écart produit : le montage exporté CONCATÈNE toutes les zones
+        // remplies, les cases vides étant supprimées. Le critère de
+        // « terminé » est INCHANGÉ : TOUTES les cases doivent être prêtes —
+        // un montage troué, même exporté en entier, ne rend pas le projet
+        // complet.
+        let exportedSlotCount = snapshot.readyTimeline.slotCount
+        let isComplete = exportedSlotCount > 0 && exportedSlotCount == snapshot.slots.count
         return isComplete
             ? ProjectStatus.complete.rawValue
             : ProjectStatus.assembling.rawValue

@@ -10,18 +10,22 @@
 //    de sa ZONE DROITE (Jalon 10 : « Export » dans tous les cas, comme le
 //    tableau §36 — seul son état actif/désactivé varie ; l'aperçu principal
 //    §47.2 a son propre bouton en zone basse, §88.11/§89) ;
-//  - Export désactivé quand le SEGMENT exportable est vide (réutilise
-//    `contiguousReadySegment(slots:)` du Domain avec des snapshots
-//    `ProjectSlot`) ;
-//  - bornes du segment exporté sur la projection d'affichage
-//    (`exportedSegmentPositions`) et énoncé VoiceOver associé.
+//  - Export désactivé quand le montage exportable est vide (réutilise
+//    `readyTimeline(slots:)` du Domain avec des snapshots `ProjectSlot`) ;
+//  - bornes de TOUTES les zones exportées sur la projection d'affichage
+//    (`exportedZonePositions` / `exportedZoneIndexes`) et énoncé VoiceOver
+//    associé.
 //
-//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
+//  ÉCART PRODUIT — EXPORT CONCATÉNÉ DES ZONES REMPLIES (13 août 2026, demande
 //  utilisateur postérieure à la spécification). Les tests d'export ont changé
-//  de VERDICT, pas seulement de nom : une PREMIÈRE CASE VIDE n'empêche plus
-//  l'export dès qu'une case plus loin est prête (§66 « première case vide :
-//  export désactivé » ne décrit plus le produit). Ce qui reste vrai : aucune
-//  case prête → export impossible.
+//  de VERDICT, pas seulement de nom :
+//  - une PREMIÈRE CASE VIDE n'empêche plus l'export dès qu'une case plus loin
+//    est prête (§66 « première case vide : export désactivé » ne décrit plus
+//    le produit) ;
+//  - un trou ne BORNE plus le montage : les zones situées après partent aussi.
+//    `exportedZonePositions` rend donc TOUTES les zones, plus seulement la
+//    première.
+//  Ce qui reste vrai : aucune case prête → export impossible.
 //
 
 import XCTest
@@ -56,7 +60,7 @@ final class AssemblyViewLogicTests: XCTestCase {
     }
 
     /// Fabrique une case d'AFFICHAGE (§35) — les durées n'importent pas pour
-    /// les bornes du segment, seul l'état compte.
+    /// les bornes des zones, seul l'état compte.
     private func makeItem(index: Int, state: AssemblySlotState) -> AssemblySlotItem {
         let start = Int64(index) * 60_000
         return AssemblySlotItem(
@@ -226,7 +230,7 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertEqual(filled.right, "Export")
     }
 
-    // MARK: - Export désactivé si le SEGMENT exportable est vide (§51)
+    // MARK: - Export désactivé si le montage exportable est vide (§51)
 
     func testExportDisabledWithoutAnySlot() {
         XCTAssertFalse(AssemblyViewLogic.isExportEnabled(slots: []))
@@ -234,10 +238,10 @@ final class AssemblyViewLogicTests: XCTestCase {
     }
 
     func testExportEnabledWhenFirstSlotIsEmptyButALaterSlotIsReady() {
-        // ÉCART PRODUIT (11 août 2026) — LE test qui a changé de verdict.
+        // ÉCART PRODUIT — LE test qui a changé de verdict.
         // Avant : « première case vide : export désactivé » (§66).
-        // Maintenant : l'export porte sur le premier SEGMENT continu de cases
-        // prêtes, où qu'il commence — les cases 1 et 2 forment ce montage.
+        // Maintenant : l'export porte sur toutes les zones remplies, où
+        // qu'elles commencent — les cases 1 et 2 forment ce montage.
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: nil),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
@@ -247,6 +251,32 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
         XCTAssertTrue(
             AssemblyViewLogic.isExportEnabled(items: makeItems([.empty, .ready, .ready]))
+        )
+    }
+
+    func testExportEnabledWithAnEmptyFirstSlotAndTwoZones() {
+        // ÉCART PRODUIT (13 août 2026) — le cas de la demande, en miniature :
+        // première case VIDE, puis DEUX zones séparées par un trou. L'export
+        // concatène les deux : il est actif, et les deux variantes de
+        // `isExportEnabled` doivent l'accorder.
+        let slots = [
+            makeSlot(index: 0, startTicks: 0, endTicks: 45_000, status: nil),
+            makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
+            makeSlot(index: 2, startTicks: 90_000, endTicks: 135_000),
+            makeSlot(index: 3, startTicks: 135_000, endTicks: 180_000, status: nil),
+            makeSlot(index: 4, startTicks: 180_000, endTicks: 225_000),
+            makeSlot(index: 5, startTicks: 225_000, endTicks: 270_000)
+        ]
+        let items = makeItems([.empty, .ready, .ready, .empty, .ready, .ready])
+
+        XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
+        XCTAssertTrue(AssemblyViewLogic.isExportEnabled(items: items))
+        // Les DEUX zones sont exportées : 4 plans en 2 morceaux, aucune case
+        // prête omise.
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [1...2, 4...5])
+        XCTAssertEqual(
+            AssemblyViewLogic.exportedZonePositions(items: items).reduce(0) { $0 + $1.count },
+            4
         )
     }
 
@@ -280,9 +310,9 @@ final class AssemblyViewLogicTests: XCTestCase {
         XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
     }
 
-    func testExportEnabledDespiteGapAfterTheSegment() {
-        // §51 : l'export s'arrête au premier trou mais reste POSSIBLE — le
-        // segment [0, 1] est non vide.
+    func testExportEnabledDespiteAGapInTheMiddle() {
+        // ÉCART PRODUIT : un trou ne borne plus rien — les cases 0, 1 et 3
+        // partent toutes, en deux zones.
         let slots = [
             makeSlot(index: 0, startTicks: 0, endTicks: 45_000),
             makeSlot(index: 1, startTicks: 45_000, endTicks: 90_000),
@@ -291,6 +321,12 @@ final class AssemblyViewLogicTests: XCTestCase {
         ]
 
         XCTAssertTrue(AssemblyViewLogic.isExportEnabled(slots: slots))
+        XCTAssertEqual(
+            AssemblyViewLogic.exportedZonePositions(
+                items: makeItems([.ready, .ready, .empty, .ready])
+            ),
+            [0...1, 3...3]
+        )
     }
 
     func testBothExportEnabledVariantsAgreeOnEveryArrangement() {
@@ -329,80 +365,117 @@ final class AssemblyViewLogicTests: XCTestCase {
         }
     }
 
-    // MARK: - Bornes du segment exporté (écart produit, §35.3)
+    // MARK: - Bornes des zones exportées (écart produit, §35.3)
 
-    func testSegmentPositionsAreNilWhenNothingIsReady() {
-        XCTAssertNil(AssemblyViewLogic.exportedSegmentPositions(items: []))
-        XCTAssertNil(
-            AssemblyViewLogic.exportedSegmentPositions(
+    func testZonePositionsAreEmptyWhenNothingIsReady() {
+        XCTAssertTrue(AssemblyViewLogic.exportedZonePositions(items: []).isEmpty)
+        XCTAssertTrue(
+            AssemblyViewLogic.exportedZonePositions(
                 items: makeItems([.empty, .downloading, .unavailable])
-            )
+            ).isEmpty
         )
     }
 
-    func testSegmentStartsAtTheFirstReadySlotWhereverItIs() {
+    func testFirstZoneStartsAtTheFirstReadySlotWhereverItIs() {
         // L'exemple de la demande : cases 28 à 50 remplies (ici 3 à 5).
         let items = makeItems([.empty, .empty, .downloading, .ready, .ready, .ready, .empty])
-        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 3...5)
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [3...5])
     }
 
-    func testSegmentStopsAtTheFirstHoleAndIgnoresLaterSegments() {
-        // « S'il existe plusieurs segments, c'est le PREMIER qui compte » —
-        // comportement prévisible, borné par la mini-timeline §35.3.
+    func testEveryZoneIsExportedNotOnlyTheFirst() {
+        // ÉCART PRODUIT (13 août 2026) — verdict INVERSÉ : avant, seule la
+        // première zone comptait. Les deux zones partent désormais, mises bout
+        // à bout ; aucune case prête n'est omise.
         let items = makeItems([.ready, .ready, .empty, .ready, .ready, .ready])
-        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 0...1)
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [0...1, 3...5])
     }
 
-    func testSegmentOfASingleReadySlot() {
+    func testZonesFollowTheExampleOfTheRequest() {
+        // 28..35 prêtes, 36..39 vides, 40..50 prêtes (index 0-based) →
+        // 8 + 11 = 19 plans en 2 zones.
+        var states = [AssemblySlotState](repeating: .empty, count: 51)
+        for index in 28...35 { states[index] = .ready }
+        for index in 40...50 { states[index] = .ready }
+        let zones = AssemblyViewLogic.exportedZonePositions(items: makeItems(states))
+
+        XCTAssertEqual(zones, [28...35, 40...50])
+        XCTAssertEqual(zones.reduce(0) { $0 + $1.count }, 19)
+    }
+
+    func testZoneOfASingleReadySlot() {
         let items = makeItems([.empty, .ready, .tooShort])
-        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 1...1)
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [1...1])
     }
 
-    func testSegmentCoversTheWholeProjectWhenEverySlotIsReady() {
+    func testASingleZoneCoversTheWholeProjectWhenEverySlotIsReady() {
         let items = makeItems([.ready, .ready, .ready, .ready])
-        XCTAssertEqual(AssemblyViewLogic.exportedSegmentPositions(items: items), 0...3)
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [0...3])
     }
 
-    func testEveryNonReadyStateBreaksTheSegment() {
+    func testEveryNonReadyStateSplitsTheZones() {
         // Aucun état intermédiaire n'est « presque prêt » : résolution,
-        // téléchargement §44, indisponible §64 et trop courte §3.8 coupent
-        // le montage exactement comme une case vide.
+        // téléchargement §44, indisponible §64 et trop courte §3.8 coupent la
+        // zone exactement comme une case vide — et sont supprimés du montage.
         for state in [AssemblySlotState.empty, .resolving, .downloading, .unavailable, .tooShort] {
             let items = makeItems([.ready, state, .ready])
             XCTAssertEqual(
-                AssemblyViewLogic.exportedSegmentPositions(items: items),
-                0...0,
+                AssemblyViewLogic.exportedZonePositions(items: items),
+                [0...0, 2...2],
                 "état interrupteur : \(state)"
             )
         }
     }
 
-    // MARK: - Énoncé VoiceOver du segment (§39)
+    func testZoneIndexesUseSlotIndexesNotArrayPositions() {
+        // Les crochets de la mini-timeline et les libellés parlent en INDEX de
+        // case, jamais en position de tableau : la traduction est explicite.
+        // Ici les index commencent à 10 — les positions restent 0…4.
+        let states: [AssemblySlotState] = [.empty, .ready, .ready, .empty, .ready]
+        let items = states.enumerated().map { makeItem(index: 10 + $0.offset, state: $0.element) }
 
-    func testSpokenExportSegmentUsesOneBasedPlanNumbers() {
+        XCTAssertEqual(AssemblyViewLogic.exportedZonePositions(items: items), [1...2, 4...4])
+        XCTAssertEqual(AssemblyViewLogic.exportedZoneIndexes(items: items), [11...12, 14...14])
+    }
+
+    // MARK: - Énoncé VoiceOver des zones (§39)
+
+    func testSpokenExportedZonesIsNilWhenNothingIsExported() {
+        XCTAssertNil(AssemblyViewLogic.spokenExportedZones(zones: []))
+    }
+
+    func testSpokenSingleZoneKeepsTheRangeWording() {
         // « plans 28 à 50 exportables » à partir des index 27…49 (0-based).
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportSegment(startIndex: 27, endIndex: 49),
+            AssemblyViewLogic.spokenExportedZones(zones: [27...49]),
             "plans 28 à 50 exportables"
         )
     }
 
-    func testSpokenExportSegmentIsSingularForASingleSlot() {
+    func testSpokenSingleZoneIsSingularForASingleSlot() {
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportSegment(startIndex: 27, endIndex: 27),
+            AssemblyViewLogic.spokenExportedZones(zones: [27...27]),
             "plan 28 exportable"
         )
     }
 
-    func testSpokenExportSegmentIsDefensiveAboutOrderAndNegativeIndexes() {
-        // Bornes inversées ou négatives (jamais attendues) : jamais « plan 0 »
-        // ni une plage à l'envers.
+    func testSpokenSeveralZonesAnnounceTotalPlansAndZoneCount() {
+        // §39 : l'exemple de la demande — 8 + 11 plans en deux morceaux. Le
+        // crochet dessiné est invisible pour VoiceOver : la valeur doit dire
+        // COMBIEN de plans partent et en COMBIEN de zones.
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportSegment(startIndex: 5, endIndex: 2),
-            "plans 3 à 6 exportables"
+            AssemblyViewLogic.spokenExportedZones(zones: [27...34, 39...49]),
+            "19 plans exportables en 2 zones"
         )
         XCTAssertEqual(
-            AssemblyViewLogic.spokenExportSegment(startIndex: -4, endIndex: -4),
+            AssemblyViewLogic.spokenExportedZones(zones: [0...0, 2...2, 4...4]),
+            "3 plans exportables en 3 zones"
+        )
+    }
+
+    func testSpokenSingleZoneIsDefensiveAboutNegativeIndexes() {
+        // Index négatif (jamais attendu) : jamais « plan 0 ».
+        XCTAssertEqual(
+            AssemblyViewLogic.spokenExportedZones(zones: [(-4)...(-4)]),
             "plan 1 exportable"
         )
     }

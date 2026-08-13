@@ -29,18 +29,32 @@ import Foundation
 /// Une composition n'est donc JAMAIS réutilisée après une modification du
 /// montage : la clé ne correspond simplement plus.
 ///
-/// **Changement produit (segment au lieu de préfixe) : la clé est INCHANGÉE.**
-/// L'aperçu principal porte désormais sur le SEGMENT continu de cases prêtes,
-/// qui peut commencer n'importe où — mais ce segment est une FONCTION PURE des
-/// index, frontières et statuts des cases, tous déjà couverts par
-/// `fingerprint`. Un segment qui change (bornes déplacées, case devenue prête
-/// avant lui, décalage `musicStart` différent) change donc forcément
-/// l'empreinte : aucune composition périmée ne peut être resservie. Ajouter le
-/// segment à la clé n'apporterait rien et introduirait une seconde source de
-/// vérité.
+/// **Changement produit (timeline concaténée) : la clé reste INCHANGÉE, et
+/// c'est VÉRIFIÉ.** L'aperçu principal porte désormais sur la TIMELINE
+/// concaténée de toutes les zones remplies. Cette timeline est une FONCTION
+/// PURE de `readyTimeline(slots:)`, dont les seules entrées sont l'index, les
+/// frontières `start`/`end` et le STATUT d'association de chaque case — les
+/// trois familles de données déjà sérialisées par `fingerprint`, case par
+/// case et dans l'ordre.
+///
+/// Il en découle que deux timelines DIFFÉRENTES ne peuvent pas partager une
+/// empreinte : tout ce qui change une timeline (une case devenue prête ou non
+/// prête, donc un run qui apparaît, disparaît, se scinde ou fusionne ; une
+/// frontière déplacée, donc une durée de run et toutes les positions qui
+/// suivent ; une case ajoutée ou retirée) change au moins un octet de la
+/// description sérialisée. La réciproque n'est pas vraie — deux empreintes
+/// différentes peuvent décrire la même timeline (changement d'`assignment.id`
+/// à rush identique) — et c'est le bon sens de l'inégalité : le cache peut
+/// manquer, il ne peut jamais resservir une composition périmée.
+///
+/// Ajouter la timeline à la clé n'apporterait donc rien et introduirait une
+/// seconde source de vérité. Le test
+/// `PreviewCacheKeyTests.testFingerprintDistinguishesTwoDifferentTimelines`
+/// verrouille cette propriété sur le cas le plus subtil : deux montages dont
+/// le DÉCOUPAGE EN RUNS diffère.
 struct PreviewCacheKey: Hashable, Sendable {
     let projectID: UUID
-    /// `"slot:<uuid>"` | `"prefix"` (aperçu principal = segment continu) |
+    /// `"slot:<uuid>"` | `"prefix"` (aperçu principal = timeline concaténée) |
     /// `"complete"`. La VALEUR `"prefix"` est conservée telle quelle : c'est
     /// un identifiant opaque de portée, jamais affiché, et le renommer
     /// n'aurait aucun effet observable.
@@ -75,9 +89,10 @@ extension PreviewCacheKey {
     /// Couvre les cases (identité, ordre, frontières ABSOLUES §9) et leurs
     /// associations (identifiant d'association, rush, statut), plus la
     /// géométrie verrouillée. Deux états de montage différents produisent
-    /// donc deux empreintes différentes — et comme le SEGMENT exportable se
-    /// déduit entièrement de ces mêmes données, deux segments différents
-    /// donnent forcément deux empreintes différentes.
+    /// donc deux empreintes différentes — et comme la TIMELINE exportable se
+    /// déduit entièrement de ces mêmes données (index, frontières, statuts),
+    /// deux timelines différentes donnent forcément deux empreintes
+    /// différentes.
     ///
     /// Le condensé est un FNV-1a 64 bits : court, stable d'un lancement à
     /// l'autre (contrairement à `Hasher`, dont la graine change à chaque

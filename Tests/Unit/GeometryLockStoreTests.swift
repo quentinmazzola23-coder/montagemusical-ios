@@ -324,13 +324,21 @@ final class GeometryLockStoreTests: XCTestCase {
         XCTAssertEqual(geometry.aspectHeight, 16)
         XCTAssertEqual(geometry.orientation, .portrait)
 
-        // La case `downloading` COUPE le segment exportable — la case 2,
-        // pourtant prête, est ignorée et n'est JAMAIS avancée (elle forme un
-        // second segment, et c'est le premier qui est exporté).
-        let segment = snapshot.contiguousReadySegment
-        XCTAssertEqual(segment.slots.map(\.index), [0], "Une case downloading interrompt le segment")
-        XCTAssertEqual(segment.musicStart.ticks, 0)
-        XCTAssertEqual(segment.musicEnd.ticks, 60_000)
+        // La case `downloading` SÉPARE deux zones remplies : elle n'est pas
+        // exportée, mais la case 2 l'est — CONCATÉNÉE juste après la case 0
+        // (changement produit). Aucune case n'est réécrite : la case 2 garde
+        // son temps musical absolu (120 000 ticks) tout en tombant à 60 000
+        // dans le fichier.
+        let timeline = snapshot.readyTimeline
+        XCTAssertEqual(
+            timeline.runs.map { $0.slots.map(\.index) }, [[0], [2]],
+            "Une case downloading sépare deux zones, elle n'en supprime aucune"
+        )
+        XCTAssertEqual(timeline.slotCount, 2)
+        XCTAssertEqual(timeline.duration.ticks, 120_000, "60 000 + 60 000")
+        XCTAssertEqual(timeline.runs[0].musicStart.ticks, 0)
+        XCTAssertEqual(timeline.runs[1].musicStart.ticks, 120_000)
+        XCTAssertEqual(timeline.compositionStart(of: snapshot.slots[2])?.ticks, 60_000)
     }
 
     func testProjectSnapshotWithoutGeometryOrAssignments() async throws {
@@ -342,16 +350,16 @@ final class GeometryLockStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.slots.count, 4)
         XCTAssertTrue(snapshot.slots.allSatisfy { $0.assignment == nil })
         XCTAssertTrue(
-            snapshot.contiguousReadySegment.isEmpty,
-            "Aucune case prête → aucun segment exportable → export/aperçu désactivés"
+            snapshot.readyTimeline.isEmpty,
+            "Aucune case prête → timeline exportable vide → export/aperçu désactivés"
         )
     }
 
     func testProjectSnapshotWithoutSelectedPaceHasNoSlots() async throws {
         // Aucun rythme choisi (§34 pas encore franchi) : l'instantané ne
         // contient AUCUNE case — sinon les cases de plusieurs modes se
-        // chevaucheraient dans un même « montage » jamais demandé, et le
-        // préfixe exportable §51 serait calculé sur elles.
+        // chevaucheraient dans un même « montage » jamais demandé, et la
+        // timeline exportable serait calculée sur elles.
         let projectID = try await makeAssemblingProject()
         let slotsBefore = try await store.projectSnapshot(projectID: projectID).slots
         XCTAssertEqual(slotsBefore.count, 4, "Rythme choisi : les 4 cases du mode")
@@ -365,8 +373,8 @@ final class GeometryLockStoreTests: XCTestCase {
             "Aucun rythme sélectionné → aucune case dans l'instantané"
         )
         XCTAssertTrue(
-            snapshot.contiguousReadySegment.isEmpty,
-            "Aucun montage en cours → aucun segment exportable"
+            snapshot.readyTimeline.isEmpty,
+            "Aucun montage en cours → timeline exportable vide"
         )
         XCTAssertEqual(snapshot.projectID, projectID)
     }

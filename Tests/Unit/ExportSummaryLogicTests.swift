@@ -17,10 +17,12 @@
 //  - §60/§8.1 : un export RESTAURÉ depuis `exports/` après relance ne
 //    s'annonce pas comme un export qui vient d'aboutir (titre et message
 //    distincts, passé explicite) ;
-//  - ÉCART PRODUIT (11 août 2026) : plage des plans exportés
-//    (« Plans 28 à 50 », « Plan 28 » au singulier) — l'export porte sur le
-//    SEGMENT continu rempli, où qu'il commence : le résumé §56 doit dire
-//    LESQUELS partent, pas seulement combien.
+//  - ÉCART PRODUIT (13 août 2026) : ce qui part VRAIMENT — l'export concatène
+//    TOUTES les zones remplies, les cases vides étant supprimées du montage
+//    (vidéo et musique). Une zone garde la formulation de plage
+//    (« Plans 28 à 50 », « Plan 28 » au singulier) ; à partir de deux, le
+//    résumé §56 annonce « 19 plans en 2 zones » et liste les plages
+//    (« 28–35, 40–50 »), avec une mention honnête des jonctions.
 //
 //  Le calcul des dimensions orientées d'un rush a DISPARU avec le calcul de
 //  profil propre à la vue (Jalon 10) : le profil §52 vient désormais d'une
@@ -170,7 +172,7 @@ final class ExportSummaryLogicTests: XCTestCase {
         )
     }
 
-    // MARK: - Plage des plans exportés (écart produit du 11 août 2026)
+    // MARK: - Plage d'une zone (1-based)
 
     func testPlanRangeLabelIsOneBasedLikeTheRestOfTheInterface() {
         // L'exemple de la demande : cases 27…49 en mémoire (0-based) →
@@ -198,7 +200,7 @@ final class ExportSummaryLogicTests: XCTestCase {
         XCTAssertEqual(ExportSummaryLogic.planRangeLabel(startIndex: -3, endIndex: -3), "Plan 1")
     }
 
-    func testPlanRangeAndCountDescribeTheSameSegment() {
+    func testPlanRangeAndCountDescribeTheSameZone() {
         // Cohérence du bloc §56 : « 23 plans » et « Plans 28 à 50 » doivent
         // décrire le même montage — sinon l'utilisateur lit deux vérités.
         let startIndex = 27
@@ -211,16 +213,107 @@ final class ExportSummaryLogicTests: XCTestCase {
         )
     }
 
-    func testPartialExportNoticeSaysNothingIsMovedNorLost() {
-        // §51 : « les clips ultérieurs ne sont jamais déplacés » ; §89 :
-        // « elle déplace des plans après un trou » est une régression
-        // interdite — l'écart produit ne change rien à cela, et le message
-        // le dit.
+    // MARK: - Zones exportées (écart produit du 13 août 2026)
+
+    func testExportedPlansLabelIsNilWithoutAnyZone() {
+        // Aucune case prête : il n'y a rien à nommer — l'écran affiche alors
+        // « Aucun plan n'est encore prêt. » (§66), pas une plage vide.
+        XCTAssertNil(ExportSummaryLogic.exportedPlansLabel(zones: []))
+        XCTAssertNil(ExportSummaryLogic.zoneRangesLabel(zones: []))
+        XCTAssertNil(ExportSummaryLogic.spokenZoneRanges(zones: []))
+    }
+
+    func testExportedPlansLabelKeepsTheRangeWordingForASingleZone() {
+        // Une seule zone : le montage est d'un seul tenant, la plage le décrit
+        // exactement — formulation CONSERVÉE (« Plans 28 à 50 »).
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...49]),
+            "Plans 28 à 50"
+        )
+        // Et rien n'est listé en petit : la ligne au-dessus le dit déjà.
+        XCTAssertNil(ExportSummaryLogic.zoneRangesLabel(zones: [27...49]))
+    }
+
+    func testExportedPlansLabelOfAZoneMadeOfASinglePlan() {
+        XCTAssertEqual(ExportSummaryLogic.exportedPlansLabel(zones: [27...27]), "Plan 28")
+        XCTAssertEqual(ExportSummaryLogic.exportedPlansLabel(zones: [0...0]), "Plan 1")
+    }
+
+    func testExportedPlansLabelCountsAllZonesFromTwo() {
+        // L'exemple de la demande : cases 28..35 et 40..50 prêtes (index
+        // 27…34 et 39…49) → 8 + 11 = 19 plans, en 2 zones. Une plage unique
+        // mentirait : les cases 36 à 39 ne sont PAS dans le fichier.
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [27...34, 39...49]),
+            "19 plans en 2 zones"
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.exportedPlansLabel(zones: [0...0, 2...2, 6...8]),
+            "5 plans en 3 zones"
+        )
+        // Accord au singulier des DEUX nombres.
+        XCTAssertEqual(ExportSummaryLogic.zoneCountLabel(0), "0 zone")
+        XCTAssertEqual(ExportSummaryLogic.zoneCountLabel(1), "1 zone")
+        XCTAssertEqual(ExportSummaryLogic.zoneCountLabel(4), "4 zones")
+        XCTAssertEqual(
+            ExportSummaryLogic.plansAndZonesLabel(slotCount: 1, zoneCount: 1),
+            "1 plan en 1 zone"
+        )
+    }
+
+    func testZoneRangesAreListedOneBasedFromTwoZones() {
+        // La liste en petit sous le résumé : « 28–35, 40–50 » (1-based, tiret
+        // demi-cadratin), une zone d'un seul plan s'écrit sans plage.
+        XCTAssertEqual(
+            ExportSummaryLogic.zoneRangesLabel(zones: [27...34, 39...49]),
+            "28–35, 40–50"
+        )
+        XCTAssertEqual(
+            ExportSummaryLogic.zoneRangesLabel(zones: [0...0, 4...6]),
+            "1, 5–7"
+        )
+    }
+
+    func testSpokenZoneRangesReplaceDashesWithWords() {
+        // §39 : le tiret et les virgules ne se lisent pas — VoiceOver reçoit
+        // des mots, comme pour le « × » du bloc §56.
+        let spoken = ExportSummaryLogic.spokenZoneRanges(zones: [27...34, 39...49])
+        XCTAssertEqual(spoken, "plans 28 à 35, puis plans 40 à 50")
+        XCTAssertFalse(spoken?.contains("–") ?? true, spoken ?? "")
+        XCTAssertEqual(
+            ExportSummaryLogic.spokenZoneRanges(zones: [0...0, 4...6]),
+            "plan 1, puis plans 5 à 7"
+        )
+    }
+
+    func testPartialExportNoticeSaysWhatIsDroppedAndWhatIsKept() {
+        // Le montage ne contient QUE les plans prêts ; le projet, lui, n'est
+        // pas touché (§89 : « elle déplace des plans après un trou » vise le
+        // PROJET, pas le fichier exporté). Le texte ne promet plus que « rien
+        // n'est déplacé » : dans le fichier, les zones suivantes sont bien
+        // avancées — c'est la demande.
         let notice = ExportSummaryLogic.partialExportNotice
-        XCTAssertTrue(notice.contains("conservé"), notice)
-        XCTAssertTrue(notice.contains("déplacé"), notice)
-        // Le texte ne promet plus que l'export commence au DÉBUT du projet.
+        XCTAssertTrue(notice.contains("plans prêts"), notice)
+        XCTAssertTrue(notice.contains("cases vides"), notice)
+        XCTAssertTrue(notice.contains("projet reste intact"), notice)
+        XCTAssertFalse(notice.contains("rien n'est déplacé"), notice)
         XCTAssertFalse(notice.contains("Seul le début"), notice)
+    }
+
+    func testConcatenationNoticeIsHonestAboutTheMusicJump() {
+        // Mention honnête et SOBRE : elle décrit le comportement demandé, sans
+        // alarmer — ni « attention », ni « erreur », ni « problème ».
+        let notice = ExportSummaryLogic.concatenationNotice
+        XCTAssertTrue(notice.contains("bout à bout"), notice)
+        XCTAssertTrue(notice.contains("musique"), notice)
+        for alarming in ["Attention", "erreur", "problème", "risque"] {
+            XCTAssertFalse(
+                notice.lowercased().contains(alarming.lowercased()),
+                "Formulation alarmante : \(notice)"
+            )
+        }
+        // Une phrase courte : le résumé §56 reste un écran d'information.
+        XCTAssertLessThan(notice.count, 120, notice)
     }
 
     func testNothingReadyMessagesNameTheGestureThatUnblocksTheExport() {
@@ -371,9 +464,9 @@ final class ExportSummaryLogicTests: XCTestCase {
         let description = try XCTUnwrap(error.errorDescription)
         XCTAssertEqual(ExportSummaryLogic.message(for: error), description)
         // §66 : la raison du refus est DITE, jamais un écran muet — et elle
-        // doit nommer le geste RÉELLEMENT attendu. Depuis l'écart produit du
-        // 11 août 2026, n'importe quelle case suffit à débloquer l'export :
-        // le message ne doit donc plus désigner « la première case ».
+        // doit nommer le geste RÉELLEMENT attendu. Depuis l'écart produit,
+        // n'importe quelle case suffit à débloquer l'export : le message ne
+        // doit donc plus désigner « la première case ».
         XCTAssertTrue(
             description.contains("au moins une case"),
             "Le refus doit nommer le geste qui débloque l'export : \(description)"

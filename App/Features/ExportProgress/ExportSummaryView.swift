@@ -19,20 +19,25 @@
 //  décidé seule (§52) et offre un unique bouton « Exporter » (§56). Toute
 //  évolution qui y ajouterait un réglage violerait §89.
 //
-//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
-//  utilisateur POSTÉRIEURE à la spécification ; détail dans
+//  ÉCART PRODUIT — EXPORT CONCATÉNÉ DES ZONES REMPLIES (13 août 2026,
+//  demande utilisateur POSTÉRIEURE à la spécification ; détail dans
 //  IMPLEMENTATION_STATUS.md). §51/§66 limitaient l'export au PRÉFIXE (depuis
 //  la case 0, arrêt au premier trou ; première case vide → export
-//  impossible). L'export porte désormais sur le PREMIER SEGMENT CONTINU de
-//  cases prêtes, où qu'il commence (cases 28 à 50 → 23 plans exportés).
+//  impossible). L'export CONCATÈNE désormais TOUTES les zones remplies : les
+//  cases vides ou non prêtes sont supprimées du montage — vidéo ET musique
+//  (cases 28..35 et 40..50 prêtes → 19 plans mis bout à bout).
 //  Conséquences pour CET écran :
-//  - le résumé §56 dit QUELS plans partent (« Plans 28 à 50 ») en plus de
-//    leur nombre et de la durée — sans cette plage, deux projets très
-//    différents afficheraient exactement le même résumé ;
-//  - la durée annoncée est celle du SEGMENT (`fin de la dernière case −
-//    début de la première`), et non plus la fin absolue du préfixe : la
-//    musique exportée est la PORTION correspondante du morceau, posée à
-//    l'instant 0, sans écran noir ajouté ni case déplacée ;
+//  - le résumé §56 dit ce qui part VRAIMENT : nombre total de plans, nombre
+//    de ZONES et durée. Une seule zone garde la formulation de plage
+//    (« Plans 28 à 50 ») ; à partir de deux, « 19 plans en 2 zones » avec les
+//    plages listées en petit (« 28–35, 40–50 ») ;
+//  - une MENTION honnête est ajoutée sous le résumé dès qu'il y a plusieurs
+//    zones : elles sont mises bout à bout et la musique passe directement de
+//    l'une à l'autre. C'est le comportement DEMANDÉ, dit sobrement plutôt que
+//    découvert dans le fichier exporté ;
+//  - la durée annoncée est la SOMME des durées des cases exportées, et non
+//    plus la fin absolue du préfixe : les trous ne comptent pas, aucun écran
+//    noir n'est ajouté ;
 //  - « aucune case prête » remplace « première case vide » comme seule
 //    raison de désactiver l'export.
 //
@@ -42,7 +47,7 @@
 //  utilisera. Un calcul parallèle côté vue (résolution PhotoKit rush par
 //  rush, rushs illisibles ignorés) pouvait ANNONCER « HDR » alors que le
 //  fichier produit était SDR : §56 informe sur le fichier réel, jamais sur
-//  une approximation d'écran. Profil indisponible (un rush du segment est
+//  une approximation d'écran. Profil indisponible (un rush exporté est
 //  illisible) → « Profil technique indisponible » : jamais un profil PARTIEL.
 //
 //  DÉCISION Jalon 10 — l'enregistrement dans Photos est une action DISTINCTE.
@@ -153,13 +158,15 @@ private enum ExportHaptics {
 /// 12 plans • 18,43 s
 /// ```
 ///
-/// Depuis l'écart produit du 11 août 2026, une LIGNE de plus peut s'y
-/// ajouter — la plage des plans réellement exportés (« Plans 28 à 50 »,
-/// `planRangeLabel`) — quand l'export ne couvre pas tout le projet. C'est une
-/// information, pas un réglage : §56 et §89 restent respectés.
+/// Depuis l'écart produit du 13 août 2026, DEUX lignes de plus peuvent s'y
+/// ajouter quand l'export ne couvre pas tout le projet — ce qui part vraiment
+/// (`exportedPlansLabel` : « Plans 28 à 50 » pour une zone, « 19 plans en
+/// 2 zones » à partir de deux) et, en petit, les plages concernées
+/// (`zoneRangesLabel` : « 28–35, 40–50 »). Ce sont des informations, pas des
+/// réglages : §56 et §89 restent respectés.
 ///
 /// Tous les nombres affichés sont des valeurs MESURÉES (dimensions de rendu,
-/// cadence du clip maître, nombre et plage des cases du segment §51, durée
+/// cadence du clip maître, nombre de cases exportées, nombre de zones, durée
 /// exacte) : aucune n'est réglable, conformément à §56 (« Information, pas
 /// réglage ») et §89.
 enum ExportSummaryLogic {
@@ -263,13 +270,10 @@ enum ExportSummaryLogic {
         return safeCount <= 1 ? "\(safeCount) plan" : "\(safeCount) plans"
     }
 
-    /// « Plans 28 à 50 » — plage des plans réellement exportés (ÉCART PRODUIT
-    /// du 11 août 2026 : l'export porte sur le SEGMENT continu rempli, où
-    /// qu'il commence ; le résumé §56 doit donc dire LESQUELS partent, pas
-    /// seulement combien).
+    /// « Plans 28 à 50 » — plage d'UNE zone exportée.
     ///
     /// Les index reçus sont ceux des cases (`ProjectSlot.index` /
-    /// `ReadySegment.startIndex`, 0-based) et sont AFFICHÉS en 1-based, comme
+    /// `ReadyRun.startIndex`, 0-based) et sont AFFICHÉS en 1-based, comme
     /// partout dans l'interface (« Plan X sur N » §35.1) : cases 27…49 en
     /// mémoire → « Plans 28 à 50 » à l'écran.
     ///
@@ -283,13 +287,86 @@ enum ExportSummaryLogic {
         return first == last ? "Plan \(first)" : "Plans \(first) à \(last)"
     }
 
+    // MARK: Zones exportées (écart produit du 13 août 2026)
+
+    /// « 1 zone » / « 2 zones » — accord au singulier, jamais « 1 zones ».
+    static func zoneCountLabel(_ count: Int) -> String {
+        let safeCount = max(0, count)
+        return safeCount <= 1 ? "\(safeCount) zone" : "\(safeCount) zones"
+    }
+
+    /// Ce que l'export contient VRAIMENT, à partir des plages d'index
+    /// (0-based) des zones prêtes — `nil` quand il n'y a rien à exporter :
+    /// - **une** zone → la formulation de plage, conservée telle quelle
+    ///   (« Plans 28 à 50 », « Plan 28 » pour un plan unique) : elle décrit
+    ///   exactement le montage, qui est alors d'un seul tenant ;
+    /// - **deux zones ou plus** → « 19 plans en 2 zones » : le nombre TOTAL de
+    ///   plans exportés et le nombre de morceaux. Une plage unique mentirait
+    ///   (« Plans 28 à 50 » laisserait croire que les cases 36 à 39 sont dans
+    ///   le fichier) ; les plages exactes sont listées juste en dessous par
+    ///   `zoneRangesLabel`.
+    ///
+    /// Source UNIQUE de cette formulation : le résumé §56, le titre de la
+    /// feuille d'aperçu §47.2 et le hint du bouton « Prévisualiser le
+    /// montage » l'utilisent — ils ne peuvent pas nommer deux montages
+    /// différents.
+    static func exportedPlansLabel(zones: [ClosedRange<Int>]) -> String? {
+        guard let first = zones.first else { return nil }
+        if zones.count == 1 {
+            return planRangeLabel(startIndex: first.lowerBound, endIndex: first.upperBound)
+        }
+        return plansAndZonesLabel(
+            slotCount: zones.reduce(0) { $0 + $1.count },
+            zoneCount: zones.count
+        )
+    }
+
+    /// « 19 plans en 2 zones » — nombre total de plans exportés et nombre de
+    /// morceaux mis bout à bout.
+    static func plansAndZonesLabel(slotCount: Int, zoneCount: Int) -> String {
+        "\(planCountLabel(slotCount)) en \(zoneCountLabel(zoneCount))"
+    }
+
+    /// « 28–35, 40–50 » — les plages exactes, en 1-based, dans l'ordre des
+    /// index. Affiché en PETIT sous le résumé quand il y a plusieurs zones :
+    /// c'est la seule façon de vérifier ce qui part sans compter les cases une
+    /// à une. `nil` en dessous de deux zones — la plage y est déjà dite en
+    /// toutes lettres par `exportedPlansLabel`.
+    ///
+    /// Tiret demi-cadratin (U+2013) entre les bornes : c'est un intervalle,
+    /// pas un trait d'union. Une zone d'un seul plan s'écrit « 40 », jamais
+    /// « 40–40 ».
+    static func zoneRangesLabel(zones: [ClosedRange<Int>]) -> String? {
+        guard zones.count > 1 else { return nil }
+        return zones.map { zone -> String in
+            let first = max(0, min(zone.lowerBound, zone.upperBound)) + 1
+            let last = max(0, max(zone.lowerBound, zone.upperBound)) + 1
+            return first == last ? "\(first)" : "\(first)–\(last)"
+        }
+        .joined(separator: ", ")
+    }
+
+    /// Version PARLÉE des plages (§39) : « plans 28 à 35, puis plans 40 à
+    /// 50 ». Le tiret demi-cadratin et les virgules de `zoneRangesLabel` ne se
+    /// lisent pas — même règle que le « × » du bloc §56, remplacé par des
+    /// mots. `nil` en dessous de deux zones.
+    static func spokenZoneRanges(zones: [ClosedRange<Int>]) -> String? {
+        guard zones.count > 1 else { return nil }
+        return zones.map { zone -> String in
+            let first = max(0, min(zone.lowerBound, zone.upperBound)) + 1
+            let last = max(0, max(zone.lowerBound, zone.upperBound)) + 1
+            return first == last ? "plan \(first)" : "plans \(first) à \(last)"
+        }
+        .joined(separator: ", puis ")
+    }
+
     /// Durée totale du montage exporté.
     ///
-    /// ÉCART PRODUIT (11 août 2026) : c'est la durée du SEGMENT — `fin de la
-    /// dernière case − début de la première case` — et non plus la fin
-    /// absolue de la dernière case du préfixe. Un montage fait des cases 28 à
-    /// 50 dure ce que durent ces 23 plans, pas ce qui les sépare du début du
-    /// morceau (aucun écran noir n'est ajouté, aucune case n'est déplacée).
+    /// ÉCART PRODUIT (13 août 2026) : c'est la SOMME des durées des cases
+    /// exportées — les trous ne comptent pas, puisqu'ils sont supprimés du
+    /// montage (vidéo et musique). Un montage fait des cases 28 à 35 et 40 à
+    /// 50 dure ce que durent ces 19 plans, ni plus, ni moins (aucun écran noir
+    /// n'est ajouté).
     ///
     /// - moins d'une minute → forme courte §35.2 « 18,43 s », exactement le
     ///   format du bloc §56 ;
@@ -312,12 +389,26 @@ enum ExportSummaryLogic {
 
     /// §51 + écart produit : ce qui est exporté n'est pas TOUT le projet —
     /// dit explicitement, jamais découvert après coup. Formulation neutre
-    /// quant à la POSITION du segment (il ne commence plus forcément au
-    /// début) ; la plage exacte est affichée juste au-dessus
-    /// (`planRangeLabel`).
+    /// quant à la position des zones (le montage ne commence plus forcément au
+    /// début) ; ce qui part est nommé juste au-dessus (`exportedPlansLabel`).
+    ///
+    /// Le texte ne promet plus que « rien n'est déplacé » : dans le fichier
+    /// exporté, les plans d'une zone suivante sont bien avancés dans le temps.
+    /// Ce qui reste vrai, et qui est dit : le PROJET n'est pas touché.
     static let partialExportNotice =
-        "Seuls les plans prêts qui se suivent sont exportés ; "
-        + "le reste du projet est conservé, rien n'est déplacé."
+        "Seuls les plans prêts sont exportés ; "
+        + "les cases vides sont ignorées et votre projet reste intact."
+
+    /// Mention HONNÊTE des jonctions entre zones (écart produit du 13 août
+    /// 2026) — affichée sous le résumé dès qu'il y a PLUSIEURS zones.
+    ///
+    /// C'est le comportement DEMANDÉ (« n'exporte que les parties avec de la
+    /// vidéo ») : les trous disparaissent, musique comprise, donc la bande son
+    /// saute d'une zone à la suivante. Le dire en une phrase sobre évite que
+    /// ce soit découvert à la lecture du fichier, sans dramatiser un choix
+    /// volontaire — ce n'est ni un avertissement, ni une erreur.
+    static let concatenationNotice =
+        "Les zones sont mises bout à bout : la musique passe directement d'une zone à la suivante."
 
     /// §66 (relu par l'écart produit) : aucune case prête → export
     /// impossible. La raison est DITE, le bouton n'est pas seulement grisé.
@@ -538,9 +629,10 @@ enum ExportSummaryLogic {
 ///
 /// Déroulé :
 /// 1. **Résumé §56** — dimensions de rendu, orientation, cadence, HDR/SDR,
-///    nombre de plans, plage des plans exportés (« Plans 28 à 50 », écart
-///    produit) et durée totale. Ces trois dernières valeurs viennent de
-///    l'instantané du projet (§51 : segment continu prêt) et s'affichent
+///    nombre de plans, ce qui part vraiment (« Plans 28 à 50 » ou « 19 plans
+///    en 2 zones » avec les plages en petit, écart produit) et durée totale.
+///    Ces trois dernières valeurs viennent de
+///    l'instantané du projet (§51 : zones prêtes) et s'affichent
 ///    IMMÉDIATEMENT ; le profil technique (§52) est lu ensuite auprès de
 ///    l'EXPORTATEUR (`masterProfile(project:)`, source unique) — s'il est
 ///    indisponible, l'essentiel reste affiché et l'export reste possible,
@@ -581,32 +673,31 @@ struct ExportSummaryView: View {
 
     // MARK: État du résumé (§56)
 
-    /// Instantané du projet — source du segment §51 et entrée du profil §52.
+    /// Instantané du projet — source des zones §51 et entrée du profil §52.
     @State private var snapshot: ProjectSnapshot?
-    /// Nombre de cases du SEGMENT exportable (§51 + écart produit).
-    @State private var segmentSlotCount = 0
-    /// Index de la PREMIÈRE et de la DERNIÈRE case exportées (0-based, tels
-    /// que persistés) — affichés en 1-based (« Plans 28 à 50 »). `nil` quand
-    /// aucune case n'est prête.
-    @State private var segmentStartIndex: Int?
-    @State private var segmentEndIndex: Int?
+    /// Nombre TOTAL de cases exportées, toutes zones confondues (§51 + écart
+    /// produit).
+    @State private var exportedSlotCount = 0
+    /// Plages d'index (0-based, tels que persistés) des ZONES exportées, dans
+    /// l'ordre — affichées en 1-based (« Plans 28 à 50 », « 28–35, 40–50 »).
+    /// Vide quand aucune case n'est prête.
+    @State private var exportedZones: [ClosedRange<Int>] = []
     /// Nombre total de cases du projet — sert uniquement à signaler un export
-    /// PARTIEL (§51 : « les cases après le premier trou sont ignorées » ;
-    /// écart produit : celles d'avant le segment le sont tout autant).
+    /// PARTIEL (les cases non prêtes sont supprimées du montage, où qu'elles
+    /// soient).
     @State private var totalSlotCount = 0
-    /// Durée du montage exporté = `fin de la dernière case − début de la
-    /// première case` du segment (écart produit ; la musique insérée est la
-    /// PORTION correspondante du morceau, placée à l'instant 0).
+    /// Durée du montage exporté = SOMME des durées des cases exportées (écart
+    /// produit : les trous n'existent pas dans le fichier produit).
     @State private var exportDuration: MediaTime = .zero
     /// Profil maître §52 tel que l'EXPORTATEUR le calculera — `nil` tant
-    /// qu'il n'est pas lu, ou s'il n'a pas pu l'être (un rush du segment est
+    /// qu'il n'est pas lu, ou s'il n'a pas pu l'être (un rush exporté est
     /// illisible : §52 n'admet pas de profil partiel).
     @State private var profile: MasterProfile?
     /// Vrai pendant la lecture de l'instantané (§56 : aucun écran vide muet).
     @State private var isLoadingSummary = true
     /// Vrai pendant la lecture du profil §52 auprès de l'exportateur.
     /// Vrai DÈS LE DÉPART : la lecture suit toujours une lecture d'instantané
-    /// réussie avec un segment non vide — sans cela, l'écran afficherait un
+    /// réussie avec un montage non vide — sans cela, l'écran afficherait un
     /// bref « profil indisponible » avant même d'avoir essayé.
     @State private var isLoadingProfile = true
     /// Message d'échec de LECTURE du projet (§64) — jamais un échec muet.
@@ -655,21 +746,23 @@ struct ExportSummaryView: View {
     }
 
     /// §51 « export désactivé si le résultat est vide » — relu par l'écart
-    /// produit : le résultat est le SEGMENT continu rempli, où qu'il
-    /// commence. §66 « première case vide : export désactivé » devient donc
-    /// « aucune case prête : export désactivé ».
-    private var hasExportableSegment: Bool {
-        segmentSlotCount > 0
+    /// produit : le résultat est la concaténation des zones remplies. §66
+    /// « première case vide : export désactivé » devient donc « aucune case
+    /// prête : export désactivé ».
+    private var hasExportableMontage: Bool {
+        exportedSlotCount > 0
     }
 
-    /// « Plans 28 à 50 » / « Plan 28 » — `nil` tant qu'aucun segment n'est
-    /// connu (chargement, échec de lecture, aucune case prête).
-    private var planRangeLabel: String? {
-        guard let segmentStartIndex, let segmentEndIndex else { return nil }
-        return ExportSummaryLogic.planRangeLabel(
-            startIndex: segmentStartIndex,
-            endIndex: segmentEndIndex
-        )
+    /// « Plans 28 à 50 » (une zone) / « 19 plans en 2 zones » (plusieurs) —
+    /// `nil` tant qu'aucune zone n'est connue (chargement, échec de lecture,
+    /// aucune case prête).
+    private var exportedPlansLabel: String? {
+        ExportSummaryLogic.exportedPlansLabel(zones: exportedZones)
+    }
+
+    /// « 28–35, 40–50 » — plages détaillées, `nil` en dessous de deux zones.
+    private var zoneRangesLabel: String? {
+        ExportSummaryLogic.zoneRangesLabel(zones: exportedZones)
     }
 
     // MARK: - Corps
@@ -782,7 +875,7 @@ struct ExportSummaryView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-            } else if !hasExportableSegment {
+            } else if !hasExportableMontage {
                 // §66, relu par l'écart produit : aucune case prête → export
                 // désactivé. La raison est DITE, le bouton n'est pas
                 // seulement grisé.
@@ -797,32 +890,51 @@ struct ExportSummaryView: View {
             } else {
                 profileLines
                 Text(ExportSummaryLogic.plansAndDurationLabel(
-                    slotCount: segmentSlotCount,
+                    slotCount: exportedSlotCount,
                     duration: exportDuration
                 ))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
 
                 if isPartialExport {
-                    // ÉCART PRODUIT : QUELS plans partent, pas seulement
-                    // combien — le montage ne commence plus forcément au
-                    // premier plan du projet. Affiché uniquement quand
-                    // l'export est partiel : quand le segment couvre tout le
-                    // projet, « Plans 1 à 23 » n'apprendrait rien de plus que
+                    // ÉCART PRODUIT : ce qui part VRAIMENT, pas seulement
+                    // combien — une zone garde sa plage (« Plans 28 à 50 »),
+                    // plusieurs zones disent leur nombre (« 19 plans en
+                    // 2 zones »). Affiché uniquement quand l'export est
+                    // partiel : quand les zones couvrent tout le projet,
+                    // « Plans 1 à 23 » n'apprendrait rien de plus que
                     // « 23 plans » juste au-dessus.
-                    if let planRangeLabel {
-                        Text(planRangeLabel)
+                    if let exportedPlansLabel {
+                        Text(exportedPlansLabel)
                             .font(.subheadline.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    // §51 : « les cases après le premier trou sont ignorées »,
-                    // « les clips ultérieurs ne sont jamais déplacés » — dit
+                    // Plages exactes, en PETIT : la seule façon de vérifier ce
+                    // qui part sans compter les cases une à une (plusieurs
+                    // zones uniquement — sinon la ligne au-dessus le dit déjà).
+                    if let zoneRangesLabel {
+                        Text(zoneRangesLabel)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                    }
+                    // Les cases non prêtes sont supprimées du montage — dit
                     // explicitement, jamais découvert après coup.
                     Text(ExportSummaryLogic.partialExportNotice)
                         .font(.footnote)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
                         .padding(.top, 2)
+                    // MENTION HONNÊTE des jonctions (écart produit) : dès qu'il
+                    // y a plusieurs zones, la musique saute de l'une à l'autre.
+                    // C'est le comportement demandé — dit sobrement, sans
+                    // alarmer.
+                    if hasSeveralZones {
+                        Text(ExportSummaryLogic.concatenationNotice)
+                            .font(.footnote)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
 
                 if isEncoding {
@@ -1049,7 +1161,7 @@ struct ExportSummaryView: View {
     private func readyDock(url: URL, isRestored: Bool) -> some View {
         VStack(spacing: 8) {
             if isRestored {
-                let canExportAgain = hasExportableSegment && loadErrorMessage == nil
+                let canExportAgain = hasExportableMontage && loadErrorMessage == nil
                 HStack(spacing: 8) {
                     dockSecondaryButton(
                         title: "Exporter à nouveau",
@@ -1159,13 +1271,13 @@ struct ExportSummaryView: View {
     }
 
     /// CTA principal §56 (« Exporter ») et ses variantes de reprise
-    /// (« Réessayer » §57, « Recommencer » §66). Désactivé si le SEGMENT
+    /// (« Réessayer » §57, « Recommencer » §66). Désactivé si le montage
     /// exportable est vide (aucune case prête) ou pendant un export (§58).
     ///
     /// Le libellé §56 est VERBATIM : ce bouton produit le FICHIER, il
     /// n'enregistre rien dans Photos (action distincte, §40/§55).
     private func exportButton(title: String) -> some View {
-        let isEnabled = hasExportableSegment && !isBusy && loadErrorMessage == nil
+        let isEnabled = hasExportableMontage && !isBusy && loadErrorMessage == nil
         return Button {
             startExport()
         } label: {
@@ -1237,8 +1349,8 @@ struct ExportSummaryView: View {
 
     // MARK: - Chargement du résumé (§51, §52, §56)
 
-    /// Lit l'instantané du projet, en tire le SEGMENT exportable (nombre de
-    /// plans, plage 1-based et durée — affichés IMMÉDIATEMENT), puis demande
+    /// Lit l'instantané du projet, en tire le montage exportable (nombre de
+    /// plans, zones 1-based et durée — affichés IMMÉDIATEMENT), puis demande
     /// le profil maître §52 à l'exportateur.
     ///
     /// Si un export du même projet est DÉJÀ en cours (§8/§58 : l'acteur n'en
@@ -1264,19 +1376,17 @@ struct ExportSummaryView: View {
         }
 
         // ÉCART PRODUIT : source UNIQUE du montage exporté, la MÊME que
-        // l'exportateur et que la preview — le premier segment continu de
-        // cases prêtes, où qu'il commence.
-        let segment = contiguousReadySegment(slots: snapshot.slots)
+        // l'exportateur et que la preview — TOUTES les zones de cases prêtes,
+        // concaténées dans l'ordre des index.
+        let timeline = readyTimeline(slots: snapshot.slots)
         self.snapshot = snapshot
-        segmentSlotCount = segment.slots.count
-        segmentStartIndex = segment.startIndex
-        segmentEndIndex = segment.endIndex
+        exportedSlotCount = timeline.slotCount
+        exportedZones = timeline.runs.map { $0.startIndex...$0.endIndex }
         totalSlotCount = snapshot.slots.count
-        // Durée du montage = `musicEnd - musicStart` du segment, calculée en
-        // TICKS par le domaine (§9) : jamais une somme de durées affichées,
-        // jamais la fin absolue de la dernière case (qui inclurait tout ce
-        // qui précède le segment).
-        exportDuration = segment.duration
+        // Durée du montage = somme des durées des zones, calculée en TICKS par
+        // le domaine (§9) : jamais une somme de durées affichées, jamais la
+        // fin absolue de la dernière case (qui inclurait les trous supprimés).
+        exportDuration = timeline.duration
         isLoadingSummary = false
 
         // Export déjà en cours pour ce projet (écran rouvert pendant
@@ -1290,7 +1400,7 @@ struct ExportSummaryView: View {
             await restoreLastOutcome()
         }
 
-        guard !segment.isEmpty else {
+        guard !timeline.isEmpty else {
             isLoadingProfile = false
             return // §66 : aucune case prête, rien à profiler
         }
@@ -1333,7 +1443,7 @@ struct ExportSummaryView: View {
     /// `ProjectExporter.masterProfile(project:)` applique exactement la règle
     /// §52 qui sera utilisée à l'encodage (§52.1 géométrie du projet, §52.2
     /// clip maître, §52.3 cadence, §52.4 colorimétrie) et rend `nil` si un
-    /// rush du segment est illisible : il n'existe pas de profil PARTIEL, donc
+    /// rush exporté est illisible : il n'existe pas de profil PARTIEL, donc
     /// pas de « HDR » annoncé à tort parce qu'un rush SDR n'a pas pu être lu.
     /// Cet écran n'ouvre plus AUCUN asset PhotoKit : il affiche, il ne calcule
     /// pas (§56 : « information, pas réglage »).
@@ -1350,7 +1460,7 @@ struct ExportSummaryView: View {
     /// CTA « Exporter » : vérification §57 AVANT tout encodage, puis
     /// `ExportActor.startExport` (§8 : un seul export actif par projet).
     private func startExport() {
-        guard hasExportableSegment, !isBusy, let snapshot else { return }
+        guard hasExportableMontage, !isBusy, let snapshot else { return }
 
         // §57 : « estimer la taille ; vérifier l'espace disponible ; refuser
         // proprement si insuffisant » — le refus arrive AVANT l'encodage, avec
@@ -1396,7 +1506,7 @@ struct ExportSummaryView: View {
     /// écran devient la progression de CE run), `alreadyRunning` (§58 : un
     /// seul export par projet — on reprend le suivi de celui qui tourne, sans
     /// jamais réafficher l'issue d'un run précédent), `refused(erreur)`
-    /// (segment vide §66, instantané illisible… — la cause est DITE).
+    /// (montage vide §66, instantané illisible… — la cause est DITE).
     /// Sans ce résultat, un refus laissait lire `lastOutcome` du run
     /// PRÉCÉDENT et pouvait annoncer un succès qui n'avait pas eu lieu (§8.1).
     ///
@@ -1600,12 +1710,17 @@ struct ExportSummaryView: View {
 
     // MARK: - Libellés dépendant de l'état
 
-    /// Vrai si le projet contient des cases HORS du segment exporté (§51 +
-    /// écart produit) — celles d'AVANT le segment comme celles d'après : dans
-    /// les deux cas, l'export ne couvre pas tout le projet et il faut le
-    /// dire.
+    /// Vrai si le projet contient des cases HORS des zones exportées (§51 +
+    /// écart produit) — avant, entre ou après : dans tous les cas, l'export ne
+    /// couvre pas tout le projet et il faut le dire.
     private var isPartialExport: Bool {
-        totalSlotCount > segmentSlotCount
+        totalSlotCount > exportedSlotCount
+    }
+
+    /// Vrai dès que le montage est fait de PLUSIEURS morceaux — c'est la seule
+    /// situation où la musique saute (mention honnête sous le résumé).
+    private var hasSeveralZones: Bool {
+        exportedZones.count > 1
     }
 
     /// Énoncé VoiceOver du résumé (§39) — un seul élément parlé, sans puce ni
@@ -1617,7 +1732,7 @@ struct ExportSummaryView: View {
         if let loadErrorMessage {
             return loadErrorMessage
         }
-        guard hasExportableSegment else {
+        guard hasExportableMontage else {
             return ExportSummaryLogic.nothingReadyTitle + " "
                 + ExportSummaryLogic.nothingReadyHint
         }
@@ -1628,24 +1743,31 @@ struct ExportSummaryView: View {
                 height: profile.renderHeight,
                 frameRate: profile.frameRate,
                 isHDR: profile.isHDR,
-                slotCount: segmentSlotCount,
+                slotCount: exportedSlotCount,
                 duration: exportDuration
             )
         } else {
             spoken = ExportSummaryLogic.spokenEssentials(
-                slotCount: segmentSlotCount,
+                slotCount: exportedSlotCount,
                 duration: exportDuration
             )
         }
         if isPartialExport {
-            // ÉCART PRODUIT : la PLAGE est dite avant la formule générale —
-            // « Plans 28 à 50 » est ce que l'utilisateur a besoin de vérifier
-            // avant d'exporter, et il ne peut pas le lire sur l'écran s'il
-            // n'y voit rien (§39).
-            if let planRangeLabel {
-                spoken += " \(planRangeLabel)."
+            // ÉCART PRODUIT : ce qui part est dit avant la formule générale —
+            // « Plans 28 à 50 », « 19 plans en 2 zones » puis les plages
+            // exactes : c'est ce que l'utilisateur a besoin de vérifier avant
+            // d'exporter, et il ne peut pas le lire sur l'écran s'il n'y voit
+            // rien (§39).
+            if let exportedPlansLabel {
+                spoken += " \(exportedPlansLabel)."
+            }
+            if let spokenZones = ExportSummaryLogic.spokenZoneRanges(zones: exportedZones) {
+                spoken += " \(spokenZones)."
             }
             spoken += " " + ExportSummaryLogic.partialExportNotice
+            if hasSeveralZones {
+                spoken += " " + ExportSummaryLogic.concatenationNotice
+            }
         }
         if isEncoding {
             // §8.1/§39 : la consigne est AUSSI parlée — elle ne doit pas

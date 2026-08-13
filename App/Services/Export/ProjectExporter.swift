@@ -2,21 +2,25 @@
 //  ProjectExporter.swift
 //  MontageMusical
 //
-//  Export du montage — segment exportable (changement produit, remplace §51),
+//  Export du montage — timeline exportable (changement produit, remplace §51),
 //  §52 (profil maître), §53 (exactitude temporelle), §54 (composition),
 //  §55 (encodage), §57 (stockage et espace disque), §58 (progression et
 //  interruption), §66 (cas limites d'export).
 //
 //  CHANGEMENT PRODUIT (contrat complet dans `ExportModels.swift`) : l'export
-//  porte sur le SEGMENT continu de cases prêtes, où qu'il commence — cases 28
-//  à 50 remplies → 23 plans exportés. Conséquence temporelle traitée ici :
-//  - durée du fichier produit = `musicEnd - musicStart` (et NON la fin
-//    absolue de la dernière case) ;
-//  - musique insérée = PORTION `[musicStart, musicEnd]` du fichier original,
-//    posée à l'instant 0 ;
-//  - vidéo de la case `i` insérée à `slot.start - musicStart`.
-//  Les cases ne sont JAMAIS déplacées (temps musicaux absolus conservés) et
-//  aucun écran noir n'est ajouté.
+//  CONCATÈNE toutes les zones remplies — « n'exporte que les parties avec de
+//  la vidéo ». Cases 28…35 prêtes, 36…39 vides, 40…50 prêtes → 19 plans mis
+//  bout à bout. Conséquences temporelles traitées ici :
+//  - durée du fichier produit = SOMME des durées de toutes les cases
+//    exportées (et NON `dernière.end - première.start`) ;
+//  - musique insérée = UNE portion PAR RUN (`[run.musicStart, run.musicEnd]`
+//    du fichier original), posée à la position de composition du run ; la
+//    musique SAUTE donc à chaque jonction entre runs — conséquence assumée ;
+//  - vidéo de la case `i` insérée à
+//    `(position du run) + (slot.start - run.musicStart)`.
+//  Les cases ne sont JAMAIS omises ni déplacées (temps musicaux absolus
+//  conservés) et aucun écran noir n'est ajouté : les zones vides sont
+//  SUPPRIMÉES, pas comblées.
 //
 //  Protocole §7 `ProjectExporting` : la SIGNATURE est respectée à
 //  l'identique ; la conformance formelle n'est pas déclarée (même choix
@@ -35,11 +39,11 @@ import Foundation
 /// intact » (§66).
 enum ExportError: Error, Equatable, LocalizedError {
 
-    /// Aucune case n'est prête : le SEGMENT exportable est vide, il n'y a
+    /// Aucune case n'est prête : la TIMELINE exportable est vide, il n'y a
     /// rien à exporter (changement produit — §66 « première case vide :
-    /// export désactivé » ne s'applique plus telle quelle : une première case
-    /// vide n'empêche PAS l'export si un segment prêt existe plus loin).
-    /// Nom du cas CONSERVÉ pour ne pas casser ses appelants.
+    /// export désactivé » ne s'applique plus telle quelle : les cases vides
+    /// sont SUPPRIMÉES du montage, où qu'elles soient, et seules comptent les
+    /// zones remplies). Nom du cas CONSERVÉ pour ne pas casser ses appelants.
     case emptyPrefix
 
     /// §57/§66 : « espace insuffisant : bloquer avant encodage ». Aucun
@@ -146,10 +150,10 @@ struct ExportOutcome: Sendable, Equatable {
     }
 }
 
-// MARK: - Plan d'export (segment exportable) — logique PURE
+// MARK: - Plan d'export (timeline exportable) — logique PURE
 
 // Non defini par la specification — definition minimale V1.
-/// Ce qui sera réellement encodé : le SEGMENT continu de cases prêtes
+/// Ce qui sera réellement encodé : la TIMELINE concaténée des zones remplies
 /// (changement produit — voir `ExportModels.swift`) et la durée du montage
 /// exporté.
 ///
@@ -157,90 +161,102 @@ struct ExportOutcome: Sendable, Equatable {
 /// partie de l'export qui se teste sans encoder (§70).
 struct ExportPlan: Sendable, Equatable {
 
-    /// Segment RÉELLEMENT exporté. Les cases y gardent leurs temps musicaux
-    /// ABSOLUS : elles ne sont jamais recompactées ni déplacées.
-    let segment: ReadySegment
+    /// Timeline RÉELLEMENT exportée. Les cases y gardent leurs temps musicaux
+    /// ABSOLUS : elles ne sont jamais recompactées ni réécrites — la
+    /// concaténation est un CALCUL de position, pas une modification du
+    /// montage.
+    let timeline: ReadyTimeline
 
-    /// Cases exportées, dans l'ordre, avec leurs temps ABSOLUS.
-    var slots: [ProjectSlot] { segment.slots }
+    /// Cases exportées, dans l'ordre du montage (runs concaténés), avec leurs
+    /// temps ABSOLUS.
+    var slots: [ProjectSlot] { timeline.allSlots }
 
-    /// Instant ABSOLU, dans le morceau, où commence le montage exporté —
-    /// c'est le début de la PORTION de musique insérée à l'instant 0 de la
-    /// composition.
-    var musicStart: MediaTime { segment.musicStart }
+    /// Runs exportés : chaque zone remplie, avec ses bornes musicales.
+    var runs: [ReadyRun] { timeline.runs }
 
-    /// Fin ABSOLUE de la dernière case exportée : la musique y est coupée.
-    var musicEnd: MediaTime { segment.musicEnd }
-
-    /// Durée totale du fichier produit = `musicEnd - musicStart`.
+    /// Durée totale du fichier produit = SOMME des durées de toutes les cases
+    /// exportées.
     ///
-    /// **Ce n'est plus `musicEnd`** : le montage ne commence plus forcément à
-    /// l'instant 0 de la musique (changement produit). Le segment
-    /// [cases 28 … 50] de l'exemple utilisateur commence à 840 000 ticks
-    /// (14 s) et finit à 1 530 000 ticks (25,5 s) : le fichier produit dure
-    /// 690 000 ticks (11,5 s), pas 25,5 s.
-    var duration: MediaTime { segment.duration }
+    /// **Ce n'est PAS `dernière.end - première.start`** : les zones vides
+    /// n'existent pas dans le fichier, ni en vidéo ni en musique (changement
+    /// produit). Exemple de l'utilisateur : cases 28…35 et 40…50 prêtes, à
+    /// 30 000 ticks la case → 19 × 30 000 = 570 000 ticks (9,5 s), et non
+    /// 1 530 000 − 840 000 = 690 000 ticks.
+    var duration: MediaTime { timeline.duration }
 
-    /// Nombre de plans exportés (§56 : « 12 plans • 18,43 s »).
-    var slotCount: Int { segment.slotCount }
+    /// Nombre TOTAL de plans exportés, tous runs confondus
+    /// (§56 : « 19 plans • 9,50 s »).
+    var slotCount: Int { timeline.slotCount }
 
-    /// Instant de composition d'une case exportée : `slot.start - musicStart`
-    /// (§9, ticks entiers). Fonction PURE — c'est elle que testent les tests
-    /// de décalage, sans AVFoundation.
-    func compositionStart(of slot: ProjectSlot) -> MediaTime {
-        segment.compositionStart(of: slot)
+    /// Instant de composition d'une case exportée :
+    /// `(position de son run) + (slot.start - run.musicStart)` (§9, ticks
+    /// entiers). Fonction PURE — c'est elle que testent les tests de position,
+    /// sans AVFoundation.
+    ///
+    /// - Returns: `nil` si la case n'est pas exportée (elle n'a alors aucun
+    ///   instant de composition).
+    func compositionStart(of slot: ProjectSlot) -> MediaTime? {
+        timeline.compositionStart(of: slot)
     }
 
-    static let empty = ExportPlan(segment: .empty)
+    static let empty = ExportPlan(timeline: .empty)
 
-    /// Plan d'export d'un projet (segment continu de cases prêtes).
+    /// Plan d'export d'un projet (toutes les zones remplies, concaténées).
     ///
-    /// Les DEUX portées §7 `ExportScope` produisent le même segment :
-    /// §66 impose « trou au milieu : export limité » et « asset en
-    /// téléchargement : export limité avant lui ». `.complete` est donc une
-    /// DÉCLARATION d'intention de l'appelant (le montage est complet, le
-    /// segment couvre alors toutes les cases), jamais une demande d'exporter
-    /// au-delà du segment — c'est pourquoi aucune erreur « montage
-    /// incomplet » n'existe côté export, contrairement à la prévisualisation
-    /// §47.2.
+    /// Les DEUX portées §7 `ExportScope` produisent la même timeline :
+    /// §66 impose « trou au milieu : export limité » — désormais lu comme
+    /// « les trous sont supprimés du montage ». `.complete` est donc une
+    /// DÉCLARATION d'intention de l'appelant (le montage est complet, la
+    /// timeline couvre alors toutes les cases), jamais une demande d'exporter
+    /// autre chose — c'est pourquoi aucune erreur « montage incomplet »
+    /// n'existe côté export, contrairement à la prévisualisation §47.2.
     ///
     /// - Throws: `ExportError.emptyPrefix` si AUCUNE case n'est prête, ou si
-    ///   le segment est de durée nulle.
+    ///   la timeline est de durée nulle.
     static func make(project: ProjectSnapshot, scope: ExportScope) throws -> ExportPlan {
         switch scope {
         case .contiguousPrefix, .complete:
-            break // même segment dans les deux cas (voir ci-dessus)
+            break // même timeline dans les deux cas (voir ci-dessus)
         }
-        let segment = project.contiguousReadySegment // changement produit
-        guard !segment.isEmpty, segment.duration.ticks > 0 else {
+        let timeline = project.readyTimeline // changement produit
+        guard !timeline.isEmpty, timeline.duration.ticks > 0 else {
             throw ExportError.emptyPrefix
         }
-        return ExportPlan(segment: segment)
+        return ExportPlan(timeline: timeline)
     }
 
-    /// Plan RÉDUIT aux cases situées AVANT `index` dans le segment (§66 :
-    /// « asset en téléchargement : export limité avant lui »).
+    /// Plan RÉDUIT aux `index` premières cases du montage (§66 : « asset en
+    /// téléchargement : export limité avant lui »).
     ///
-    /// Utilisé quand un rush du segment devient indisponible PENDANT
-    /// l'assemblage (reparti dans iCloud, supprimé, photothèque révoquée) :
-    /// la troncature opère DANS le segment — elle en raccourcit la FIN. Les
-    /// cases suivantes sont ignorées, aucun écran noir n'est ajouté, aucune
-    /// case n'est déplacée, et la musique est recoupée à la fin absolue de la
-    /// dernière case conservée. `musicStart` est INCHANGÉ : la première case
-    /// du segment est toujours conservée (sinon la troncature lève).
+    /// Utilisé quand un rush devient indisponible PENDANT l'assemblage
+    /// (reparti dans iCloud, supprimé, photothèque révoquée).
     ///
-    /// Faire échouer l'export ENTIER dans ce cas contredirait §66, qui décrit
-    /// un export LIMITÉ, pas un export perdu.
+    /// **Décision documentée — la troncature ABANDONNE tout ce qui suit.** La
+    /// case en cause est retirée, la fin de SON run aussi, et les runs
+    /// SUIVANTS sont abandonnés. C'est le comportement le plus simple et le
+    /// plus prévisible : exporter les runs d'après produirait un montage
+    /// DIFFÉRENT de celui annoncé par le résumé avant export (§56 : nombre de
+    /// plans et durée), c'est-à-dire exactement la surprise que §3 interdit.
+    /// L'utilisateur relance l'export quand le rush est redevenu disponible.
     ///
-    /// - Throws: `ExportError.emptyPrefix` si `index <= 0` — le PREMIER rush
-    ///   du segment est indisponible, il ne reste aucun segment exportable.
+    /// Les cases conservées ne bougent PAS : la troncature ne retire qu'un
+    /// SUFFIXE du montage, donc les positions de composition des cases
+    /// gardées sont identiques à celles du plan complet. Aucun écran noir
+    /// n'est ajouté, et la musique du dernier run conservé est recoupée à la
+    /// fin absolue de sa dernière case.
+    ///
+    /// Faire échouer l'export ENTIER contredirait §66, qui décrit un export
+    /// LIMITÉ, pas un export perdu.
+    ///
+    /// - Throws: `ExportError.emptyPrefix` si `index <= 0` — le TOUT PREMIER
+    ///   rush du montage est indisponible, il ne reste rien à exporter.
     func truncated(before index: Int) throws -> ExportPlan {
         guard index > 0 else { throw ExportError.emptyPrefix }
-        let kept = ReadySegment(slots: Array(slots.prefix(index)))
+        let kept = timeline.truncated(toFirst: index)
         guard !kept.isEmpty, kept.duration.ticks > 0 else {
             throw ExportError.emptyPrefix
         }
-        return ExportPlan(segment: kept)
+        return ExportPlan(timeline: kept)
     }
 }
 
@@ -269,9 +285,10 @@ extension ExportPlan {
     /// Taille estimée du fichier exporté, en octets (§57 : « estimer la
     /// taille »).
     ///
-    /// Basée sur `duration`, c'est-à-dire `musicEnd - musicStart` — la durée
-    /// RÉELLE du fichier produit (changement produit : un segment démarrant à
-    /// 90 s n'encode pas les 90 premières secondes du morceau).
+    /// Basée sur `duration`, c'est-à-dire la SOMME des durées des cases
+    /// exportées — la durée RÉELLE du fichier produit (changement produit :
+    /// ni les 90 premières secondes du morceau, ni les zones vides du milieu
+    /// ne sont encodées).
     ///
     /// Croît strictement avec le nombre de pixels, la cadence et la durée —
     /// les trois grandeurs qui pilotent réellement le débit.
@@ -287,8 +304,9 @@ extension ExportPlan {
         return Int64(bytes.rounded(.up))
     }
 
-    /// Taille estimée de l'export d'un PROJET (§57), c'est-à-dire de son
-    /// SEGMENT exportable — un segment vide donne 0, il n'y a rien à écrire.
+    /// Taille estimée de l'export d'un PROJET (§57), c'est-à-dire de sa
+    /// TIMELINE exportable — une timeline vide donne 0, il n'y a rien à
+    /// écrire.
     ///
     /// `nonisolated static` : logique PURE (aucune E/S, aucun acteur, aucune
     /// AVFoundation). C'est la forme testable et la SOURCE UNIQUE de
@@ -321,7 +339,7 @@ extension ExportPlan {
 ///
 /// **Relation avec `PreviewBuilder` (§48/§54).** Les règles de composition
 /// sont les MÊMES et le code partage tout ce qui est partageable :
-/// `contiguousReadySegment` (changement produit), `GeometryLock.orientedSize` /
+/// `readyTimeline` (changement produit), `GeometryLock.orientedSize` /
 /// `renderSize` / `cropToFillTransform` (§49/§50), `MediaLibraryActor`
 /// (§8), `MediaTime.cmTime` (§9). L'assemblage n'est pas DÉLÉGUÉ à
 /// `PreviewBuilder` pour trois raisons :
@@ -369,12 +387,12 @@ struct ProjectExporter: Sendable {
     /// `exports/` du projet (§11).
     ///
     /// Déroulé, dans cet ordre STRICT :
-    /// 1. segment exportable (vide → `emptyPrefix`) ;
+    /// 1. timeline exportable (vide → `emptyPrefix`) ;
     /// 2. composition §54 (résolution des rushs, vérification des durées
-    ///    RÉELLES, insertion de chaque case à `slot.start - musicStart`,
-    ///    musique = portion `[musicStart, musicEnd]` posée à l'instant 0) —
-    ///    un rush devenu indisponible TRONQUE la FIN du segment (§66) au lieu
-    ///    de faire échouer l'export entier ;
+    ///    RÉELLES, insertion de chaque case à sa position dans la timeline
+    ///    concaténée, musique = UNE portion par run posée à la position du
+    ///    run) — un rush devenu indisponible TRONQUE la FIN du montage (§66)
+    ///    au lieu de faire échouer l'export entier ;
     /// 3. profil maître §52 (résolution + cadence du même clip, SDR §52.4) ;
     /// 4. plan de rendu §50/§52 au profil maître ;
     /// 5. **estimation de taille et vérification de l'espace disque §57 —
@@ -399,7 +417,7 @@ struct ProjectExporter: Sendable {
         // dans `exports/` quand ce nettoyage a lieu.
         defer { fileStore.clearTemporaryFiles(projectID: project.projectID) }
 
-        // Segment continu de cases prêtes (changement produit).
+        // Timeline concaténée des zones remplies (changement produit).
         let plan = try ExportPlan.make(project: project, scope: scope)
         progress(0)
         try checkCancellation()
@@ -445,18 +463,21 @@ struct ProjectExporter: Sendable {
         )
 
         progress(1)
-        // Bornes du segment journalisées : un export ne commençant pas à la
-        // case 0 est le cas NORMAL désormais, il doit être lisible dans les
-        // journaux (§69A : aucun nom de fichier personnel, seuls des index).
-        let startIndex = effectivePlan.segment.startIndex ?? 0
-        let endIndex = effectivePlan.segment.endIndex ?? 0
+        // Bornes de CHAQUE zone remplie journalisées : un export fait de
+        // plusieurs zones concaténées est le cas NORMAL désormais, il doit
+        // être lisible dans les journaux (§69A : aucun nom de fichier
+        // personnel, seuls des index).
+        //
+        // Numérotation HUMAINE (1-based), comme partout dans l'interface
+        // (« Plan 8 » §35.2) : une même zone ne doit pas se lire « 29 à 36 »
+        // à l'écran et « 28 à 35 » dans les journaux.
+        let runsDescription = effectivePlan.runs
+            .map { "\($0.startIndex + 1)–\($0.endIndex + 1)" }
+            .joined(separator: ", ")
         logger.info(
-            // Numérotation HUMAINE (1-based), comme partout dans l'interface
-            // (« Plan 8 » §35.2) : un même segment ne doit pas se lire
-            // « 28 à 50 » à l'écran et « 27 à 49 » dans les journaux.
             "Export terminé : \(effectivePlan.slotCount) plans "
-            + "(plans \(startIndex + 1) à \(endIndex + 1), départ musical "
-            + "\(effectivePlan.musicStart.ticks) ticks), "
+            + "en \(effectivePlan.runs.count) zone(s) [\(runsDescription)], "
+            + "durée \(effectivePlan.duration.ticks) ticks, "
             + "\(profile.renderWidth)×\(profile.renderHeight), "
             + "\(profile.isHDR ? "HDR" : "SDR"), taille estimée \(estimatedBytes) octets."
         )
@@ -470,9 +491,9 @@ struct ProjectExporter: Sendable {
     /// Taille estimée du montage exporté (§57), pour le résumé avant export
     /// (§56) et la vérification d'espace disque.
     ///
-    /// Portée `.contiguousPrefix` : c'est TOUJOURS le segment continu de
-    /// cases prêtes qui est encodé (§66). Un segment vide donne 0 — il n'y a
-    /// rien à écrire.
+    /// Portée `.contiguousPrefix` : c'est TOUJOURS la timeline concaténée des
+    /// zones remplies qui est encodée (§66). Une timeline vide donne 0 — il
+    /// n'y a rien à écrire.
     ///
     /// Façade sur la logique PURE `ExportPlan.estimatedBytes(project:profile:)`
     /// — source unique, testable sans acteur ni disque.
@@ -482,8 +503,8 @@ struct ProjectExporter: Sendable {
 
     // MARK: - §52/§56 Profil maître — SOURCE UNIQUE
 
-    /// Profil maître §52 du SEGMENT exportable d'un projet, **calculé par le
-    /// même chemin que l'export** : `loadClipFacts` (résolution du rush,
+    /// Profil maître §52 de la TIMELINE exportable d'un projet, **calculé par
+    /// le même chemin que l'export** : `loadClipFacts` (résolution du rush,
     /// lecture `AVURLAsset` de `naturalSize`/`preferredTransform`/cadence/HDR,
     /// dimensions orientées `GeometryLock.orientedSize`), même repli de
     /// géométrie §52.1, même `MasterProfileSelector`.
@@ -494,19 +515,19 @@ struct ProjectExporter: Sendable {
     /// produirait pas — deux vérités pour une seule décision (§52 : « Prendre
     /// la résolution et la cadence d'un même clip maître »).
     ///
-    /// Coût documenté : ce calcul résout réellement chaque rush du segment
-    /// (sans réseau, §44) et matérialise au besoin la source d'un rush
-    /// recomposé (§52.3) — le fichier intermédiaire est alors RÉUTILISÉ par
-    /// l'export qui suit, jamais produit deux fois.
+    /// Coût documenté : ce calcul résout réellement chaque rush exporté (sans
+    /// réseau, §44) et matérialise au besoin la source d'un rush recomposé
+    /// (§52.3) — le fichier intermédiaire est alors RÉUTILISÉ par l'export qui
+    /// suit, jamais produit deux fois.
     ///
-    /// - Returns: `nil` si le segment est vide ou si un SEUL rush du segment
-    ///   est illisible. Jamais de profil PARTIEL : calculé sur une partie des
+    /// - Returns: `nil` si la timeline est vide ou si un SEUL rush exporté est
+    ///   illisible. Jamais de profil PARTIEL : calculé sur une partie des
     ///   rushs, il pourrait désigner un autre clip maître que l'export
     ///   (§52.2). L'appelant affiche alors l'essentiel sans rien inventer
     ///   (§56).
     func masterProfile(project: ProjectSnapshot) async -> MasterProfile? {
         guard let plan = try? ExportPlan.make(project: project, scope: .contiguousPrefix) else {
-            return nil // segment vide : rien à profiler
+            return nil // timeline vide : rien à profiler
         }
 
         var clips: [MasterClipInfo] = []
@@ -633,6 +654,25 @@ struct ProjectExporter: Sendable {
         let assetIdentifier: String
     }
 
+    /// Position d'une case dans le montage concaténé : la case et son instant
+    /// de départ DANS la composition
+    /// (`position du run + slot.start - run.musicStart`). Calculée UNE fois,
+    /// avant l'assemblage, pour que l'ordre d'insertion et l'ordre de
+    /// troncature §66 soient exactement le même.
+    private struct Placement {
+        let slot: ProjectSlot
+        let compositionStart: MediaTime
+    }
+
+    /// Portion de musique à insérer : le passage ABSOLU
+    /// `[sourceStart, sourceStart + duration]` du morceau, posé à
+    /// `compositionStart`. UNE portion par RUN (§53) — jamais une par case.
+    private struct MusicInsertion {
+        let sourceStart: MediaTime
+        let duration: MediaTime
+        let compositionStart: MediaTime
+    }
+
     /// Composition assemblée + matière du profil maître (§52).
     private struct Assembly {
         let composition: AVMutableComposition
@@ -643,10 +683,10 @@ struct ProjectExporter: Sendable {
         let totalDuration: CMTime
         /// Plan RÉELLEMENT assemblé — identique au plan demandé, sauf
         /// TRONCATURE §66 par un rush devenu indisponible en cours
-        /// d'assemblage (la FIN du segment est raccourcie, `musicStart` ne
-        /// bouge pas). C'est lui qui fixe la durée du fichier
-        /// (`musicEnd - musicStart`), le nombre de plans annoncé et
-        /// l'estimation §57.
+        /// d'assemblage (la FIN du montage est raccourcie ; les cases
+        /// conservées ne bougent pas). C'est lui qui fixe la durée du fichier
+        /// (somme des durées des cases exportées), le nombre de plans annoncé
+        /// et l'estimation §57.
         let plan: ExportPlan
     }
 
@@ -688,22 +728,25 @@ struct ProjectExporter: Sendable {
     /// audio (la musique ORIGINALE du projet, §11/§16.1), aucune piste audio
     /// de rush (§54 étape 5).
     ///
-    /// **Décalage du segment (changement produit).** Chaque case est insérée à
-    /// `plan.compositionStart(of: slot)` == `slot.start - plan.musicStart` :
-    /// la première case du segment tombe à `.zero`, les suivantes conservent
-    /// EXACTEMENT leur écart musical (§53). Les cases elles-mêmes ne sont
-    /// jamais réécrites : leurs temps restent absolus.
+    /// **Concaténation des zones remplies (changement produit).** Chaque case
+    /// est insérée à `(position de son run) + (slot.start - run.musicStart)` :
+    /// la première case du premier run tombe à `.zero`, les cases d'un même
+    /// run conservent EXACTEMENT leur écart musical (§53), et un run commence
+    /// là où le précédent finit — sans trou et sans écran noir. Les cases
+    /// elles-mêmes ne sont jamais réécrites : leurs temps restent absolus.
     ///
-    /// **Troncature §66.** Si un rush du segment est devenu indisponible
-    /// (reparti dans iCloud, supprimé, photothèque révoquée) alors que
-    /// l'export a déjà commencé, l'assemblage S'ARRÊTE à la case précédente :
-    /// le plan est réduit (`ExportPlan.truncated(before:)`) — la troncature
-    /// raccourcit la FIN du segment, jamais son début — la musique est
-    /// recoupée à la fin absolue de la dernière case conservée et l'export
-    /// livre ce segment réduit. Faire échouer l'export ENTIER perdrait un
-    /// montage parfaitement exportable, ce que §66 ne demande nulle part. Si
-    /// la case en cause est la PREMIÈRE du segment, il ne reste aucun segment
-    /// exportable : `emptyPrefix`.
+    /// **Troncature §66.** Si un rush est devenu indisponible (reparti dans
+    /// iCloud, supprimé, photothèque révoquée) alors que l'export a déjà
+    /// commencé, l'assemblage S'ARRÊTE à la case précédente : le plan est
+    /// réduit (`ExportPlan.truncated(before:)`) — la case en cause, la fin de
+    /// SON run et TOUS les runs suivants sont abandonnés (décision documentée
+    /// sur `truncated(before:)` : livrer les runs d'après donnerait un montage
+    /// différent de celui annoncé par le résumé §56). Les cases conservées ne
+    /// bougent pas d'un tick, la musique du dernier run conservé est recoupée
+    /// à la fin absolue de sa dernière case, et l'export livre ce montage
+    /// réduit. Faire échouer l'export ENTIER perdrait un montage parfaitement
+    /// exportable, ce que §66 ne demande nulle part. Si la case en cause est
+    /// la TOUTE PREMIÈRE, il ne reste rien à exporter : `emptyPrefix`.
     private func assemble(project: ProjectSnapshot, plan: ExportPlan) async throws -> Assembly {
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(
@@ -713,25 +756,38 @@ struct ProjectExporter: Sendable {
             throw ExportError.exportFailed("Piste vidéo de composition impossible à créer.")
         }
 
+        // Positions FINALES calculées en une fois, dans l'ordre du montage :
+        // `runStarts` cumule les durées des runs en ticks entiers (§9), et
+        // c'est LE MÊME calcul que l'aperçu (`ReadyTimeline`).
+        var placements: [Placement] = []
+        placements.reserveCapacity(plan.slotCount)
+        for (run, runStart) in zip(plan.timeline.runs, plan.timeline.runStarts) {
+            for slot in run.slots {
+                placements.append(
+                    Placement(slot: slot, compositionStart: runStart + run.offset(of: slot))
+                )
+            }
+        }
+
         var segments: [Segment] = []
         var clips: [MasterClipInfo] = []
         var firstFacts: ClipFacts?
         var effectivePlan = plan
-        segments.reserveCapacity(plan.slots.count)
-        clips.reserveCapacity(plan.slots.count)
+        segments.reserveCapacity(placements.count)
+        clips.reserveCapacity(placements.count)
 
-        for (order, slot) in plan.slots.enumerated() {
+        for (order, placement) in placements.enumerated() {
             try checkCancellation() // §58 : annulation coopérative
             let facts: ClipFacts
             do {
                 facts = try await loadClipFacts(
-                    slot: slot,
+                    slot: placement.slot,
                     appearanceOrder: order,
                     projectID: project.projectID
                 )
             } catch let failure as ClipLoadFailure where failure.truncatesPlan {
                 // §66 : export LIMITÉ avant la case indisponible. `truncated`
-                // lève `emptyPrefix` si c'est la première case.
+                // lève `emptyPrefix` si c'est la toute première case.
                 effectivePlan = try plan.truncated(before: order)
                 logger.error(
                     "Rush indisponible en cours d'export (\(failure.identifier)) — "
@@ -744,25 +800,34 @@ struct ProjectExporter: Sendable {
             if firstFacts == nil { firstFacts = facts }
             segments.append(try insertVideo(
                 facts: facts,
-                slot: slot,
-                // Décalage du segment : la première case tombe à `.zero`.
-                // `plan` et `effectivePlan` partagent forcément le même
-                // `musicStart` (la troncature ne retire jamais la première
-                // case : `truncated(before: 0)` lève).
-                compositionStart: plan.compositionStart(of: slot),
+                slot: placement.slot,
+                // Position dans le montage concaténé. Elle est valable pour
+                // le plan COMPLET comme pour le plan tronqué : la troncature
+                // ne retire qu'un SUFFIXE, donc aucune case conservée ne
+                // change de place.
+                compositionStart: placement.compositionStart,
                 into: videoTrack
             ))
             clips.append(facts.info)
         }
 
-        // §53 : la musique est l'horloge maîtresse. Elle est prélevée sur
-        // `[musicStart, musicEnd]` du morceau — donc COUPÉE à la fin absolue
-        // de la dernière case exportée, celle du plan EFFECTIF — et posée à
-        // l'instant 0 de la composition.
+        // §53 : la musique est l'horloge maîtresse. UNE portion par RUN du
+        // plan EFFECTIF : `[run.musicStart, run.musicEnd]` du morceau, posée à
+        // la position de composition du run. La musique de la dernière zone
+        // conservée est donc coupée à la fin absolue de sa dernière case, et
+        // les passages des cases vides n'existent pas dans le fichier.
         let musicEnd = try await insertMusic(
             projectID: project.projectID,
-            sourceStart: effectivePlan.musicStart,
-            duration: effectivePlan.duration,
+            insertions: zip(
+                effectivePlan.timeline.runs,
+                effectivePlan.timeline.runStarts
+            ).map { (run, runStart) in
+                MusicInsertion(
+                    sourceStart: run.musicStart,
+                    duration: run.duration,
+                    compositionStart: runStart
+                )
+            },
             into: composition
         )
 
@@ -770,7 +835,7 @@ struct ProjectExporter: Sendable {
 
         // §52.1 : la géométrie est TOUJOURS celle du projet. Repli documenté
         // (identique à `PreviewBuilder`) si le verrou §49 n'a pas encore été
-        // posé : géométrie du premier rush du SEGMENT, calculée mais JAMAIS
+        // posé : géométrie du premier rush EXPORTÉ, calculée mais JAMAIS
         // persistée ici — le verrouillage reste la seule responsabilité du
         // store (§49 étapes 4 et 5).
         let geometry = project.geometry ?? fallbackGeometry(from: firstFacts)
@@ -787,7 +852,7 @@ struct ProjectExporter: Sendable {
     }
 
     /// Géométrie de repli quand le verrou §49 n'a pas encore été posé :
-    /// celle du PREMIER rush du segment (§49 : « le premier rush valide fixe
+    /// celle du PREMIER rush exporté (§49 : « le premier rush valide fixe
     /// la géométrie »). Calculée, jamais persistée ici.
     private func fallbackGeometry(from facts: ClipFacts?) -> ProjectGeometry {
         GeometryLock.geometry(
@@ -834,7 +899,7 @@ struct ProjectExporter: Sendable {
         projectID: UUID
     ) async throws -> ClipFacts {
         guard let assignment = slot.assignment else {
-            // Filtré par le calcul du segment : jamais atteint.
+            // Filtré par le calcul de la timeline : jamais atteint.
             throw ExportError.emptyPrefix
         }
         let identifier = assignment.assetLocalIdentifier
@@ -860,7 +925,7 @@ struct ProjectExporter: Sendable {
             // §54 étape 2 + §70 « Durée d'asset » : la durée RÉELLE, jamais la
             // métadonnée PhotoKit (« métadonnée arrondie mais durée réelle
             // insuffisante »). La durée exigée est celle de la CASE
-            // (`end - start`), indépendante du décalage du segment.
+            // (`end - start`), indépendante de sa position dans le montage.
             let assetDuration = try await asset.load(.duration)
             let slotDuration = slot.duration.cmTime // frontière §9
             guard assetDuration.isNumeric, assetDuration >= slotDuration else {
@@ -934,11 +999,12 @@ struct ProjectExporter: Sendable {
 
     /// Insère la vidéo d'une case dans la piste de composition (§54, étapes
     /// 4 et 5) :
-    /// 4. insérer `[0, slotDuration]` à `compositionStart`, c'est-à-dire au
-    ///    temps absolu de la case DÉCALÉ du début du segment
-    ///    (`slot.start - musicStart`, §53) — aucun clip n'est avancé pour
-    ///    combler un trou, et l'écart entre deux cases reste exactement celui
-    ///    de la musique ;
+    /// 4. insérer `[0, slotDuration]` à `compositionStart`, c'est-à-dire à la
+    ///    position de la case dans le montage concaténé
+    ///    (`position du run + slot.start - run.musicStart`, §53) — aucun clip
+    ///    n'est avancé pour combler un trou (les trous sont SUPPRIMÉS), et
+    ///    l'écart entre deux cases d'un même run reste exactement celui de la
+    ///    musique ;
     /// 5. ignorer les pistes audio source (aucune piste audio de rush n'est
     ///    créée : la seule piste audio est la musique du projet).
     ///
@@ -973,28 +1039,33 @@ struct ProjectExporter: Sendable {
         )
     }
 
-    /// Insère la PORTION `[sourceStart, sourceStart + duration]` de la musique
-    /// du projet à l'instant 0 de la composition (§53).
+    /// Insère les portions de musique du montage (§53) : pour chaque RUN, le
+    /// passage `[sourceStart, sourceStart + duration]` du morceau posé à la
+    /// position de composition du run.
     ///
-    /// Changement produit : `sourceStart` vaut `segment.musicStart`, plus
-    /// forcément zéro — le montage exporté peut commencer n'importe où dans
-    /// le morceau. La musique reste l'horloge maîtresse : c'est exactement le
-    /// passage que couvrent les cases du segment.
+    /// Changement produit : il y a UNE portion par zone remplie, et non plus
+    /// une seule portion continue. Les passages couverts par des cases vides
+    /// n'existent PAS dans le fichier exporté — c'est la demande « n'exporte
+    /// que les parties avec de la vidéo ». La musique est donc continue à
+    /// l'intérieur d'un run et SAUTE à chaque jonction : conséquence assumée.
+    /// Les portions sont JOINTIVES dans la composition (la position d'un run
+    /// est la somme des durées des précédents) : la piste audio n'a aucun
+    /// trou, et le montage ne commence jamais par du silence.
     ///
     /// La source est l'ORIGINAL inchangé (§11 `audio/original.<ext>`, §16.1 :
     /// « Conserver le fichier original inchangé pour la lecture et
     /// l'export ») — jamais le flux d'analyse normalisé (§16.2).
     ///
-    /// Rend la fin de la piste musicale dans la composition (la musique étant
-    /// posée à `.zero`, cette fin vaut la durée réellement insérée).
+    /// Rend la fin de la piste musicale dans la composition.
     @discardableResult
     private func insertMusic(
         projectID: UUID,
-        sourceStart: MediaTime,
-        duration: MediaTime,
+        insertions: [MusicInsertion],
         into composition: AVMutableComposition
     ) async throws -> CMTime {
-        guard duration.ticks > 0 else { throw ExportError.emptyPrefix }
+        guard insertions.contains(where: { $0.duration.ticks > 0 }) else {
+            throw ExportError.emptyPrefix
+        }
         guard let audioURL = fileStore.audioFileURL(projectID: projectID) else {
             throw ExportError.missingAudio
         }
@@ -1010,21 +1081,40 @@ struct ProjectExporter: Sendable {
                 throw ExportError.missingAudio
             }
 
-            // Frontière §9 : conversion en `CMTime` seulement ici.
-            var sourceRange = CMTimeRange(start: sourceStart.cmTime, duration: duration.cmTime)
             let audioDuration = try await audioAsset.load(.duration)
-            if audioDuration.isNumeric, sourceRange.end > audioDuration {
-                // Garde-fou : musique remplacée hors application. Jamais
-                // attendu — les cases sont engendrées À PARTIR de cette
-                // musique (§28).
-                sourceRange = CMTimeRange(start: sourceRange.start, end: audioDuration)
+            var musicEnd = CMTime.zero
+            for insertion in insertions {
+                // Frontière §9 : conversion en `CMTime` seulement ici.
+                var sourceRange = CMTimeRange(
+                    start: insertion.sourceStart.cmTime,
+                    duration: insertion.duration.cmTime
+                )
+                if audioDuration.isNumeric, sourceRange.end > audioDuration {
+                    // Garde-fou : musique remplacée hors application. Jamais
+                    // attendu — les cases sont engendrées À PARTIR de cette
+                    // musique (§28).
+                    sourceRange = CMTimeRange(start: sourceRange.start, end: audioDuration)
+                }
+                guard sourceRange.duration > .zero else {
+                    // Portion entièrement hors du fichier : la musique s'arrête
+                    // là. Les portions suivantes ne sont PAS insérées — elles
+                    // tomberaient après un trou et désynchroniseraient tout ce
+                    // qui suit.
+                    break
+                }
+                try musicTrack.insertTimeRange(
+                    sourceRange,
+                    of: sourceTrack,
+                    at: insertion.compositionStart.cmTime
+                )
+                let insertedRange = CMTimeRange(
+                    start: insertion.compositionStart.cmTime,
+                    duration: sourceRange.duration
+                )
+                musicEnd = CMTimeMaximum(musicEnd, insertedRange.end)
             }
-            guard sourceRange.duration > .zero else { throw ExportError.missingAudio }
-
-            // Posée à l'instant 0 : le montage exporté commence par le
-            // premier plan du segment, jamais par du silence.
-            try musicTrack.insertTimeRange(sourceRange, of: sourceTrack, at: .zero)
-            return sourceRange.duration
+            guard musicEnd > .zero else { throw ExportError.missingAudio }
+            return musicEnd
         } catch is CancellationError {
             throw ExportError.cancelled
         } catch let error as ExportError {
@@ -1085,10 +1175,12 @@ struct ProjectExporter: Sendable {
         // trou ni recouvrement. Chaque intervalle découvert reçoit une
         // instruction de fond opaque — JAMAIS un clip avancé (les clips ne
         // sont jamais déplacés les uns par rapport aux autres ; §53 : la
-        // musique reste l'horloge maîtresse). Les cases du SEGMENT sont
-        // jointives par construction (§28.1) et le décalage
-        // `slot.start - musicStart` fait tomber la première exactement à
-        // zéro : cette boucle est une ceinture de sécurité.
+        // musique reste l'horloge maîtresse). Les cases d'un RUN sont
+        // jointives par construction (§28.1), la position d'un run est la
+        // somme des durées des runs précédents et la première case tombe
+        // exactement à zéro : les instructions couvrent donc
+        // `[0, durée totale]` sans trou, jonctions comprises. Cette boucle est
+        // une ceinture de sécurité.
         var coveredUntil = CMTime.zero
         for segment in segments {
             if segment.timeRange.start > coveredUntil {

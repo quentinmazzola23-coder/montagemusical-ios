@@ -3,7 +3,7 @@
 //  MontageMusical
 //
 //  Lecteur de prévisualisation — Jalon 9, spec §47 (portées : aperçu local
-//  d'une case §47.1, aperçu principal du segment §47.2), §48 (composition
+//  d'une case §47.1, aperçu principal des zones exportées §47.2), §48 (composition
 //  mise en cache tant que les associations ne changent pas), §36 (dock
 //  contextuel ligne « Prévisualisation » : `[Retour] [Lecture/Pause]
 //  [Export]`), §64 (erreurs jamais silencieuses, états sobres français).
@@ -28,15 +28,21 @@
 //  écran d'assemblage (§10, §58), de sorte que le passage au statut
 //  `exporting` ne démonte ni cette feuille ni celle du résumé posée dessus.
 //
-//  ÉCART PRODUIT — EXPORT DU SEGMENT REMPLI (11 août 2026, demande
-//  utilisateur postérieure à la spécification ; détail dans
+//  ÉCART PRODUIT — EXPORT CONCATÉNÉ DES ZONES REMPLIES (13 août 2026,
+//  demande utilisateur postérieure à la spécification ; détail dans
 //  IMPLEMENTATION_STATUS.md). La portée §47.2 était le PRÉFIXE (depuis la
-//  case 0, arrêt au premier trou) ; c'est désormais le PREMIER SEGMENT
-//  CONTINU de cases prêtes, où qu'il commence. Le nom d'énumération
+//  case 0, arrêt au premier trou) ; c'est désormais la CONCATÉNATION de
+//  TOUTES les zones de cases prêtes — les cases vides ou non prêtes sont
+//  supprimées, vidéo et musique comprises. Le nom d'énumération
 //  `PreviewScope.contiguousPrefix` (domaine, hors périmètre de cette vue) est
 //  inchangé — seule sa RÈGLE a changé ; les TEXTES de cet écran, eux, parlent
-//  du segment : titre de la feuille fourni par `AssemblyView` (« Montage —
-//  plans 28 à 50 »), messages d'erreur §64 ci-dessous, hints du dock §36.
+//  des ZONES exportées : titre de la feuille fourni par `AssemblyView`
+//  (« Montage — plans 28 à 50 », « Montage — 19 plans en 2 zones »), messages
+//  d'erreur §64 ci-dessous, hints du dock §36.
+//
+//  L'aperçu montre donc EXACTEMENT ce que l'export produira, jonctions
+//  comprises : c'est le seul endroit où l'utilisateur peut entendre le saut de
+//  musique entre deux zones avant d'exporter.
 //
 
 import AVFoundation
@@ -51,8 +57,8 @@ import SwiftUI
 ///
 /// Contrat Jalon 9 : `PreviewPlayerView(projectID:scope:title:)` — présentée
 /// en `sheet` par `AssemblyView` (§47.1 aperçu local de la case active
-/// prête, §47.2 aperçu principal du segment) et par `ClipPickerView` (§46 :
-/// « Montage complet » → Fermer / Prévisualiser).
+/// prête, §47.2 aperçu principal des zones exportées) et par `ClipPickerView`
+/// (§46 : « Montage complet » → Fermer / Prévisualiser).
 ///
 /// Cycle de vie :
 /// 1. `.task` : instantané du projet (`ProjectStore.projectSnapshot`) → clé
@@ -271,12 +277,13 @@ struct PreviewPlayerView: View {
 
     /// Vrai si la portée AFFICHÉE est bien celle qui sera exportée.
     ///
-    /// - `.contiguousPrefix` (§47.2) : c'est exactement le SEGMENT exportable
-    ///   §51 — l'aperçu et l'export partagent `contiguousReadySegment(slots:)`
-    ///   (le nom de l'énumération date d'avant l'écart produit) ;
+    /// - `.contiguousPrefix` (§47.2) : ce sont exactement les ZONES
+    ///   exportables §51 — l'aperçu et l'export partagent
+    ///   `readyTimeline(slots:)` (le nom de l'énumération date d'avant l'écart
+    ///   produit) ;
     /// - `.complete` : portée demandée quand TOUTES les cases sont prêtes
-    ///   (§47.2) ; le segment couvre alors le projet entier, l'export
-    ///   produit donc rigoureusement le montage prévisualisé ;
+    ///   (§47.2) ; il n'y a alors qu'une zone, qui couvre le projet entier —
+    ///   l'export produit donc rigoureusement le montage prévisualisé ;
     /// - `.slot` (§47.1) : aperçu d'UNE case. L'export ne porte jamais sur un
     ///   plan isolé (§51) — le bouton reste désactivé, avec un hint qui le
     ///   dit plutôt que de laisser deviner.
@@ -287,17 +294,18 @@ struct PreviewPlayerView: View {
         }
     }
 
-    /// §51 « export désactivé si le résultat est vide » : un segment vide
-    /// fait échouer la construction avec `PreviewError.emptyScope` — donc un
-    /// lecteur PRÊT et sans erreur prouve que la portée contient au moins une
-    /// case. Aucune seconde lecture du projet n'est nécessaire pour le savoir.
+    /// §51 « export désactivé si le résultat est vide » : un montage sans
+    /// aucune zone fait échouer la construction avec
+    /// `PreviewError.emptyScope` — donc un lecteur PRÊT et sans erreur prouve
+    /// que la portée contient au moins une case. Aucune seconde lecture du
+    /// projet n'est nécessaire pour le savoir.
     private var canExport: Bool {
         isExportableScope && errorMessage == nil && player != nil
     }
 
     private var exportHint: String {
         if canExport {
-            return "Affiche le résumé de l'export du montage prévisualisé."
+            return "Affiche le résumé de l'export : les zones remplies que vous venez de voir."
         }
         if !isExportableScope {
             return "L'export porte sur le montage, pas sur un plan isolé."
@@ -398,9 +406,10 @@ struct PreviewPlayerView: View {
             "Une vidéo de ce montage est encore dans iCloud. Attendez la fin de son téléchargement, puis réessayez."
         case .incompletePrefix:
             // Nom de cas hérité (`PreviewError`, domaine hors périmètre) : la
-            // situation décrite est « une case du SEGMENT n'est pas prête »,
-            // pas « le début du montage » — le montage ne commence plus
-            // forcément à la case 0 (écart produit).
+            // situation décrite est « les zones prêtes ne couvrent pas TOUTES
+            // les cases » (portée `.complete`), pas « le début du montage
+            // manque » — le montage est fait de toutes les zones remplies,
+            // où qu'elles soient (écart produit).
             "Un plan de ce montage n'est pas encore prêt. Attendez la fin des téléchargements, puis réessayez."
         }
     }
@@ -528,10 +537,10 @@ struct PreviewPlayerView: View {
     return PreviewPlayerView(
         projectID: UUID(),
         scope: .contiguousPrefix,
-        // Titre tel que le compose `AssemblyView` depuis les bornes du
-        // segment (écart produit) — ici un projet vide : aucun plan prêt,
-        // l'écran affiche donc l'état §64 « Aperçu impossible ».
-        title: "Montage — plans prêts qui se suivent"
+        // Titre tel que le compose `AssemblyView` depuis les zones exportées
+        // (écart produit) — ici un projet vide : aucun plan prêt, l'écran
+        // affiche donc l'état §64 « Aperçu impossible ».
+        title: "Montage — zones remplies"
     )
     .environment(environment)
     .modelContainer(container)

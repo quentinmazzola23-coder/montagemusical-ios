@@ -8,7 +8,7 @@
 //  change lors du premier rush / si un asset devient indisponible ».
 //
 //  Trois familles de tests :
-//  - `scopeKey` : les trois portées §47 (case / segment continu / montage
+//  - `scopeKey` : les trois portées §47 (case / timeline concaténée / montage
 //    complet) sont des compositions DIFFÉRENTES, jamais interchangeables ;
 //  - `fingerprint` : change dès qu'un élément du montage change (association,
 //    rush, statut, frontière de case, géométrie) et RESTE IDENTIQUE pour un
@@ -227,8 +227,8 @@ final class PreviewCacheKeyTests: XCTestCase {
         )
     }
 
-    /// Une case vidée interrompt le segment exportable : l'empreinte doit le
-    /// voir.
+    /// Une case vidée est SUPPRIMÉE de la timeline exportable : l'empreinte
+    /// doit le voir.
     func testFingerprintChangesWhenSlotBecomesEmpty() {
         XCTAssertNotEqual(
             PreviewCacheKey.fingerprint(for: makeSnapshot()),
@@ -236,26 +236,78 @@ final class PreviewCacheKeyTests: XCTestCase {
         )
     }
 
-    /// CHANGEMENT PRODUIT : l'aperçu principal porte sur le SEGMENT continu
-    /// de cases prêtes, qui peut commencer n'importe où. Deux montages dont le
-    /// segment n'a PAS le même `musicStart` produisent des compositions
-    /// différentes (décalage `slot.start - musicStart` différent, portion de
-    /// musique différente) : la clé de cache doit les distinguer.
+    /// CHANGEMENT PRODUIT : l'aperçu principal porte sur la TIMELINE
+    /// concaténée des zones remplies. Deux montages dont la timeline diffère
+    /// produisent des compositions différentes (découpage en runs différent,
+    /// positions différentes, portions de musique différentes) : la clé de
+    /// cache doit les distinguer.
     ///
     /// C'est ce que garantit `fingerprint`, sans que la clé ait besoin de
-    /// porter le segment : le segment se déduit entièrement des statuts et des
-    /// frontières, tous deux déjà couverts.
-    func testFingerprintDistinguishesTwoDifferentReadySegments() {
-        // Cases 0 et 1 prêtes → segment [0, 1], musicStart = 0.
+    /// porter la timeline : celle-ci se déduit entièrement des index, des
+    /// frontières et des statuts, tous déjà couverts par l'empreinte.
+    func testFingerprintDistinguishesTwoDifferentTimelines() {
+        // Cases 0 et 1 prêtes → UN run [0, 1], montage de 2 000 ticks.
         let wholeMontage = makeSnapshot()
-        // Case 0 en téléchargement → segment [1] seul, musicStart = 1 000.
-        let shiftedSegment = makeSnapshot(firstStatus: .downloading)
+        // Case 0 en téléchargement → UN run [1] seul, montage de 1 000 ticks
+        // commençant à l'instant musical 1 000.
+        let shiftedTimeline = makeSnapshot(firstStatus: .downloading)
 
-        XCTAssertEqual(wholeMontage.contiguousReadySegment.musicStart, MediaTime(ticks: 0))
-        XCTAssertEqual(shiftedSegment.contiguousReadySegment.musicStart, MediaTime(ticks: 1_000))
+        XCTAssertEqual(wholeMontage.readyTimeline.slotCount, 2)
+        XCTAssertEqual(wholeMontage.readyTimeline.duration, MediaTime(ticks: 2_000))
+        XCTAssertEqual(shiftedTimeline.readyTimeline.slotCount, 1)
+        XCTAssertEqual(shiftedTimeline.readyTimeline.duration, MediaTime(ticks: 1_000))
+        XCTAssertEqual(
+            shiftedTimeline.readyTimeline.runs.first?.musicStart, MediaTime(ticks: 1_000)
+        )
         XCTAssertNotEqual(
             PreviewCacheKey(scope: .contiguousPrefix, snapshot: wholeMontage),
-            PreviewCacheKey(scope: .contiguousPrefix, snapshot: shiftedSegment)
+            PreviewCacheKey(scope: .contiguousPrefix, snapshot: shiftedTimeline)
+        )
+    }
+
+    /// Le cas le plus subtil : deux montages qui exportent EXACTEMENT les
+    /// mêmes cases, mais avec un DÉCOUPAGE EN RUNS différent — donc des
+    /// positions de composition et des portions de musique différentes. La
+    /// timeline n'étant PAS dans la clé, c'est l'empreinte seule qui doit les
+    /// séparer ; elle le fait parce que le statut de la case intercalée en
+    /// fait partie.
+    func testFingerprintDistinguishesTwoTimelinesWithTheSameSlotsButDifferentRuns() {
+        // Trois cases jointives de 1 000 ticks, la première et la dernière
+        // prêtes. La case du milieu est prête (un seul run) ou vide (deux
+        // runs) : mêmes cases exportées aux extrémités, montage différent.
+        func makeThreeSlotSnapshot(middleReady: Bool) -> ProjectSnapshot {
+            let slots = (0..<3).map { index in
+                makeSlot(
+                    id: UUID(uuidString: "CCCCCCCC-0000-0000-0000-00000000000\(index)")!,
+                    index: index,
+                    startTicks: Int64(index) * 1_000,
+                    endTicks: Int64(index + 1) * 1_000,
+                    assignment: index == 1 && !middleReady
+                        ? nil
+                        : makeAssignment(
+                            id: UUID(uuidString: "DDDDDDDD-0000-0000-0000-00000000000\(index)")!,
+                            assetIdentifier: "asset-\(index)"
+                        )
+                )
+            }
+            return ProjectSnapshot(projectID: Fixture.projectID, slots: slots, geometry: nil)
+        }
+
+        let oneRun = makeThreeSlotSnapshot(middleReady: true)
+        let twoRuns = makeThreeSlotSnapshot(middleReady: false)
+
+        XCTAssertEqual(oneRun.readyTimeline.runs.count, 1)
+        XCTAssertEqual(twoRuns.readyTimeline.runs.count, 2)
+        // La case 2 ne tombe pas au même endroit dans les deux montages.
+        XCTAssertEqual(
+            oneRun.readyTimeline.compositionStart(of: oneRun.slots[2]), MediaTime(ticks: 2_000)
+        )
+        XCTAssertEqual(
+            twoRuns.readyTimeline.compositionStart(of: twoRuns.slots[2]), MediaTime(ticks: 1_000)
+        )
+        XCTAssertNotEqual(
+            PreviewCacheKey(scope: .contiguousPrefix, snapshot: oneRun),
+            PreviewCacheKey(scope: .contiguousPrefix, snapshot: twoRuns)
         )
     }
 
