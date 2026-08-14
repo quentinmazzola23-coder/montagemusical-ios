@@ -328,11 +328,11 @@ struct ClipPickerView: View {
 
     /// Index de la case courante (avance automatiquement §46).
     @State private var currentSlotIndex: Int
-    /// `asset → index de cases (triés)` pour le badge et le dialogue §45.
+    /// `asset → index de cases (triés)` pour le badge « déjà utilisé » §42 —
+    /// seul signal de réutilisation depuis la suppression de la confirmation
+    /// §45 (écart produit).
     @State private var usedIndexesByAsset: [String: [Int]] = [:]
     @State private var progressModel = ClipPickerProgressModel()
-    @State private var reuseContext: ReuseContext?
-    @State private var isReusePresented = false
     @State private var activeAlert: PickerAlert?
     @State private var retrySelection: PendingSelection?
 
@@ -463,13 +463,6 @@ struct ClipPickerView: View {
     // MARK: - Contextes de dialogue
 
     // Non defini par la specification — definitions minimales V1.
-    private struct ReuseContext {
-        let summary: VideoAssetSummary
-        let slot: CurrentSlot
-        /// Index HUMAIN (1-based) du premier plan qui utilise déjà l'asset.
-        let firstUsedDisplayIndex: Int
-    }
-
     private struct PendingSelection {
         let summary: VideoAssetSummary
         let slot: CurrentSlot
@@ -553,20 +546,13 @@ struct ClipPickerView: View {
             stopCachingTask?.cancel()
             environment.thumbnailProvider.stopCachingAll()
         }
-        // §45 : réutilisation signalée, jamais interdite — confirmation simple.
-        .confirmationDialog(
-            Text("Déjà utilisé au plan \(reuseContext?.firstUsedDisplayIndex ?? 0)"),
-            isPresented: $isReusePresented,
-            titleVisibility: .visible,
-            presenting: reuseContext
-        ) { context in
-            Button("Réutiliser") {
-                beginSelection(context.summary, slot: context.slot)
-            }
-            Button("Annuler", role: .cancel) {}
-        } message: { context in
-            Text("Cette vidéo remplit déjà le plan \(context.firstUsedDisplayIndex). Vous pouvez la réutiliser volontairement.")
-        }
+        // ÉCART PRODUIT (demande utilisateur, 13 août 2026) : §45 prévoyait
+        // « demander une confirmation simple » avant de réutiliser un rush
+        // déjà employé. La confirmation est SUPPRIMÉE : le badge « déjà
+        // utilisé » de la cellule (§42) porte déjà l'information AVANT le
+        // toucher, et une boîte de dialogue à chaque réutilisation coupait
+        // l'enchaînement §46. La réutilisation reste donc signalée — jamais
+        // interdite, jamais confirmée.
         // Erreurs §43/§64 — jamais silencieuses.
         .alert(
             activeAlert?.title ?? "",
@@ -1072,22 +1058,11 @@ struct ClipPickerView: View {
             return
         }
 
-        // a. §45 : asset déjà utilisé AILLEURS → confirmation simple.
-        // La case courante est exclue : remplacer une case par sa propre
-        // vidéo n'est pas un doublon. Non defini par la specification —
-        // definition minimale V1.
-        let usedElsewhere = (usedIndexesByAsset[summary.localIdentifier] ?? [])
-            .filter { $0 != slot.index }
-        if let firstIndex = usedElsewhere.first {
-            reuseContext = ReuseContext(
-                summary: summary,
-                slot: slot,
-                firstUsedDisplayIndex: firstIndex + 1 // index humain §45
-            )
-            isReusePresented = true
-            return
-        }
-
+        // a. Réutilisation : DIRECTE (écart produit — voir le commentaire de
+        // la vue). Un rush déjà employé ailleurs porte son badge « déjà
+        // utilisé » dans la grille (§42) : l'utilisateur le voit avant de
+        // toucher, la confirmation §45 n'apportait rien et interrompait
+        // l'enchaînement §46.
         beginSelection(summary, slot: slot)
     }
 

@@ -67,8 +67,10 @@ enum ProjectRestore {
 ///   (titre automatique §10, jamais d'écran de nommage §89) puis ouvre
 ///   immédiatement la timeline (§31).
 /// - Actions secondaires par swipe : renommer, dupliquer, supprimer (§31).
-/// - Suppression avec confirmation si le projet a du contenu (musique,
-///   associations ou export) ; sinon suppression directe (§31).
+/// - Suppression IMMÉDIATE, sans confirmation (écart produit du 13 août 2026
+///   demandé par l'utilisateur ; §31 prévoyait une confirmation dès que le
+///   projet avait du contenu). Définitive et sans annulation — voir
+///   `requestDelete`.
 /// - Un brouillon sans musique est supprimé au retour à l'accueil (§31),
 ///   détecté via `.onChange` du chemin de navigation.
 /// - Règle du pouce §30 : aucune action obligatoire en haut de l'écran.
@@ -133,9 +135,8 @@ struct ProjectListView: View {
     @State private var renameText = ""
     @State private var isRenamePresented = false
 
-    // Suppression (§31) : confirmation seulement si le projet a du contenu.
-    @State private var deleteTargetID: UUID?
-    @State private var isDeleteConfirmationPresented = false
+    // La suppression est IMMÉDIATE (écart produit — voir `requestDelete`) :
+    // plus aucun état de confirmation à porter.
 
     /// Anti double-tap sur « + » : une seule création à la fois.
     @State private var isCreatingProject = false
@@ -179,33 +180,21 @@ struct ProjectListView: View {
             } message: {
                 Text("Laissez le champ vide pour revenir au titre automatique.")
             }
-            .confirmationDialog(
-                "Supprimer ce projet ?",
-                isPresented: $isDeleteConfirmationPresented,
-                titleVisibility: .visible
-            ) {
-                Button("Supprimer le projet", role: .destructive) {
-                    confirmDelete()
-                }
-                Button("Annuler", role: .cancel) {
-                    deleteTargetID = nil
-                }
-            } message: {
-                // §31 : la suppression retire métadonnées, analyses, previews
-                // et temporaires du sandbox — jamais les rushs de Photos (§69A).
-                Text("La musique, les associations et les exports de ce projet seront supprimés. Vos vidéos dans Photos ne seront pas touchées.")
-            }
+            // ÉCART PRODUIT (13 août 2026) : le dialogue de confirmation de
+            // suppression §31 a été SUPPRIMÉ sur demande de l'utilisateur —
+            // supprimer, c'est supprimer. Voir `requestDelete`.
         }
         // §62/§64 : une action qui échoue est EXPLIQUÉE, avec la suite à
         // donner — jamais un bouton silencieux.
         //
         // Revue finale (§62/§64) — ALERTE ATTACHÉE AU `NavigationStack`, PAS
-        // À SON CONTENU. Une suppression en échec demandait son alerte dans
-        // le MÊME cycle que la fermeture du `confirmationDialog` posé sur la
-        // même vue : la présentation qui se termine avalait celle qui
-        // commençait, et l'échec devenait silencieux — exactement ce que
-        // §62/§64 interdisent. Portée par une vue DIFFÉRENTE (le conteneur),
-        // l'alerte ne concourt plus avec le dialogue.
+        // À SON CONTENU. Elle concourait autrefois avec le dialogue de
+        // confirmation de suppression posé sur la même vue : la présentation
+        // qui se terminait avalait celle qui commençait, et l'échec devenait
+        // silencieux. Ce dialogue a disparu (suppression immédiate), mais
+        // l'alerte reste portée par le conteneur : elle ne peut alors
+        // concourir avec AUCUNE présentation du contenu (renommage, feuilles
+        // futures).
         .alert("Action impossible", isPresented: $isActionErrorPresented) {
             Button("OK", role: .cancel) {
                 actionErrorMessage = nil
@@ -513,29 +502,20 @@ struct ProjectListView: View {
         }
     }
 
-    /// Suppression (§31) : confirmation uniquement si le projet contient une
-    /// musique, des associations ou un export (`hasContent`).
+    /// Suppression IMMÉDIATE.
+    ///
+    /// ÉCART PRODUIT (demande utilisateur, 13 août 2026) : §31 demandait une
+    /// confirmation dès que le projet contenait une musique, des associations
+    /// ou un export. L'utilisateur a demandé que la suppression soit directe
+    /// dans TOUTE l'application. Le geste de swipe reste délibéré (il faut
+    /// balayer la carte puis toucher « Supprimer »), et l'action porte le
+    /// rôle destructif d'iOS.
+    ///
+    /// CONSÉQUENCE ASSUMÉE : la suppression est DÉFINITIVE et sans annulation
+    /// — musique importée, analyse, partitions, associations et exports du
+    /// projet disparaissent (§69A : uniquement les fichiers créés par
+    /// l'application ; les rushs de Photos ne sont JAMAIS touchés).
     private func requestDelete(_ projectID: UUID) {
-        Task {
-            do {
-                let summary = try await environment.projectStore.summary(id: projectID)
-                if summary?.hasContent == true {
-                    deleteTargetID = projectID
-                    isDeleteConfirmationPresented = true
-                } else {
-                    try await environment.projectStore.delete(projectID: projectID)
-                    forgetLastOpenedProject(projectID)
-                }
-            } catch {
-                environment.logger.error("Suppression impossible : \(error.localizedDescription)")
-                present(error: Self.deleteFailureMessage)
-            }
-        }
-    }
-
-    private func confirmDelete() {
-        guard let projectID = deleteTargetID else { return }
-        deleteTargetID = nil
         Task {
             do {
                 try await environment.projectStore.delete(projectID: projectID)

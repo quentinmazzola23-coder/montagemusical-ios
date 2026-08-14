@@ -26,6 +26,21 @@
 
 ---
 
+## Écart produit — plus aucune confirmation (13 août 2026)
+
+**Changement de PRODUIT demandé par l'utilisateur, postérieur à la spécification v1.0.**
+
+Deux boîtes de dialogue ont été supprimées ; l'action est désormais immédiate dans les deux cas.
+
+| Ce que disait la spec | Ce que fait le produit | Pourquoi |
+|---|---|---|
+| §45 : un rush déjà utilisé est signalé et « demande une confirmation simple » avant réutilisation | La réutilisation est **directe**. Le badge « déjà utilisé » de la cellule (§42) reste le signal, visible AVANT le toucher | Le dialogue arrivait après coup et coupait l'enchaînement §46 (la photothèque reste ouverte et passe à la case suivante) |
+| §31 : la suppression d'un projet « demande confirmation si le projet contient une musique, des associations ou un export » | La suppression est **immédiate**, quel que soit le contenu | Demande explicite : « suppression = direct suppression ». Le swipe reste un geste délibéré et le bouton garde le rôle destructif d'iOS |
+
+**Conséquence assumée** : la suppression d'un projet est DÉFINITIVE et sans annulation — musique importée, analyse, partitions, associations et exports disparaissent. Ce qui ne change pas (§69A) : seuls les fichiers créés par l'application sont supprimés ; **les rushs de la photothèque ne sont jamais touchés**.
+
+Aucun autre dialogue de confirmation ne subsiste dans l'application (vérifié par recherche : plus aucun `confirmationDialog`). L'alerte « Rythme verrouillé » (§65) n'est pas une confirmation mais un refus assorti d'une issue (dupliquer) : elle est conservée.
+
 ## Écart produit — export concaténé des zones remplies (13 août 2026)
 
 **Ceci n'est pas un écart d'implémentation : c'est un changement de PRODUIT demandé par l'utilisateur, postérieur à la spécification v1.0.** La spécification n'a pas été mise à jour ; cette section fait foi là où elle la contredit.
