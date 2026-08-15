@@ -188,6 +188,17 @@ final class ScoreGenerationPipelineTests: XCTestCase {
         let (family, result) = try await makeClickTrackFamily()
         let configuration = ScoreConfiguration.production
 
+        // La famille recopie la version d'analyse du résultat source, et
+        // celle-ci est désormais la version de SCHÉMA (§12) et non la version
+        // de moteur : c'est elle que `ScoreLibrary` compare pour la validité
+        // §61, de sorte qu'un incrément de moteur ne périme plus les
+        // partitions de tous les projets (§69).
+        XCTAssertEqual(
+            family.analysisVersion, DeterministicMusicAnalyzer.analysisSchemaVersion,
+            "EditScoreFamily.analysisVersion doit porter la version de SCHÉMA d'analyse"
+        )
+        XCTAssertEqual(family.analysisVersion, result.version)
+
         // Trois partitions valides : frontières triées, pas de trous,
         // durées ≥ planchers §28.2, fin absolue == result.duration.
         assertValidScore(family.fluid, mode: .fluid, duration: result.duration, configuration: configuration)

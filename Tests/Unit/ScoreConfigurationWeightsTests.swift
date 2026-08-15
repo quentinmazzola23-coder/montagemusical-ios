@@ -54,8 +54,9 @@ final class ScoreConfigurationWeightsTests: XCTestCase {
     /// - 10 s : beat pur (rhythmicStrength ; structural = 0) ;
     /// - 15 s : beat en zone neutre (novelty — courbe plate 0,2 ;
     ///   inhibition nulle : stabilité 0,5, pas d'impact avant 35 s) ;
-    /// - 20 s : frontière de section (structuralStrength ; le survivant de
-    ///   la fusion est le candidat de section, composante rythmique 0) ;
+    /// - 20 s : frontière de section (structuralStrength ; l'ancre est
+    ///   CO-LOCALISÉE avec un beat et porte donc AUSSI sa composante
+    ///   rythmique 0,7 — le témoin « non concerné » y est `resolutionValue`) ;
     /// - 25,6 s : release (resolutionValue ; hors grille des beats) ;
     /// - 30 s : beat sur la marche d'énergie 0,3 → 0,7 (contrast) ;
     /// - 34 s : beat 1 s avant l'impact (expectedFutureValue) ;
@@ -234,11 +235,15 @@ final class ScoreConfigurationWeightsTests: XCTestCase {
     }
 
     func testStructuralStrengthWeight() throws {
-        // Frontière de section à 20 s : le survivant de la fusion est le
-        // candidat structurel (rang 0), composante rythmique nulle.
+        // Frontière de section à 20 s, CO-LOCALISÉE avec un beat : depuis
+        // la fusion des candidats co-localisés, l'ancre porte les DEUX
+        // composantes (structural 0,8 du bord de section, rhythmic 0,7 du
+        // beat) au lieu d'élire un survivant. Le témoin « non concerné » ne
+        // peut donc plus être `rhythmicStrength` — c'est `resolutionValue`
+        // qui est nul ici (le seul release de l'analyse est à 25,6 s).
         try assertWeight(
             at: tick(20), increases: true,
-            varying: \.structuralStrength, unaffectedBy: \.rhythmicStrength
+            varying: \.structuralStrength, unaffectedBy: \.resolutionValue
         )
     }
 
@@ -331,5 +336,186 @@ final class ScoreConfigurationWeightsTests: XCTestCase {
             highAgain.percussive.slots.map(\.start.ticks),
             "Deux générations identiques doivent produire les mêmes frontières"
         )
+    }
+
+    // MARK: - Ancres CO-LOCALISÉES : fusion des composantes, pas d'élection
+
+    /// Analyse dédiée à la co-localisation — 20 s à 120 BPM :
+    /// - beats tous les 0,5 s, force 0,7, confiance **0,95** (cohérence des
+    ///   intervalles) ;
+    /// - mesures de 2 s (downbeats à 0, 2, 4… s) de confiance **0,08** —
+    ///   l'ordre de grandeur réel d'une marge inter-hypothèses de métrique ;
+    /// - sections `[0 s, 9 s]` et `[9 s, 20 s]` : la frontière de 9 s tombe
+    ///   sur un beat mais PAS sur un downbeat ;
+    /// - courbes plates : nouveauté 0,2, énergie 0,5, stabilité 0,5, aucun
+    ///   impact — donc contraste, anticipation et inhibition tous nuls, et
+    ///   l'utilité se réduit à `rhythmic + structural + 0,2 − (1 − confiance)`.
+    private func makeColocationAnalysis() -> MusicAnalysisResult {
+        let durationSeconds = 20.0
+        let duration = time(durationSeconds)
+
+        var beats: [BeatEvent] = []
+        var beatTime = 0.0
+        while beatTime < durationSeconds {
+            beats.append(BeatEvent(time: time(beatTime), strength: 0.7, confidence: 0.95))
+            beatTime += 0.5
+        }
+
+        // Mesures de 4 temps : leur `start` EST un temps de la grille.
+        var bars: [BarEvent] = []
+        var barIndex = 0
+        while Double(barIndex + 1) * 2.0 <= durationSeconds {
+            bars.append(BarEvent(
+                start: time(Double(barIndex) * 2.0),
+                end: time(Double(barIndex + 1) * 2.0),
+                index: barIndex,
+                confidence: 0.08
+            ))
+            barIndex += 1
+        }
+
+        var units: [StructuralUnit] = [StructuralUnit(
+            id: UUID(), parentID: nil, level: .globalArc,
+            start: .zero, end: duration, repetitionGroupID: nil,
+            boundaryStrengthIn: 1, boundaryStrengthOut: 1,
+            descriptors: neutralDescriptors(), confidence: 0.9
+        )]
+        let sectionEdges = [0.0, 9.0, 20.0]
+        for index in 0..<(sectionEdges.count - 1) {
+            units.append(StructuralUnit(
+                id: UUID(), parentID: nil, level: .section,
+                start: time(sectionEdges[index]), end: time(sectionEdges[index + 1]),
+                repetitionGroupID: nil,
+                boundaryStrengthIn: 0.8, boundaryStrengthOut: 0.8,
+                descriptors: neutralDescriptors(), confidence: 0.85
+            ))
+        }
+
+        var energyCurve: [TimedValue] = []
+        var noveltyCurve: [TimedValue] = []
+        var stabilityCurve: [TimedValue] = []
+        var flatHalf: [TimedValue] = []
+        var regularityCurve: [TimedValue] = []
+        var zeroCurve: [TimedValue] = []
+        var sampleTime = 0.0
+        while sampleTime <= durationSeconds {
+            let instant = time(sampleTime)
+            energyCurve.append(TimedValue(time: instant, value: 0.5))
+            noveltyCurve.append(TimedValue(time: instant, value: 0.2))
+            stabilityCurve.append(TimedValue(time: instant, value: 0.5))
+            flatHalf.append(TimedValue(time: instant, value: 0.5))
+            regularityCurve.append(TimedValue(time: instant, value: 0.8))
+            zeroCurve.append(TimedValue(time: instant, value: 0))
+            sampleTime += 0.5
+        }
+
+        let hypothesisID = UUID()
+        return MusicAnalysisResult(
+            version: 1,
+            duration: duration,
+            rhythmHypotheses: [RhythmHypothesis(
+                id: hypothesisID, tempoBPM: 120, tempoCurve: [],
+                meterNumerator: 4, meterDenominator: 4,
+                phaseOffset: .zero, probability: 0.9,
+                halfTimeRelation: nil, doubleTimeRelation: nil
+            )],
+            selectedRhythmHypothesisID: hypothesisID,
+            beats: beats,
+            bars: bars,
+            structuralUnits: units,
+            functionalStates: [],
+            musicalEvents: [],
+            eventRelations: [],
+            continuousCurves: ContinuousCurves(
+                energy: energyCurve, density: flatHalf,
+                tension: zeroCurve, novelty: noveltyCurve,
+                stability: stabilityCurve, regularity: regularityCurve,
+                vocalPresence: zeroCurve, bassPresence: flatHalf
+            ),
+            analysisConfidence: ConfidenceBreakdown(
+                overall: 0.8, rhythm: 0.85, structure: 0.75, functions: 0.5
+            )
+        )
+    }
+
+    /// Deux candidats au tick EXACT d'un downbeat (l'ancre de mesure, rang 2,
+    /// et l'ancre de beat, rang 3) ne s'éliminent plus : ils fusionnent
+    /// composante par composante.
+    ///
+    /// Avant correctif, le classement par `hierarchyRank` AVANT `finalUtility`
+    /// faisait gagner la mesure, qui portait la marge inter-hypothèses de
+    /// métrique (0,08 ici) au lieu de la cohérence des intervalles (0,95).
+    /// Avec `uncertaintyPenalty` = 1, l'ancre de downbeat valait
+    /// `0,9 − 0,92 = −0,02` contre `0,9 − 0,05 = 0,85` pour le beat qu'elle
+    /// remplaçait : chaque début de mesure devenait l'ancre la PLUS FAIBLE du
+    /// niveau beat et le générateur évitait de couper sur le « 1 ».
+    ///
+    /// **Règle testée : une frontière de mesure ne vaut jamais MOINS que le
+    /// beat qu'elle remplace.** Aujourd'hui elle vaut exactement autant —
+    /// la source `downbeat` n'apporte aucune composante d'attraction propre
+    /// (`rhythmic` = force du beat co-localisé, `structural` = 0) — d'où
+    /// l'égalité stricte vérifiée en plus de l'inégalité.
+    func testColocatedDownbeatIsNeverWeakerThanTheBeatItReplaces() throws {
+        let field = AnchorFieldBuilder().build(
+            from: makeColocationAnalysis(), configuration: .production
+        )
+
+        // Un seul point de coupe à 4 s : les deux candidats ont fusionné.
+        XCTAssertEqual(field.anchors.filter { $0.center.ticks == tick(4) }.count, 1,
+                       "Deux candidats co-localisés doivent produire UNE ancre")
+
+        let downbeat = try XCTUnwrap(field.anchors.first { $0.center.ticks == tick(4) })
+        let pureBeat = try XCTUnwrap(field.anchors.first { $0.center.ticks == tick(4.5) })
+
+        // Rang le plus fort conservé (2 = downbeat, contre 3 = beat).
+        XCTAssertEqual(downbeat.hierarchyRank, 2)
+        XCTAssertEqual(pureBeat.hierarchyRank, 3)
+
+        // MAXIMUM des confiances : 0,95 (le beat) et non 0,08 (la mesure).
+        XCTAssertEqual(downbeat.confidence, 0.95, accuracy: 1e-12,
+                       "La confiance fusionnée doit être le MAXIMUM des confiances")
+
+        XCTAssertGreaterThanOrEqual(
+            downbeat.finalUtility, pureBeat.finalUtility,
+            "Une frontière de mesure ne doit JAMAIS valoir moins que le beat qu'elle remplace"
+        )
+        XCTAssertEqual(downbeat.finalUtility, pureBeat.finalUtility, accuracy: 1e-12,
+                       "Égalité attendue : la source downbeat n'ajoute aucune attraction propre")
+
+        // Raisons cumulées, et une SEULE mention de confiance, en dernier
+        // (§29) — la fusion amont supprime la duplication que produisait le
+        // cumul des raisons après évaluation.
+        XCTAssertTrue(downbeat.reasons.contains("Downbeat fort"))
+        XCTAssertTrue(downbeat.reasons.contains("Beat"))
+        XCTAssertEqual(downbeat.reasons.filter { $0.hasPrefix("Confiance ") }.count, 1)
+        XCTAssertEqual(downbeat.reasons.last, "Confiance 0,95")
+    }
+
+    /// Même mécanisme pour une frontière de SECTION posée sur un beat
+    /// (9 s) : l'ancre cumule `structural` 0,8 et `rhythmic` 0,7 au lieu de
+    /// perdre la composante rythmique du candidat évincé. La hiérarchie
+    /// d'utilité section > beat devient donc STRICTE, et non plus dépendante
+    /// du seul rang.
+    func testColocatedSectionBoundaryKeepsTheBeatRhythmicComponent() throws {
+        let field = AnchorFieldBuilder().build(
+            from: makeColocationAnalysis(), configuration: .production
+        )
+
+        let section = try XCTUnwrap(field.anchors.first { $0.center.ticks == tick(9) })
+        let pureBeat = try XCTUnwrap(field.anchors.first { $0.center.ticks == tick(9.5) })
+
+        XCTAssertEqual(section.hierarchyRank, 0, "Le rang le plus fort du groupe est conservé")
+        XCTAssertTrue(field.majorAnchorIDs.contains(section.id))
+        XCTAssertTrue(section.reasons.contains("Nouvelle section"))
+        XCTAssertTrue(section.reasons.contains("Beat"),
+                      "La composante du beat co-localisé ne doit pas disparaître")
+
+        // attraction = rhythmic 0,7 + structural 0,8 + novelty 0,2 = 1,7 ;
+        // uncertainty = 1 − max(0,85 ; 0,95) = 0,05 → utilité 1,65.
+        // Avant correctif, le candidat de section évinçait le beat et
+        // l'attraction tombait à 1,0 (utilité 0,85, soit celle du beat seul).
+        XCTAssertEqual(section.finalUtility, 1.65, accuracy: 1e-9)
+        XCTAssertGreaterThan(section.finalUtility, pureBeat.finalUtility + 0.5,
+                             "Une frontière de section doit dominer nettement un beat ordinaire")
     }
 }

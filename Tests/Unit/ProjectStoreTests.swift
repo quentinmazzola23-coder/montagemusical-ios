@@ -405,6 +405,76 @@ final class ProjectStoreTests: XCTestCase {
         )
     }
 
+    /// Filet de sécurité : une base VIDE face à des dossiers §11 PLEINS ne
+    /// déclenche AUCUNE suppression.
+    ///
+    /// Scénario réel couvert (le plus grave du lot) : un
+    /// `AppEnvironment(modelContainer: .makeInMemory())` — preview enrichie,
+    /// test d'intégration — associé à la racine de fichiers de PRODUCTION,
+    /// suivi du `performStartupMaintenance()` que `MontageMusicalApp` lance
+    /// au démarrage. `knownIDs` est alors vide, `projectDirectoryIDs()` est
+    /// plein, et la purge des « orphelins » effaçait `audio/`, `analysis/` et
+    /// `exports/` de TOUS les vrais projets, dont les enregistrements
+    /// SwiftData survivaient — perte de données silencieuse et irréversible.
+    ///
+    /// Cette signature ne peut pas être celle d'un utilisateur ayant supprimé
+    /// tous ses projets : `delete(projectID:)` supprime l'enregistrement ET
+    /// le dossier dans la même opération, une interruption ne pouvant laisser
+    /// qu'un sous-ensemble strict de dossiers orphelins.
+    func testStartupMaintenanceNeverPurgesWhenDatabaseIsEmptyButDirectoriesExist() async throws {
+        // Deux projets « réels » sur disque, aucun enregistrement en base.
+        let firstID = UUID()
+        let secondID = UUID()
+        try fileStore.createDirectories(for: firstID)
+        try fileStore.createDirectories(for: secondID)
+        // Témoin de contenu précieux : une analyse en cache (§69).
+        let cachedAnalysis = fileStore.subdirectoryURL(.analysis, for: firstID)
+            .appending(path: "analysis-v1.json")
+        try Data("{\"version\":1}".utf8).write(to: cachedAnalysis)
+
+        let summariesBefore = try await store.summaries()
+        XCTAssertTrue(summariesBefore.isEmpty, "Prérequis : conteneur en mémoire vide")
+
+        try await store.performStartupMaintenance()
+
+        for projectID in [firstID, secondID] {
+            XCTAssertTrue(
+                FileManager.default.fileExists(
+                    atPath: fileStore.directory(for: projectID).path(percentEncoded: false)
+                ),
+                "Aucun dossier ne doit être supprimé quand la base est vide (conteneur non peuplé)"
+            )
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: cachedAnalysis.path(percentEncoded: false)),
+            "Le contenu des dossiers doit être strictement intact — analyse en cache comprise (§69)"
+        )
+    }
+
+    /// Contre-épreuve : dès qu'AU MOINS un projet existe en base, la purge
+    /// reprend son travail normal (§69A). La garde ci-dessus ne doit pas
+    /// désactiver la maintenance, seulement le cas « base vide ».
+    func testStartupMaintenanceStillPurgesOrphansWhenDatabaseIsNotEmpty() async throws {
+        let realID = try await store.createDraft()
+        try await store.setStatus(.analyzing, projectID: realID)
+        let orphanID = UUID()
+        try fileStore.createDirectories(for: orphanID)
+
+        try await store.performStartupMaintenance()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: fileStore.directory(for: orphanID).path(percentEncoded: false)
+            ),
+            "Base non vide → l'orphelin est bien supprimé (§69A)"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: fileStore.directory(for: realID).path(percentEncoded: false)
+            )
+        )
+    }
+
     // MARK: - Fabriques
 
     private func makeSlotRecord(

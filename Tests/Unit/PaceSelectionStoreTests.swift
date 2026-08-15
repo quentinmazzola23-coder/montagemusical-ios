@@ -13,7 +13,12 @@
 //    restent INTACTES (§65, §89 : jamais de mutation destructive) ;
 //  - `ScoreLibrary` : round-trip `analysis/scores-v1.json` + validité §61
 //    via `scores-meta-v1.json` (version du générateur + empreinte de
-//    configuration partagée `ScoreConfigurationFingerprint`) ;
+//    configuration partagée `ScoreConfigurationFingerprint` + version de
+//    SCHÉMA d'analyse) ;
+//  - §69 : la version de MOTEUR d'analyse est tracée dans la méta mais ne
+//    périme PAS les partitions — sans quoi la moindre correction de bug du
+//    moteur imposerait un recalcul à tous les projets de tous les
+//    utilisateurs ;
 //  - §61 « version du modèle Core ML » : champ `coreMLModelVersion` tracé,
 //    absent du JSON quand il vaut `nil` (aucun modèle embarqué §29A), et
 //    décodage TOLÉRANT d'une méta écrite avant l'ajout du champ — un projet
@@ -262,21 +267,104 @@ final class PaceSelectionStoreTests: XCTestCase {
         XCTAssertNil(library.loadScores(projectID: projectID), "Fichier illisible → nil")
     }
 
-    func testScoreLibraryAnalysisVersionMismatchIsStale() throws {
+    func testScoreLibraryAnalysisSchemaVersionMismatchIsStale() throws {
         let projectID = UUID()
         try fileStore.createDirectories(for: projectID)
         try writeScores(makeFamily(), projectID: projectID)
         try writeMeta(
             generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
-            analysisVersion: DeterministicMusicAnalyzer.engineVersion + 1,
+            analysisVersion: DeterministicMusicAnalyzer.analysisSchemaVersion + 1,
             projectID: projectID
         )
 
         let library = ScoreLibrary(fileStore: fileStore)
         XCTAssertFalse(
             library.scoresAreCurrent(projectID: projectID),
-            "Moteur d'analyse ayant évolué → partitions périmées (§61)"
+            "SCHÉMA d'analyse ayant évolué → partitions périmées (§61) : elles ont été tirées d'un document d'une autre forme"
+        )
+    }
+
+    // MARK: - §61/§69 : la version de MOTEUR ne périme plus les partitions
+
+    /// Remplace l'ancien test « moteur d'analyse ayant évolué → périmé ».
+    /// La propriété a changé volontairement, et c'est le cœur du correctif :
+    /// tant que `ScoreLibrary` comparait `analysisVersion` à
+    /// `engineVersion`, tout incrément du moteur — jusqu'à la plus petite
+    /// correction de bug — périmait d'un seul coup le cache d'analyse ET les
+    /// partitions de TOUS les projets de TOUS les utilisateurs. La promesse
+    /// §69 (« une nouvelle partition ne doit pas obligatoirement redécoder la
+    /// musique ») ne couvrait alors que le cas rare (changement de
+    /// `ScoreConfiguration`) et tombait exactement dans le cas fréquent.
+    ///
+    /// Ce test fige la nouvelle règle : ce qui périme une partition, c'est le
+    /// SCHÉMA du résultat d'analyse, le générateur ou sa configuration —
+    /// jamais la version d'algorithme, qui reste TRACÉE dans la méta.
+    func testScoresStayCurrentWhateverTheAnalysisEngineVersionTraced() throws {
+        // Garde-fou : les deux axes doivent rester distincts, sinon ce test
+        // ne prouverait rien (il coïnciderait avec le précédent).
+        XCTAssertNotEqual(
+            DeterministicMusicAnalyzer.analysisSchemaVersion,
+            DeterministicMusicAnalyzer.engineVersion,
+            "Schéma et moteur sont deux axes de version distincts"
+        )
+
+        let projectID = UUID()
+        try fileStore.createDirectories(for: projectID)
+        try writeScores(makeFamily(), projectID: projectID)
+
+        // Méta produite par un moteur ANCIEN (v2) et par un moteur FUTUR
+        // (v+1) : dans les deux cas le schéma est le bon, donc les partitions
+        // restent à jour — aucune régénération imposée à un projet terminé.
+        for tracedEngineVersion in [2, DeterministicMusicAnalyzer.engineVersion + 1] {
+            try writeMeta(
+                generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+                configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
+                analysisEngineVersion: tracedEngineVersion,
+                projectID: projectID
+            )
+            let library = ScoreLibrary(fileStore: fileStore)
+            XCTAssertTrue(
+                library.scoresAreCurrent(projectID: projectID),
+                "Moteur v\(tracedEngineVersion) : la version d'ALGORITHME est tracée, jamais discriminante (§61, §69)"
+            )
+        }
+
+        // Et la trace est bien relue telle qu'écrite (explicabilité §29 :
+        // « quel moteur a produit ce montage ? »).
+        let url = fileStore.directory(for: projectID)
+            .appending(path: AudioAnalysisActor.scoresMetaRelativePath)
+        let meta = try JSONDecoder().decode(ScoresMeta.self, from: Data(contentsOf: url))
+        XCTAssertEqual(meta.analysisEngineVersion, DeterministicMusicAnalyzer.engineVersion + 1)
+        XCTAssertEqual(meta.analysisVersion, DeterministicMusicAnalyzer.analysisSchemaVersion)
+    }
+
+    /// Migration : les `scores-meta-v1.json` écrits AVANT le découplage ne
+    /// portent pas `analysisEngineVersion` — leur décodage doit rester
+    /// possible (le champ est optionnel), et leur verdict de validité ne doit
+    /// dépendre que des trois clés historiques.
+    func testLegacyScoresMetaWithoutEngineVersionStaysReadable() throws {
+        let projectID = UUID()
+        try fileStore.createDirectories(for: projectID)
+        try writeScores(makeFamily(), projectID: projectID)
+        try writeMeta(
+            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
+            analysisEngineVersion: nil,
+            projectID: projectID
+        )
+
+        let url = fileStore.directory(for: projectID)
+            .appending(path: AudioAnalysisActor.scoresMetaRelativePath)
+        let raw = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        XCTAssertFalse(
+            raw.contains("analysisEngineVersion"),
+            "Version de moteur nulle → clé absente du JSON, forme identique aux métas déjà sur disque"
+        )
+        let library = ScoreLibrary(fileStore: fileStore)
+        XCTAssertTrue(
+            library.scoresAreCurrent(projectID: projectID),
+            "L'ajout du champ de trace ne périme AUCUN projet existant (§61)"
         )
     }
 
@@ -296,7 +384,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         let withoutModel = ScoresMeta(
             generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
             configurationFingerprint: "empreinte",
-            analysisVersion: DeterministicMusicAnalyzer.engineVersion,
+            analysisVersion: DeterministicMusicAnalyzer.analysisSchemaVersion,
             coreMLModelVersion: CoreMLModelRegistry.beatActivationModelVersion()
         )
         let encodedWithoutModel = try encoder.encode(withoutModel)
@@ -326,12 +414,16 @@ final class PaceSelectionStoreTests: XCTestCase {
         //    passeraient périmées et seraient proposées au recalcul sans
         //    raison (§61 : jamais de recalcul non justifié).
         let legacyJSON = """
-        {"analysisVersion":\(DeterministicMusicAnalyzer.engineVersion),\
+        {"analysisVersion":\(DeterministicMusicAnalyzer.analysisSchemaVersion),\
         "configurationFingerprint":"empreinte",\
         "generatorVersion":\(DeterministicEditScoreGenerator.generatorVersion)}
         """
         let legacy = try JSONDecoder().decode(ScoresMeta.self, from: Data(legacyJSON.utf8))
         XCTAssertNil(legacy.coreMLModelVersion, "Champ absent → nil, jamais une erreur de décodage")
+        XCTAssertNil(
+            legacy.analysisEngineVersion,
+            "Version de moteur absente → nil : les trois clés historiques suffisent à décoder (§61)"
+        )
         XCTAssertEqual(legacy.generatorVersion, DeterministicEditScoreGenerator.generatorVersion)
     }
 
@@ -551,7 +643,8 @@ final class PaceSelectionStoreTests: XCTestCase {
     private func writeMeta(
         generatorVersion: Int,
         configurationFingerprint: String,
-        analysisVersion: Int = DeterministicMusicAnalyzer.engineVersion,
+        analysisVersion: Int = DeterministicMusicAnalyzer.analysisSchemaVersion,
+        analysisEngineVersion: Int? = DeterministicMusicAnalyzer.engineVersion,
         projectID: UUID,
         coreMLModelVersion: String? = nil
     ) throws {
@@ -561,6 +654,7 @@ final class PaceSelectionStoreTests: XCTestCase {
             generatorVersion: generatorVersion,
             configurationFingerprint: configurationFingerprint,
             analysisVersion: analysisVersion,
+            analysisEngineVersion: analysisEngineVersion,
             coreMLModelVersion: coreMLModelVersion
         ))
         let url = fileStore.directory(for: projectID)

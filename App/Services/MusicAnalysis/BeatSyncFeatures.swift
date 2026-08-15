@@ -4,13 +4,30 @@
 //
 //  Synchronisation des caractéristiques sur les beats (Jalon 4, niveau A) :
 //  - §21 : agrégation des caractéristiques ENTRE beats (moyenne, maximum,
-//    pente par bande + rms + flux) → un vecteur par beat ;
+//    VARIANCE par bande + rms + flux) → un vecteur par beat ;
 //  - §22.1 : matrice de similarité au niveau BEAT uniquement — jamais de
 //    matrice frame × frame (§67, §68) ;
 //  - §22.2 : courbe de nouveauté par kernel en damier (checkerboard) le long
-//    de la diagonale, plusieurs tailles (4, 8, 16 beats) ; les pics
+//    de la diagonale, plusieurs tailles (4, 8, 16 et 64 temps) ; les pics
 //    deviennent des frontières avec force locale, portée structurelle
 //    (taille de kernel dominante) et confiance.
+//
+//  Correctifs « échelles structurelles » (critique, changement 4) :
+//  1. une QUATRIÈME échelle de 64 temps = 16 mesures en 4/4 a été ajoutée, et
+//     `isSectionScope` lui est désormais RÉSERVÉE : à 150 BPM, l'ancien plus
+//     grand kernel (16 temps = 6,4 s) avait exactement la taille d'une phrase
+//     de 4 mesures et entrait en résonance avec un drop alterné A/B, étiquetant
+//     « nouvelle section » toutes les 6,4 s ; une vraie section EDM fait 16 à
+//     32 mesures, soit 25 à 50 s ;
+//  2. la réponse du damier est rendue NULLE là où trop peu de termes sont
+//     valides (convention de Foote) : à l'index 1 un seul terme survivait au
+//     garde et pouvait atteindre 4,0, ce qui fixait le maximum de normalisation
+//     du morceau et déflatait toutes les vraies frontières d'environ 1,4× ;
+//  3. une condition ABSOLUE sur la réponse brute du kernel dominant s'ajoute au
+//     seuil relatif : sans elle, la nouveauté étant normalisée par son propre
+//     maximum, le détecteur ne pouvait STRUCTURELLEMENT pas rendre zéro
+//     frontière — 90 s prélevées dans un drop produisaient des sections aux
+//     positions du bruit, promues en ancres majeures de rang 0.
 //
 
 import Foundation
@@ -50,10 +67,14 @@ struct StructuralBoundary: Sendable, Equatable {
     let time: MediaTime
     /// Force locale normalisée 0…1 (relative au morceau, §17 dernier alinéa).
     let strength: Double
-    /// Portée structurelle : taille du kernel dominant — 4, 8 ou 16 beats.
+    /// Portée structurelle : taille du kernel dominant — 4, 8, 16 ou 64 temps.
     let dominantKernelSize: Int
     /// Vrai si la frontière est de grande portée (section), faux si de
     /// petite portée (phrase).
+    ///
+    /// N'est vrai QUE pour l'échelle longue (64 temps = 16 mesures) : les
+    /// kernels de 4/8/16 temps mesurent des ruptures de PHRASE, pas de
+    /// section. Voir l'en-tête de fichier, correctif 1.
     let isSectionScope: Bool
     let confidence: Double
 }
@@ -75,7 +96,8 @@ struct BeatSynchronousFeatures: Sendable {
     let isBeatAligned: Bool
 
     /// §21 : un vecteur par span — pour chaque bande : moyenne, maximum,
-    /// pente ; puis moyenne RMS et moyenne du flux spectral.
+    /// VARIANCE ; puis moyenne RMS et moyenne du flux spectral.
+    /// (17 dimensions : 5 bandes × 3 + rms + flux.)
     let vectors: [[Float]]
     /// §22.1 : similarité cosinus entre vecteurs de beats. Grille des spans,
     /// ou grille sous-échantillonnée par stride quand le morceau dépasse le
@@ -114,8 +136,53 @@ struct BeatSyncFeatureExtractor: Sendable {
     private static let fallbackStepTicks: Int64 = 30_000
     /// Nombre minimal de beats pour une grille alignée sur la pulsation.
     private static let minimumBeatsForGrid = 4
-    /// Demi-largeurs des kernels en damier : kernels de 4, 8 et 16 beats.
-    private static let kernelHalfWidths = [2, 4, 8]
+    /// Demi-largeurs des kernels en damier : kernels de 4, 8, 16 et **64**
+    /// temps. Les trois premières échelles mesurent des ruptures de PHRASE ;
+    /// la quatrième (64 temps = 16 mesures en 4/4, soit 25,6 s à 150 BPM) est
+    /// la seule échelle de SECTION — voir `sectionKernelHalfWidth`.
+    ///
+    /// Coût du kernel long (vérification demandée par la critique) : h² = 1 024
+    /// quadruples de 4 lectures par span, soit ≈ 4 M lectures pour 1 000 spans
+    /// et ≈ 8 M au plafond de 2 000 spans. À comparer aux étages voisins : la
+    /// matrice de similarité elle-même coûte 2 000²/2 = 2 M produits scalaires
+    /// de 17 dimensions ≈ 34 M multiplications-additions, et l'autocorrélation
+    /// du tempo ≈ 26 000 frames × ≈ 2 000 lags ≈ 50 M. Le surcoût est donc de
+    /// l'ordre du dixième de l'étage le moins cher : négligeable.
+    private static let kernelHalfWidths = [2, 4, 8, 32]
+
+    /// Demi-largeur de l'UNIQUE échelle de section (§22.2) : 32 → kernel de
+    /// 64 temps = 16 mesures en 4/4. Une section EDM fait 16 à 32 mesures ;
+    /// l'ancienne valeur (kernel de 16 temps) mesurait une phrase de
+    /// 4 mesures et entrait en résonance avec les alternances A/B d'un drop.
+    private static let sectionKernelHalfWidth = 32
+
+    /// Séparation minimale de deux frontières de SECTION, en spans.
+    /// Portée de 8 à 32 spans en cohérence avec `sectionKernelHalfWidth` :
+    /// à 8 spans, le moteur pouvait produire des « sections » de 3,2 s ;
+    /// 32 spans = 8 mesures en 4/4 = la moitié de la plus petite section
+    /// plausible, ce qui laisse passer une transition breakdown → drop
+    /// légitimement rapprochée sans autoriser de section-phrase.
+    private static let minimumSectionSeparationSpans = 32
+
+    /// Seuil ABSOLU sur la réponse BRUTE du kernel dominant, exigé EN PLUS du
+    /// seuil relatif pour émettre une frontière (§22.2, correctif 3).
+    ///
+    /// Justification par la plage théorique du damier sur des vecteurs
+    /// standardisés : chaque terme vaut S(p,p′) + S(f,f′) − S(p,f′) − S(f,p′)
+    /// avec S cosinus ∈ [−1, 1], donc chaque terme — et donc la moyenne par
+    /// terme, qui EST la réponse brute — vit dans [−4, +4]. Repères :
+    /// • deux blocs internement identiques et mutuellement ORTHOGONAUX
+    ///   (cos croisé = 0) : 1 + 1 − 0 − 0 = **2,0** — la frontière idéale ;
+    /// • matériau réel : cohésion intra ≈ 0,5…0,7 et similarité croisée
+    ///   ≈ 0,0…0,2 → **1,0…1,4** ;
+    /// • boucle homogène : intra ≈ croisé, l'espérance de la réponse est **0**
+    ///   et il ne reste que le bruit d'échantillonnage, moyenné sur h² = 1 024
+    ///   quadruples pour le kernel long — quelques centièmes.
+    /// 0,8 est donc à 40 % de la frontière idéale : un ordre de grandeur
+    /// au-dessus du bruit d'une boucle, bien en dessous de toute vraie
+    /// transition. C'est ce seuil qui rend possible **zéro** frontière.
+    private static let minimumRawNoveltyResponse = 0.8
+
     /// Plafond de la grille de la matrice de similarité (§67, §68 : mémoire
     /// bornée — jamais de matrice dense non plafonnée). 2 000 × 2 000 Float
     /// ≈ 16 Mo ; sans plafond, 60 min à ~2 beats/s donneraient ~7 200 spans
@@ -171,7 +238,8 @@ struct BeatSyncFeatureExtractor: Sendable {
             frameRanges.append(start..<end)
         }
 
-        // 3. §21 : vecteurs par span — moyenne/max/pente par bande + rms + flux.
+        // 3. §21 : vecteurs par span — moyenne/max/VARIANCE par bande + rms
+        //    + flux. La variance remplace la pente : voir `aggregate`.
         let bandCount = features.bandEnergies.count
         var vectors: [[Float]] = []
         vectors.reserveCapacity(spanCount)
@@ -182,7 +250,7 @@ struct BeatSyncFeatureExtractor: Sendable {
                 let stats = Self.aggregate(features.bandEnergies[band], over: range)
                 vector.append(stats.mean)
                 vector.append(stats.maximum)
-                vector.append(stats.slope)
+                vector.append(stats.variance)
             }
             vector.append(Self.aggregate(features.rms, over: range).mean)
             vector.append(Self.aggregate(features.spectralFlux, over: range).mean)
@@ -287,15 +355,40 @@ struct BeatSyncFeatureExtractor: Sendable {
     private struct SpanStats {
         let mean: Float
         let maximum: Float
-        let slope: Float
+        /// Variance de population sur le span (§21) — remplace l'ancienne
+        /// pente, voir la justification dans `aggregate`.
+        let variance: Float
     }
 
-    /// Moyenne, maximum et pente (différence des moyennes des deux moitiés)
-    /// d'une caractéristique sur une plage de frames. Plage vide → zéros.
+    /// Moyenne, maximum et VARIANCE d'une caractéristique sur une plage de
+    /// frames. Plage vide → zéros.
+    ///
+    /// **Pourquoi la variance et non la pente** (§21 demandait explicitement la
+    /// variance ; correctif 4 de la critique). L'ancienne troisième statistique
+    /// était la pente « moyenne de la 2ᵉ moitié − moyenne de la 1ʳᵉ moitié ».
+    /// Elle est extrêmement sensible au placement de la grille : un span de
+    /// 0,4 s à 86,13 frames/s ne contient que ≈ 34 frames, et le jitter de ±1
+    /// frame du beat suivi (le même que celui déjà compensé par le maximum sur
+    /// ±2 frames dans `BeatTracker`) fait basculer une frame d'attaque d'une
+    /// moitié à l'autre, ce qui déplace la pente d'environ 0,3 × la moyenne du
+    /// span — c'est-à-dire du même ordre que le signal lui-même. Comme les
+    /// dimensions sont ensuite z-scorées, ces 5 dimensions sur 17 (soit ≈ 29 %
+    /// de la norme du vecteur) entraient dans la similarité cosinus au MÊME
+    /// poids que le RMS tout en n'étant que du bruit : plancher de la courbe de
+    /// nouveauté remonté, donc frontières réelles écrasées à la normalisation.
+    ///
+    /// La variance, elle, est INVARIANTE au décalage temporel de la fenêtre :
+    /// déplacer le span d'une frame ne change ni l'ensemble des valeurs (à une
+    /// frame près) ni leur dispersion. Elle distingue exactement ce qu'on veut
+    /// distinguer ici : un span « tenu » (nappe, variance ≈ 0) d'un span
+    /// « percuté » (kick + silence, variance forte), sans dépendre de l'ordre
+    /// interne des frames. Son échelle absolue (≈ 1e-3 sur des bandes
+    /// normalisées 0…1) est sans importance : `standardized` z-score chaque
+    /// dimension avant la similarité.
     private static func aggregate(_ values: [Float], over range: Range<Int>) -> SpanStats {
         let clamped = max(range.lowerBound, 0)..<min(range.upperBound, values.count)
         guard clamped.lowerBound < clamped.upperBound else {
-            return SpanStats(mean: 0, maximum: 0, slope: 0)
+            return SpanStats(mean: 0, maximum: 0, variance: 0)
         }
         var sum: Float = 0
         var maximum: Float = -.greatestFiniteMagnitude
@@ -305,16 +398,16 @@ struct BeatSyncFeatureExtractor: Sendable {
         }
         let count = clamped.count
         let mean = sum / Float(count)
-        // Pente simple et robuste : moyenne seconde moitié − première moitié.
-        let middle = clamped.lowerBound + count / 2
-        var firstSum: Float = 0
-        var secondSum: Float = 0
-        for index in clamped.lowerBound..<middle { firstSum += values[index] }
-        for index in middle..<clamped.upperBound { secondSum += values[index] }
-        let firstCount = max(middle - clamped.lowerBound, 1)
-        let secondCount = max(clamped.upperBound - middle, 1)
-        let slope = secondSum / Float(secondCount) - firstSum / Float(firstCount)
-        return SpanStats(mean: mean, maximum: maximum, slope: slope)
+        // Variance de POPULATION (division par n, pas n−1) : un span d'une
+        // seule frame donne 0 sans cas particulier, ce qui est la valeur
+        // sémantiquement juste (aucune dispersion observable).
+        var squaredDeviationSum: Float = 0
+        for index in clamped {
+            let delta = values[index] - mean
+            squaredDeviationSum += delta * delta
+        }
+        let variance = squaredDeviationSum / Float(count)
+        return SpanStats(mean: mean, maximum: maximum, variance: variance)
     }
 
     // MARK: - Normalisation relative au morceau (§17)
@@ -429,6 +522,16 @@ struct BeatSyncFeatureExtractor: Sendable {
     /// n'aurait aucune signification. La normalisation par kernel n'est
     /// utilisée QUE pour construire la courbe combinée (chaque échelle y
     /// pèse pareil).
+    ///
+    /// **Bords (convention de Foote)** : la réponse est rendue NULLE tant que
+    /// le nombre de quadruples valides est insuffisant. Sans ce garde, à
+    /// `index = 1` un SEUL terme (u = 0, v = 0) survivait au garde de bornes
+    /// quelle que soit la demi-largeur : la valeur y vaut `2 − 2·S[0][1]`,
+    /// bornée par 4,0, alors qu'une vraie frontière moyennée sur 1 024 termes
+    /// plafonne vers 2,8-3,6. Sur un morceau à fade-in, `novelty[1]` fixait
+    /// donc à lui seul le maximum de normalisation des trois kernels et
+    /// déflatait toute la courbe d'environ 1,43× : les frontières réelles à
+    /// ≈ 0,42 passaient sous le seuil de 0,3 et disparaissaient.
     private static func checkerboardNovelty(
         similarity: [[Float]],
         halfWidths: [Int]
@@ -439,6 +542,15 @@ struct BeatSyncFeatureExtractor: Sendable {
         }
         var perKernelRaw: [[Double]] = []
         for halfWidth in halfWidths {
+            // Nombre minimal de quadruples valides pour qu'une réponse ait un
+            // sens. `terms` vaut exactement min(halfWidth, index, count−index)²
+            // (le garde de bornes ci-dessous découple u et v) : exiger
+            // halfWidth²/2 revient à exiger min(index, count−index) ≥ 0,71 ×
+            // halfWidth, c'est-à-dire à annuler la réponse sur les ≈ halfWidth
+            // premiers et derniers spans — la convention de Foote.
+            // Plancher à 1 : garantit `terms > 0` dans la branche de division
+            // même si une demi-largeur de 1 était un jour ajoutée.
+            let minimumTerms = max(halfWidth * halfWidth / 2, 1)
             var curve = [Double](repeating: 0, count: count)
             for index in 1..<count {
                 var sum = 0.0
@@ -457,7 +569,16 @@ struct BeatSyncFeatureExtractor: Sendable {
                         terms += 1
                     }
                 }
-                curve[index] = terms > 0 ? max(sum / Double(terms), 0) : 0
+                // Trop peu de termes → 0 (et non une moyenne sur 1 terme).
+                // Conséquence attendue et voulue : sur un morceau plus court
+                // que ≈ 2 × 0,71 × 32 ≈ 46 spans, le kernel de section est
+                // identiquement nul → aucune frontière de section, le morceau
+                // forme UNE section (StructureBuilder gère déjà ce cas). La
+                // courbe combinée reste correcte : une courbe identiquement
+                // nulle contribue 0 à la moyenne des kernels, et la
+                // normalisation finale par le maximum annule exactement l'effet
+                // du diviseur — le résultat est le même qu'avec 3 kernels.
+                curve[index] = terms >= minimumTerms ? max(sum / Double(terms), 0) : 0
             }
             perKernelRaw.append(curve)
         }
@@ -482,11 +603,16 @@ struct BeatSyncFeatureExtractor: Sendable {
         return (combined, perKernelRaw)
     }
 
-    /// Peak picking sur la nouveauté combinée : maximum local au-dessus de
-    /// la tendance locale → frontière (§22.2 : force locale, portée =
-    /// kernel dominant, confiance). `perKernel` contient les réponses
-    /// BRUTES des kernels (échelle commune) : la dominance s'y compare
-    /// directement.
+    /// Peak picking sur la nouveauté combinée : maximum local, réponse brute
+    /// du kernel dominant au-dessus d'un seuil ABSOLU, puis nouveauté
+    /// normalisée au-dessus de la tendance locale → frontière (§22.2 : force
+    /// locale, portée = kernel dominant, confiance). `perKernel` contient les
+    /// réponses BRUTES des kernels (échelle commune) : la dominance ET la
+    /// condition absolue s'y comparent directement.
+    ///
+    /// Le détecteur PEUT ne rien retourner : une boucle homogène n'a aucune
+    /// frontière, et `StructureBuilder` traite alors le morceau comme une
+    /// section unique (§63) — c'est le comportement voulu, pas un cas dégradé.
     private static func pickBoundaries(
         novelty: [Double],
         perKernel: [[Double]],
@@ -511,6 +637,37 @@ struct BeatSyncFeatureExtractor: Sendable {
                 }
             }
             guard isLocalMax else { continue }
+
+            // Portée structurelle : kernel dominant (4, 8, 16 ou 64 temps),
+            // déterminé sur les réponses BRUTES (échelle commune). Départage
+            // explicite à égalité : `>` strict conserve le PREMIER kernel
+            // atteignant le maximum, donc la plus PETITE échelle — une
+            // égalité parfaite ne doit jamais promouvoir une phrase en
+            // section (déterminisme, aucune dépendance à l'ordre d'itération).
+            var dominantKernelIndex = 0
+            var dominantResponse = -Double.infinity
+            for kernelIndex in perKernel.indices
+            where kernelIndex < halfWidths.count && perKernel[kernelIndex][index] > dominantResponse {
+                dominantResponse = perKernel[kernelIndex][index]
+                dominantKernelIndex = kernelIndex
+            }
+            // Aucune courbe exploitable (cas impossible avec `kernelHalfWidths`
+            // constante, mais la borne évite tout accès hors plage) : pas de
+            // frontière plutôt qu'une portée inventée.
+            guard dominantKernelIndex < halfWidths.count, dominantResponse > -Double.infinity else { continue }
+            let dominantHalfWidth = halfWidths[dominantKernelIndex]
+            let kernelSize = dominantHalfWidth * 2
+
+            // Condition ABSOLUE (correctif 3) : la réponse brute du kernel
+            // dominant doit dépasser `minimumRawNoveltyResponse`. Les deux
+            // seuils ci-dessous sont RELATIFS (`novelty` est normalisée par
+            // son propre maximum, deux fois) et ne peuvent donc pas, seuls,
+            // rendre zéro frontière : sur une boucle homogène — 90 s prélevées
+            // dans un drop, l'usage visé — ils promeuvent les pics de bruit en
+            // frontières de rang 0. C'est ce garde-ci, et lui seul, qui permet
+            // au détecteur de ne rien émettre.
+            guard dominantResponse >= Self.minimumRawNoveltyResponse else { continue }
+
             // Seuil adaptatif : au-dessus de la moyenne locale (±8 spans).
             let windowStart = max(index - 8, 1)
             let windowEnd = min(index + 8, count - 1)
@@ -518,15 +675,6 @@ struct BeatSyncFeatureExtractor: Sendable {
             for neighbor in windowStart...windowEnd { localSum += novelty[neighbor] }
             let localMean = localSum / Double(windowEnd - windowStart + 1)
             guard value >= max(0.3, localMean * 1.2) else { continue }
-
-            // Portée structurelle : kernel dominant (4, 8 ou 16 beats).
-            var dominantKernelIndex = 0
-            var dominantResponse = -Double.infinity
-            for kernelIndex in perKernel.indices where perKernel[kernelIndex][index] > dominantResponse {
-                dominantResponse = perKernel[kernelIndex][index]
-                dominantKernelIndex = kernelIndex
-            }
-            let kernelSize = halfWidths[dominantKernelIndex] * 2
             // Confiance : heuristique déterministe fondée sur la force —
             // jamais 1,0 au niveau A (moteur simple, §15).
             let confidence = min(0.3 + 0.6 * value, 0.9)
@@ -535,17 +683,23 @@ struct BeatSyncFeatureExtractor: Sendable {
                 time: gridTimes[index],
                 strength: value,
                 dominantKernelSize: kernelSize,
-                isSectionScope: kernelSize >= 16,
+                // Portée de SECTION réservée à l'échelle longue (correctif 1) :
+                // seul un kernel de 64 temps = 16 mesures atteste d'une
+                // section. Les kernels 4/8/16 temps mesurent une phrase, et
+                // c'est précisément l'ancien `kernelSize >= 16` qui faisait
+                // passer une alternance A/B de 4 mesures pour une section.
+                isSectionScope: dominantHalfWidth >= Self.sectionKernelHalfWidth,
                 confidence: confidence
             ))
         }
-        // Séparation minimale des frontières de section (8 spans) : garder
-        // la plus forte — évite des « sections » de deux beats.
+        // Séparation minimale des frontières de section
+        // (`minimumSectionSeparationSpans` = 32 spans) : garder la plus forte —
+        // évite des « sections » plus courtes qu'une phrase.
         var filtered: [StructuralBoundary] = []
         for boundary in boundaries {
             if boundary.isSectionScope,
                let lastIndex = filtered.lastIndex(where: { $0.isSectionScope }),
-               boundary.spanIndex - filtered[lastIndex].spanIndex < 8 {
+               boundary.spanIndex - filtered[lastIndex].spanIndex < Self.minimumSectionSeparationSpans {
                 if boundary.strength > filtered[lastIndex].strength {
                     filtered[lastIndex] = boundary
                 }

@@ -11,9 +11,12 @@
 //  - `checkpoint-v1.json`    : dernier jalon de phase terminé (§8.1 :
 //    sauvegarder le dernier jalon, reprendre au retour de l'utilisateur).
 //
-//  Invalidation §69 : empreinte audio + version moteur + configuration —
+//  Invalidation §69 : empreinte audio + version MOTEUR + configuration —
 //  pour le RÉSULTAT comme pour le checkpoint (la configuration est fournie
-//  par l'analyseur, qui la calcule via `configurationFingerprint`).
+//  par l'analyseur, qui la calcule via `configurationFingerprint`). La
+//  version de SCHÉMA s'y ajoute, mais comme garde de LISIBILITÉ du blob, pas
+//  comme critère de fraîcheur : c'est la version de moteur qui dit si le
+//  calcul est encore le bon, et elle seule.
 //
 
 import CryptoKit
@@ -56,9 +59,23 @@ struct AnalysisCache: Sendable {
     /// fichier audio + version moteur + empreinte de configuration
     /// conservées avec l'analyse — un changement de configuration doit
     /// invalider le résultat, pas seulement le checkpoint).
+    ///
+    /// Deux versions, deux rôles distincts :
+    /// - `engineVersion` = version d'ALGORITHME. C'est la clé d'invalidation
+    ///   du cache : un cache protège un CALCUL, un calcul qui a changé doit
+    ///   être refait.
+    /// - `schemaVersion` = version de FORME du `MusicAnalysisResult` stocké.
+    ///   Elle garantit qu'un blob n'est jamais décodé sous un schéma qu'il ne
+    ///   respecte pas. Champ OBLIGATOIRE et volontairement non optionnel :
+    ///   aucune méta écrite avant ce découplage ne le porte, leur décodage
+    ///   échoue donc et leur cache est ignoré — exactement le comportement
+    ///   voulu, puisque leur `version` interne portait l'ancienne sémantique
+    ///   (version de moteur). Migration sans corruption ni réécriture en
+    ///   place : le résultat est simplement recalculé au prochain besoin.
     private struct CacheMeta: Codable {
         let fingerprint: String
         let engineVersion: Int
+        let schemaVersion: Int
         let configurationFingerprint: String
     }
 
@@ -84,12 +101,20 @@ struct AnalysisCache: Sendable {
     // MARK: Résultat complet
 
     /// Résultat en cache s'il correspond exactement à l'empreinte audio, à
-    /// la version moteur ET à l'empreinte de configuration (§69) — sinon
-    /// `nil`, jamais de résultat périmé.
+    /// la version moteur, à la version de schéma ET à l'empreinte de
+    /// configuration (§69) — sinon `nil`, jamais de résultat périmé.
+    ///
+    /// `result.version` est comparé à `schemaVersion` et NON à
+    /// `engineVersion` : ce champ décrit la forme du document, pas
+    /// l'algorithme qui l'a produit (voir
+    /// `DeterministicMusicAnalyzer.analysisSchemaVersion`). La conjonction
+    /// reste stricte — un moteur différent invalide toujours le cache par
+    /// `meta.engineVersion`.
     func load(
         projectID: UUID,
         fingerprint: String,
         engineVersion: Int,
+        schemaVersion: Int,
         configurationFingerprint: String
     ) -> MusicAnalysisResult? {
         guard
@@ -97,10 +122,11 @@ struct AnalysisCache: Sendable {
             let meta = try? JSONDecoder().decode(CacheMeta.self, from: metaData),
             meta.fingerprint == fingerprint,
             meta.engineVersion == engineVersion,
+            meta.schemaVersion == schemaVersion,
             meta.configurationFingerprint == configurationFingerprint,
             let resultData = try? Data(contentsOf: resultURL(projectID: projectID)),
             let result = try? JSONDecoder().decode(MusicAnalysisResult.self, from: resultData),
-            result.version == engineVersion
+            result.version == schemaVersion
         else {
             return nil
         }
@@ -114,6 +140,7 @@ struct AnalysisCache: Sendable {
         projectID: UUID,
         fingerprint: String,
         engineVersion: Int,
+        schemaVersion: Int,
         configurationFingerprint: String
     ) throws {
         let encoder = Self.makeEncoder()
@@ -125,6 +152,7 @@ struct AnalysisCache: Sendable {
         let metaData = try encoder.encode(CacheMeta(
             fingerprint: fingerprint,
             engineVersion: engineVersion,
+            schemaVersion: schemaVersion,
             configurationFingerprint: configurationFingerprint
         ))
         try metaData.write(to: metaURL(projectID: projectID), options: .atomic)

@@ -37,16 +37,50 @@ struct CurvesAndEventsBuilder: Sendable {
         static let impactEnergy = 0.65
         /// Montée minimale E par rapport au plancher des spans précédents.
         static let impactRise = 0.35
-        /// Fenêtre du plancher local d'un impact, en spans — alignée sur la
-        /// fenêtre de montée de `genuineRise` (§25). Vérifié numériquement
-        /// sur le signal buildUp synthétique (montée linéaire ~9 s puis
-        /// impact final) : sur 3 spans, la montée d'un crescendo GRADUEL
-        /// plafonne à ~0,26–0,33 < 0,35 et l'impact culminant la montée
-        /// n'est JAMAIS détecté (le chemin positif §25 buildUp→impact était
-        /// inatteignable) ; sur 8 spans elle atteint ~0,45–0,66 tout en ne
-        /// créant aucun impact parasite sur un click track régulier
+        /// Fenêtre du plancher local d'un impact, en spans. Vérifié
+        /// numériquement sur le signal buildUp synthétique (montée linéaire
+        /// ~9 s puis impact final) : sur 3 spans, la montée d'un crescendo
+        /// GRADUEL plafonne à ~0,26–0,33 < 0,35 et l'impact culminant la
+        /// montée n'est JAMAIS détecté (le chemin positif §25 buildUp→impact
+        /// était inatteignable) ; sur 8 spans elle atteint ~0,45–0,66 tout en
+        /// ne créant aucun impact parasite sur un click track régulier
         /// (montées locales ~0,21 < 0,35).
+        ///
+        /// **Volontairement DÉCOUPLÉ de la fenêtre de montée de `genuineRise`**
+        /// (qui passe à ~8 mesures, voir `buildUpWindowBars`) : les deux
+        /// fenêtres mesurent des choses différentes et n'ont pas la même
+        /// calibration.
+        /// - Ici : « l'impact domine-t-il son plancher LOCAL ? ». Le seuil
+        ///   `impactRise = 0,35` a été calibré contre le creux minimal d'un
+        ///   click track sur 8 spans (~0,21). Élargir cette fenêtre à 32
+        ///   spans ferait descendre ce minimum vers le creux le plus profond
+        ///   de 32 temps de boucle homogène — la montée mesurée franchirait
+        ///   0,35 par simple respiration du signal et le moteur INVENTERAIT
+        ///   des impacts sur une boucle sans drop, ce qu'interdit §0.7/§63.
+        ///   Le seuil 0,35 reste donc justifié parce que la fenêtre reste 8.
+        /// - `genuineRise` : « une montée précède-t-elle réellement cet
+        ///   impact ? ». Là, la figure à mesurer dure 8 à 16 mesures et une
+        ///   fenêtre de 8 temps ne peut structurellement pas la voir.
         static let impactFloorWindow = 8
+        /// Fenêtre de montée de `genuineRise` (§25), exprimée en MESURES :
+        /// un buildup EDM dure 8 à 16 mesures, jamais 8 temps. Convertie en
+        /// spans via le nombre de temps par mesure MESURÉ sur les `BarEvent`
+        /// de l'analyse (jamais une métrique supposée).
+        static let buildUpWindowBars = 8
+        /// Repli §63 quand aucune mesure n'est disponible (morceau ambiant,
+        /// grille de repli 0,5 s, moins de 2 downbeats) : la fenêtre reste
+        /// exprimée en TEMPS, à sa valeur historique de 8 spans — soit 4 s
+        /// sur la grille de repli. On ne fabrique pas une mesure qu'on n'a
+        /// pas mesurée.
+        static let buildUpWindowFallbackSpans = 8
+        /// Plafond de sécurité de la fenêtre de montée, en spans : 64 temps
+        /// = 16 mesures en 4/4. Au-delà, une « montée » cesserait d'être une
+        /// figure locale ; borne aussi le coût du balayage si la métrique
+        /// détectée est aberrante.
+        static let buildUpWindowMaximumSpans = 64
+        /// Nombre minimal de spans exigés dans la fenêtre de montée — et
+        /// dans sa partie réellement ascendante (voir `genuineRise`).
+        static let buildUpMinimumSpans = 4
         /// RMS relatif considéré comme silence (§12.4 silence).
         static let silenceRMS: Float = 0.03
         /// Durée minimale d'un silence : 0,8 s (contrat Jalon 4).
@@ -228,9 +262,13 @@ struct CurvesAndEventsBuilder: Sendable {
         // accumulation PREPARES impact — SEULEMENT si une montée de tension
         // précède réellement l'impact (§25, §63 : jamais de drop inventé ;
         // pas de montée → pas de buildUp, pas de relation).
+        // Fenêtre de montée §25, en MESURES : calculée UNE fois pour tout le
+        // morceau (les `BarEvent` ne dépendent pas de l'impact considéré).
+        let riseWindowSpans = Self.buildUpWindowSpans(bars: bars, beatSync: beatSync)
         for (impactEvent, spanIndex) in impactEvents {
             guard let rise = Self.genuineRise(
                 before: spanIndex,
+                windowSpans: riseWindowSpans,
                 energy: energy,
                 tension: tension,
                 beatSync: beatSync
@@ -356,8 +394,9 @@ struct CurvesAndEventsBuilder: Sendable {
     }
 
     /// Pic d'énergie local ≥ seuil, précédé d'une montée franche par rapport
-    /// au plancher des `impactFloorWindow` spans précédents (fenêtre §25 —
-    /// un impact culmine sa propre montée). Le temps est raffiné à la frame
+    /// au plancher des `impactFloorWindow` spans précédents — fenêtre COURTE
+    /// et volontairement distincte de celle de `genuineRise` (voir la
+    /// justification portée par la constante). Le temps est raffiné à la frame
     /// de plus forte attaque (dérivée RMS maximale) dans le span — précision
     /// frame (≈ 12 ms), conversion par la fonction unique frame → ticks.
     private static func detectImpacts(
@@ -493,24 +532,118 @@ struct CurvesAndEventsBuilder: Sendable {
         let salience: Double
     }
 
-    /// Une montée est réelle si, sur la fenêtre des 8 spans précédant
-    /// l'impact (au moins 4), la tension moyenne dépasse le seuil ET
-    /// l'énergie monte globalement. Sinon : aucun buildUp, aucune relation
+    /// Nombre de spans (= temps) par mesure, MESURÉ sur les `BarEvent` de
+    /// l'analyse : médiane déterministe (médiane haute, comme partout dans le
+    /// moteur) du nombre de spans démarrant dans chaque mesure. Rend `nil`
+    /// quand la grille n'est pas alignée sur la pulsation ou qu'aucune mesure
+    /// n'a été trouvée (§63 : morceau ambiant — on ne suppose pas une
+    /// métrique qu'on n'a pas mesurée).
+    ///
+    /// Balayage à deux curseurs sur deux séries triées par temps croissant :
+    /// O(mesures + spans), jamais O(mesures × spans).
+    private static func spansPerBar(
+        bars: [BarEvent],
+        beatSync: BeatSynchronousFeatures
+    ) -> Int? {
+        guard beatSync.isBeatAligned, !bars.isEmpty, beatSync.spanCount > 0 else { return nil }
+        // Tri défensif : l'invariant « bars triées par start » n'est pas
+        // documenté côté `BeatTracker`, et l'ordre doit être déterministe.
+        let sortedBars = bars.sorted { $0.start.ticks < $1.start.ticks }
+        var counts: [Int] = []
+        counts.reserveCapacity(sortedBars.count)
+        var spanIndex = 0
+        for bar in sortedBars {
+            while spanIndex < beatSync.spanCount,
+                  beatSync.spanStart(spanIndex).ticks < bar.start.ticks {
+                spanIndex += 1
+            }
+            var count = 0
+            while spanIndex < beatSync.spanCount,
+                  beatSync.spanStart(spanIndex).ticks < bar.end.ticks {
+                count += 1
+                spanIndex += 1
+            }
+            if count > 0 { counts.append(count) }
+        }
+        guard !counts.isEmpty else { return nil }
+        let sorted = counts.sorted()
+        return sorted[sorted.count / 2] // médiane haute, déterministe
+    }
+
+    /// Largeur de la fenêtre de montée §25, en spans : `buildUpWindowBars`
+    /// mesures quand la métrique est connue (≈ 8 mesures = 32 temps en 4/4,
+    /// soit 12,8 s à 150 BPM — l'ordre de grandeur d'un buildup EDM), sinon
+    /// le repli en temps documenté par `buildUpWindowFallbackSpans` (§63).
+    private static func buildUpWindowSpans(
+        bars: [BarEvent],
+        beatSync: BeatSynchronousFeatures
+    ) -> Int {
+        guard let perBar = spansPerBar(bars: bars, beatSync: beatSync), perBar > 0 else {
+            return Threshold.buildUpWindowFallbackSpans
+        }
+        return min(
+            Threshold.buildUpWindowBars * perBar,
+            Threshold.buildUpWindowMaximumSpans
+        )
+    }
+
+    /// Une montée est réelle si, sur la fenêtre des `windowSpans` spans
+    /// précédant l'impact (au moins `buildUpMinimumSpans`), l'énergie monte
+    /// franchement jusqu'à son SOMMET ET la tension moyenne de la partie
+    /// ascendante dépasse le seuil. Sinon : aucun buildUp, aucune relation
     /// (§63 : ne jamais inventer de drop/montée).
+    ///
+    /// **Pourquoi le sommet et non la dernière valeur** (correctif 2 de la
+    /// critique). L'ancien calcul, `energy[windowEnd − 1] − energy[windowStart]`,
+    /// mesurait la montée jusqu'au span précédant IMMÉDIATEMENT l'impact. Or
+    /// la figure canonique du genre est : riser → 1 à 2 temps de SILENCE →
+    /// drop. La dernière valeur de la fenêtre est donc celle du silence, la
+    /// différence est NÉGATIVE (mesuré : −0,68 sur la fixture « montée + gap
+    /// 1 s + impact »), le garde ≥ 0,15 échouait, et l'impact était détecté
+    /// sans que le `.buildUp` le soit jamais : ni relation `.prepares`, ni
+    /// `burstResolution`, ni densification pendant la montée. Le maximum sur
+    /// la fenêtre est insensible au gap : même fixture, +0,30 (fenêtre de
+    /// repli 8 spans) à +0,90 (fenêtre de 8 mesures).
+    ///
+    /// **La tension souffre du même mal, en plus doux, et reçoit le même
+    /// traitement.** `smoothedPositiveSlope` écrête à 0 toute décroissance :
+    /// les spans du gap rentrent des ZÉROS dans la moyenne, et le span qui
+    /// précède le gap aussi (sa pente lissée sur ±1 span voit déjà la
+    /// chute). Le mal n'est pas de même nature — une moyenne se dilue quand
+    /// une différence de bornes change de signe — mais il tire dans le même
+    /// sens et sur une fenêtre courte il suffit à faire échouer le seuil 0,4.
+    /// La moyenne est donc prise sur `[windowStart, peakIndex]`, c'est-à-dire
+    /// sur la montée elle-même (mesuré sur la même fixture : 0,61 sur la
+    /// fenêtre entière contre 0,81 sur la partie ascendante).
     private static func genuineRise(
         before spanIndex: Int,
+        windowSpans: Int,
         energy: [Double],
         tension: [Double],
         beatSync: BeatSynchronousFeatures
     ) -> GenuineRise? {
-        let windowStart = max(spanIndex - 8, 0)
+        let windowStart = max(spanIndex - windowSpans, 0)
         let windowEnd = spanIndex // exclusif
-        guard windowEnd - windowStart >= 4 else { return nil }
-        let tensionWindow = tension[windowStart..<windowEnd]
+        guard windowEnd - windowStart >= Threshold.buildUpMinimumSpans else { return nil }
+
+        // Sommet de la montée dans la fenêtre ; égalité → le span le plus
+        // PRÉCOCE (départage explicite, comparaison strictement supérieure).
+        var peakIndex = windowStart
+        for index in (windowStart + 1)..<windowEnd where energy[index] > energy[peakIndex] {
+            peakIndex = index
+        }
+        let energyRise = energy[peakIndex] - energy[windowStart]
+        guard energyRise >= Threshold.buildUpEnergyRise else { return nil }
+
+        // La partie ascendante doit être une figure, pas un sursaut isolé :
+        // sans ce garde, un pic bref en tête d'une fenêtre de 8 mesures
+        // suffirait à qualifier une « montée » qui n'a jamais eu lieu (§63).
+        guard peakIndex - windowStart + 1 >= Threshold.buildUpMinimumSpans else { return nil }
+
+        let tensionWindow = tension[windowStart...peakIndex]
         let meanTension = tensionWindow.reduce(0, +) / Double(tensionWindow.count)
         guard meanTension >= Threshold.buildUpTension else { return nil }
-        let energyRise = energy[windowEnd - 1] - energy[windowStart]
-        guard energyRise >= Threshold.buildUpEnergyRise else { return nil }
+
         return GenuineRise(
             start: beatSync.spanStart(windowStart),
             salience: min(0.5 * meanTension + 0.5 * energyRise, 1)

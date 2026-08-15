@@ -34,7 +34,13 @@ actor AudioAnalysisActor {
     /// (§61) : version du générateur + empreinte de configuration.
     static let scoresMetaRelativePath = "analysis/scores-meta-v1.json"
 
-    private let analyzer: DeterministicMusicAnalyzer
+    /// Moteur d'analyse derrière le protocole §7 (existentiel `Sendable` :
+    /// l'analyse est consommée hors `@MainActor` et le moteur avancé Jalon 11
+    /// se branche au même endroit).
+    private let analyzer: any MusicAnalyzing & Sendable
+    /// Générateur de partitions derrière le protocole §7 — injecté pour que
+    /// la phase 5 soit substituable en test sans toucher à l'acteur.
+    private let scoreGenerator: any EditScoreGenerating & Sendable
     private let projectStore: ProjectStore
     private let fileStore: ProjectFileStore
     private let logger = AppLogger(category: .analysis)
@@ -44,17 +50,23 @@ actor AudioAnalysisActor {
     /// Garde de réentrance : projets dont le démarrage est en préparation
     /// (les `await` de préparation rendent l'acteur réentrant).
     private var startingProjects: Set<UUID> = []
+    /// Projets dont une analyse ANNULÉE doit être relancée dès qu'elle se
+    /// sera terminée (§8.1 : reprise à la réouverture). Voir l'invariant
+    /// détaillé dans `startAnalysisIfNeeded` / `finish`.
+    private var restartRequests: Set<UUID> = []
     /// Dernière progression publiée par projet — état observable par
     /// l'interface (§33 : phase courante + étapes terminées, sans
     /// pourcentage).
     private var progressByProject: [UUID: AnalysisProgress] = [:]
 
     init(
-        analyzer: DeterministicMusicAnalyzer,
+        analyzer: any MusicAnalyzing & Sendable,
+        scoreGenerator: any EditScoreGenerating & Sendable = DeterministicEditScoreGenerator(),
         projectStore: ProjectStore,
         fileStore: ProjectFileStore
     ) {
         self.analyzer = analyzer
+        self.scoreGenerator = scoreGenerator
         self.projectStore = projectStore
         self.fileStore = fileStore
     }
@@ -65,18 +77,48 @@ actor AudioAnalysisActor {
     /// (retour immédiat, l'interface observe `currentProgress`). Cache
     /// complet → l'analyseur retourne immédiatement et le statut passe à
     /// `awaitingPaceSelection`.
+    ///
+    /// **Toujours NON BLOQUANT.** Aucun chemin de cette méthode n'attend la
+    /// fin d'une analyse : elle démarre, enregistre une intention, ou sort.
+    /// C'est une exigence d'INTERFACE, pas une optimisation — l'appelant
+    /// (`ProjectView.task(id: status)`) ne démarre sa boucle de polling
+    /// qu'APRÈS le retour de cet appel. La version précédente faisait
+    /// `await existing.value` sur la tâche annulée : tant que la génération
+    /// détachée orpheline n'avait pas fini (jusqu'à ~30 s), la vue restait
+    /// figée sur son état initial et affichait « Préparation audio —
+    /// Phase 1 sur 5 » alors que le moteur était ailleurs. Un état affiché
+    /// FACTUELLEMENT FAUX (§33 : la progression doit décrire ce qui se passe).
     func startAnalysisIfNeeded(projectID: UUID) async {
         guard !startingProjects.contains(projectID) else { return }
         if let existing = runningTasks[projectID] {
             guard existing.isCancelled else {
                 return // déjà en cours → rejoint
             }
-            // Réouverture immédiate après une annulation (§8.1) : attendre
-            // la fin propre de la tâche annulée puis RE-VÉRIFIER tous les
-            // gardes (l'acteur est réentrant pendant l'await) — sans quoi
-            // la reprise serait silencieusement perdue.
-            await existing.value
-            return await startAnalysisIfNeeded(projectID: projectID)
+            // Réouverture immédiate après une annulation (§8.1). La tâche
+            // annulée est encore en train de se terminer proprement ; on
+            // enregistre une INTENTION DE RELANCE et on sort tout de suite.
+            // C'est `finish` — appelé sur l'acteur à la toute fin de cette
+            // même tâche — qui rappellera `startAnalysisIfNeeded`, lequel
+            // re-vérifiera alors TOUS les gardes (statut, chemin audio…).
+            //
+            // INVARIANT (démonstration, c'est le point délicat) :
+            // 1. `restartRequests.insert` n'a lieu QUE si
+            //    `runningTasks[projectID] != nil`. Or `finish` met cette
+            //    entrée à `nil` puis consomme la demande, le tout SANS
+            //    `await` intercalé : sur un acteur, cette séquence est
+            //    atomique. Une demande ne peut donc pas être insérée après
+            //    que `finish` l'a consultée → aucune relance perdue.
+            // 2. `remove` rend l'intention à usage unique, et la relance
+            //    elle-même n'insère jamais de nouvelle demande (au moment
+            //    où elle s'exécute, `runningTasks[projectID]` est `nil`) →
+            //    aucune boucle infinie. Une nouvelle demande exige une
+            //    nouvelle annulation, donc une nouvelle action utilisateur.
+            // 3. Double lancement impossible : si un autre appelant démarre
+            //    une analyse entre `finish` et l'exécution de la relance, la
+            //    relance retombe soit sur `startingProjects.contains` soit
+            //    sur une tâche vivante non annulée, et sort dans les deux cas.
+            restartRequests.insert(projectID)
+            return
         }
         startingProjects.insert(projectID)
         defer { startingProjects.remove(projectID) }
@@ -179,24 +221,49 @@ actor AudioAnalysisActor {
             // gèlerait `currentProgress` (polling de l'interface) et
             // `cancelAnalysis` pendant toute la phase 5. `Task.detached`
             // l'envoie sur le pool global (`result` et la configuration
-            // sont `Sendable`, le générateur est un struct `Sendable`).
-            // Le calcul lui-même n'est pas annulable, mais l'annulation
-            // est honorée ci-dessous AVANT toute écriture : rien n'est
-            // modifié sur disque ni en base après un `cancel`.
+            // sont `Sendable`, le générateur est un existentiel `Sendable`).
+            //
+            // ANNULATION — `Task.detached` n'hérite JAMAIS de l'annulation de
+            // la tâche qui le crée : sans le pont ci-dessous, un
+            // `cancelAnalysis` laissait la génération brûler un cœur jusqu'au
+            // bout (1 à 6 s pour 5 min, ~30 s pour ~10 min avec un champ
+            // dense) puis JETAIT tout le travail au `checkCancellation`
+            // suivant. `withTaskCancellationHandler` propage l'annulation à
+            // la tâche détachée, où le générateur la voit par
+            // `Task.checkCancellation()` dans sa boucle de raffinement. Si
+            // l'annulation arrive avant même l'entrée dans le handler,
+            // `onCancel` est exécuté immédiatement — aucune fenêtre aveugle.
+            //
+            // Le contrat de non-écriture est INCHANGÉ : annulée ici, la
+            // génération lève `CancellationError`, donc rien n'est écrit sur
+            // disque ni en base (le `checkCancellation` explicite qui suit
+            // reste le filet pour une génération qui aurait ignoré la
+            // demande).
             let configuration = ScoreConfiguration.production
-            let scores = try await Task.detached(priority: .userInitiated) {
-                try DeterministicEditScoreGenerator()
-                    .generateScores(from: result, configuration: configuration)
-            }.value
+            let generator = scoreGenerator
+            let generation = Task.detached(priority: .userInitiated) {
+                try generator.generateScores(from: result, configuration: configuration)
+            }
+            let scores = try await withTaskCancellationHandler {
+                try await generation.value
+            } onCancel: {
+                generation.cancel()
+            }
 
             // Annulée pendant la génération → aucune écriture (le résultat
             // d'analyse reste en cache §69, les partitions seront
             // régénérées à la reprise).
             try Task.checkCancellation()
             try writeScores(scores, projectID: projectID)
+            // `result.version` est la version de SCHÉMA du résultat d'analyse
+            // (`DeterministicMusicAnalyzer.analysisSchemaVersion`), pas celle
+            // du moteur : c'est elle qui décide de la validité §61 des
+            // partitions. La version de MOTEUR est écrite à côté, comme
+            // trace non discriminante (voir `ScoresMeta`).
             try writeScoresMeta(
                 configuration: configuration,
                 analysisVersion: result.version,
+                analysisEngineVersion: DeterministicMusicAnalyzer.engineVersion,
                 projectID: projectID
             )
 
@@ -209,6 +276,12 @@ actor AudioAnalysisActor {
                 scoreVersion: DeterministicEditScoreGenerator.generatorVersion,
                 projectID: projectID
             )
+            // `ProjectRecord.analysisVersion` est une TRACE §61 (« conserver
+            // la version du moteur d'analyse »), jamais une clé de validité :
+            // la péremption des partitions passe par `scores-meta-v1.json`,
+            // celle du cache par `analysis-meta-v1.json`. On y écrit donc la
+            // version de MOTEUR — la seule qui dise quel algorithme a produit
+            // ce résultat.
             try await projectStore.saveAnalysisResult(
                 relativePath: "analysis/analysis-v1.json",
                 analysisVersion: DeterministicMusicAnalyzer.engineVersion,
@@ -266,6 +339,14 @@ actor AudioAnalysisActor {
     /// absent, l'inverse est inoffensif (méta absente → partitions
     /// considérées périmées).
     ///
+    /// Deux versions d'analyse y sont écrites, et une seule tranche :
+    /// `analysisVersion` porte la version de SCHÉMA du résultat (clé de
+    /// validité §61 des partitions) ; `analysisEngineVersion` porte la
+    /// version d'ALGORITHME (trace §61 seulement). Sans cette séparation, la
+    /// moindre correction de bug du moteur périmait les partitions de tous
+    /// les projets en même temps que le cache d'analyse — voir la note de
+    /// `DeterministicMusicAnalyzer.analysisSchemaVersion`.
+    ///
     /// §61 « Conserver : […] version du modèle Core ML » : la version est
     /// demandée au registre (`CoreMLModelRegistry`, source unique) et écrite
     /// telle quelle dans la méta — `nil` tant qu'aucun modèle n'est embarqué
@@ -275,6 +356,7 @@ actor AudioAnalysisActor {
     private func writeScoresMeta(
         configuration: ScoreConfiguration,
         analysisVersion: Int,
+        analysisEngineVersion: Int,
         projectID: UUID
     ) throws {
         let encoder = JSONEncoder()
@@ -284,6 +366,7 @@ actor AudioAnalysisActor {
             generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
             configurationFingerprint: try ScoreConfigurationFingerprint.fingerprint(of: configuration),
             analysisVersion: analysisVersion,
+            analysisEngineVersion: analysisEngineVersion,
             // §61 « version du modèle Core ML » — source UNIQUE : le registre.
             // `nil` aujourd'hui (aucun modèle embarqué, §29A/§86), et c'est
             // exactement la trace exigée : ces partitions viennent du moteur
@@ -313,8 +396,22 @@ actor AudioAnalysisActor {
         progressByProject[projectID] = progress
     }
 
+    /// Fin de vie d'une analyse : libère l'emplacement du projet puis honore
+    /// une éventuelle demande de relance (§8.1).
+    ///
+    /// Exécuté sur l'acteur SANS aucun `await` : le retrait de la tâche et la
+    /// consommation de la demande forment une section atomique — c'est ce qui
+    /// rend l'invariant démontré dans `startAnalysisIfNeeded` vrai.
+    ///
+    /// La relance passe par une `Task` non structurée : appeler
+    /// `startAnalysisIfNeeded` directement ici imposerait un `await` au
+    /// milieu de cette section (l'appel est asynchrone) et rouvrirait
+    /// exactement la fenêtre de réentrance que l'on ferme.
     private func finish(projectID: UUID) {
         runningTasks[projectID] = nil
         progressByProject[projectID] = nil
+        guard restartRequests.remove(projectID) != nil else { return }
+        logger.info("Reprise de l'analyse demandée pendant une annulation — relance.")
+        Task { await self.startAnalysisIfNeeded(projectID: projectID) }
     }
 }

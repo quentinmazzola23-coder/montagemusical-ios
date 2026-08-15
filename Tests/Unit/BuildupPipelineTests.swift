@@ -19,6 +19,15 @@
 //  marge, sans ajustement ; l'attaque raffinée tombe à 8,835–8,858 s pour
 //  un impact réel à 8,850 s.
 //
+//  S'ajoute la figure CANONIQUE du genre, que la fixture ci-dessus ne
+//  contient pas : montée → GAP DE SILENCE → impact. Elle est le seul cas
+//  où l'ancienne mesure `energy[fin de fenêtre] − energy[début]` change de
+//  SIGNE (mesuré : −0,68 sur une grille de 0,5 s) — l'impact était détecté,
+//  le `.buildUp` jamais. Valeurs simulées après correctif (montée mesurée
+//  jusqu'à son sommet), pour des spans de 0,4 / 0,5 / 0,6 s :
+//  energyRise +0,30 / +0,37 / +0,90 selon la largeur de fenêtre, et
+//  meanTension 0,81 à 0,94 (seuils 0,15 et 0,4).
+//
 
 import XCTest
 @testable import MontageMusical
@@ -138,6 +147,155 @@ final class BuildupPipelineTests: XCTestCase {
                     && $0.targetEventID == impact.id
             },
             "Relation prepares attendue du buildUp vers l'impact"
+        )
+    }
+
+    // MARK: - §25 : montée + GAP DE SILENCE + impact (figure canonique EDM)
+
+    /// La figure du genre : riser, un à deux temps de VIDE, puis le drop.
+    /// C'est le cas que le moteur ne voyait pas — l'impact était détecté,
+    /// le `.buildUp` jamais, donc ni relation `.prepares`, ni
+    /// `burstResolution`, ni densification pendant la montée.
+    ///
+    /// Le gap fait 1 s (et non 250 ms) pour une raison mesurable : il faut
+    /// qu'au moins un span tombe ENTIÈREMENT dans le silence. Un gap plus
+    /// court ne donne que des spans « à cheval » sur le silence ET l'impact,
+    /// dont l'énergie intermédiaire masque le creux — le test ne prouverait
+    /// alors plus rien, puisque la différence de bornes redeviendrait
+    /// positive et passerait AUSSI avec l'ancien code.
+    ///
+    /// Grille attendue : la simulation ne détecte que 2 onsets sur ce signal
+    /// (bruit lisse), soit moins que `minimumOnsetsForTempo = 4` → aucune
+    /// hypothèse de tempo → grille de repli 0,5 s (§63). Les assertions
+    /// restent vraies pour des spans de 0,4 / 0,5 / 0,6 s, donc aussi si une
+    /// grille de beats devait finalement être construite.
+    func testRiserThenSilenceGapThenImpactStillProducesBuildUpAndPrepares() async throws {
+        let rampSeconds = 8.0
+        let gapSeconds = 1.0
+        let impactSeconds = 0.5
+        let seconds = rampSeconds + gapSeconds + impactSeconds
+        let impactOnsetSeconds = rampSeconds + gapSeconds // 9,0 s
+        let (_, audio) = try makeProject(
+            write: {
+                try TestAudioFactory.writeWav(
+                    samples: TestAudioFactory.buildUpWithSilenceGap(
+                        rampSeconds: rampSeconds,
+                        gapSeconds: gapSeconds,
+                        impactSeconds: impactSeconds,
+                        sampleRate: Self.wavSampleRate
+                    ),
+                    sampleRate: Self.wavSampleRate,
+                    to: $0
+                )
+            },
+            durationSeconds: seconds
+        )
+        let result = try await analyzer.analyze(audio: audio, configuration: .production) { _ in }
+
+        // (a) L'impact du drop est le DERNIER impact du morceau. (Le sommet
+        // du riser peut lui aussi être détecté comme impact : la
+        // normalisation quantile §17 écrête le haut de la montée à 1,0 comme
+        // le drop. Ce n'est pas ce qu'on teste ici.)
+        let impacts = result.musicalEvents
+            .filter { $0.type == .impact }
+            .sorted { $0.start < $1.start }
+        let impact = try XCTUnwrap(
+            impacts.last,
+            "Impact attendu vers \(impactOnsetSeconds) s ; aucun impact détecté"
+        )
+        // Le temps raffiné (frame de dérivée RMS maximale, fenêtre élargie de
+        // 150 ms vers l'arrière) tombe entre l'attaque réelle et la fin du
+        // morceau selon le span porteur : borne large et explicite.
+        XCTAssertGreaterThanOrEqual(
+            impact.start.seconds, impactOnsetSeconds - 0.2,
+            "L'impact doit tomber APRÈS le gap de silence ; trouvés : \(impacts.map(\.start.seconds))"
+        )
+        // Marge d'une frame (11,6 ms) : `frameCount` couvre jusqu'à un hop
+        // de plus que le PCM réellement consommé (voir `FeatureTimeline`).
+        XCTAssertLessThanOrEqual(impact.start.seconds, seconds + 0.05)
+
+        // (b) Un buildUp d'INTERVALLE se terminant EXACTEMENT sur cet impact
+        // (égalité en ticks §9, jamais en secondes flottantes).
+        let buildUps = result.musicalEvents.filter { $0.type == .buildUp }
+        let preparingBuildUp = buildUps.first {
+            $0.geometry == .interval && $0.end?.ticks == impact.start.ticks
+        }
+        let buildUp = try XCTUnwrap(
+            preparingBuildUp,
+            "buildUp attendu malgré le gap de silence ; buildUps : "
+                + "\(buildUps.map { ($0.start.seconds, $0.end?.seconds ?? -1) })"
+        )
+        let buildUpEnd = try XCTUnwrap(buildUp.end, "Un intervalle §12.4 porte une fin")
+        XCTAssertLessThan(buildUp.start, buildUpEnd, "La montée doit être un intervalle non vide")
+
+        // (c) La montée commence DANS le riser, pas dans le gap : c'est la
+        // preuve que la fenêtre couvre la figure et pas seulement le vide.
+        XCTAssertLessThan(
+            buildUp.start.seconds, rampSeconds,
+            "La montée doit démarrer pendant le riser (avant \(rampSeconds) s)"
+        )
+
+        // (d) Relation prepares du buildUp vers l'impact (§12.5, §25).
+        XCTAssertTrue(
+            result.eventRelations.contains {
+                $0.type == .prepares
+                    && $0.sourceEventID == buildUp.id
+                    && $0.targetEventID == impact.id
+            },
+            "Relation prepares attendue du buildUp vers l'impact malgré le gap"
+        )
+    }
+
+    // MARK: - §0.7/§63 : le garde-fou — silence + impact isolé, AUCUN buildUp
+
+    /// Contrepartie NON NÉGOCIABLE des deux tests ci-dessus : élargir la
+    /// fenêtre de montée à ~8 mesures et mesurer la montée jusqu'à son
+    /// sommet rend `genuineRise` plus permissif — cette permissivité ne doit
+    /// JAMAIS aller jusqu'à fabriquer un drop là où il n'y a rien (§63
+    /// « aucun drop : ne pas en inventer »).
+    ///
+    /// Le même invariant est vérifié bout-en-bout par
+    /// `AnalysisPipelineTests.testSilenceThenImpactProducesImpactWithoutInventedBuildUp` ;
+    /// il est DÉLIBÉRÉMENT dupliqué ici, dans le fichier qui exerce le
+    /// chemin positif, pour qu'aucun élargissement futur de la fenêtre ne
+    /// puisse passer au vert sans le croiser.
+    ///
+    /// Mécanique : avant l'impact, tous les spans sont à énergie nulle
+    /// (silence pur), donc le sommet de la fenêtre est son premier span et
+    /// la montée mesurée vaut 0 < 0,15.
+    func testIsolatedImpactAfterSilenceProducesNoBuildUpNorPrepares() async throws {
+        let seconds = 6.0
+        let impactAt = 3.0
+        let (_, audio) = try makeProject(
+            write: {
+                try TestAudioFactory.writeWav(
+                    samples: TestAudioFactory.silenceThenImpact(
+                        seconds: seconds,
+                        impactAt: impactAt,
+                        sampleRate: Self.wavSampleRate
+                    ),
+                    sampleRate: Self.wavSampleRate,
+                    to: $0
+                )
+            },
+            durationSeconds: seconds
+        )
+        let result = try await analyzer.analyze(audio: audio, configuration: .production) { _ in }
+
+        // L'impact, lui, doit rester détecté : on ne prouve rien en ne
+        // détectant rien.
+        let impacts = result.musicalEvents.filter { $0.type == .impact }
+        XCTAssertTrue(
+            impacts.contains { abs($0.start.seconds - impactAt) <= 0.15 },
+            "Impact attendu vers \(impactAt) s ; trouvés : \(impacts.map(\.start.seconds))"
+        )
+        XCTAssertTrue(
+            result.musicalEvents.allSatisfy { $0.type != .buildUp },
+            "Aucune montée n'existe avant cet impact : aucun buildUp ne doit être inventé"
+        )
+        XCTAssertTrue(
+            result.eventRelations.allSatisfy { $0.type != .prepares },
+            "Aucune relation prepares sans montée réelle"
         )
     }
 

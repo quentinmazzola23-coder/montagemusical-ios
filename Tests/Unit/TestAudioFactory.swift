@@ -113,6 +113,43 @@ enum TestAudioFactory {
         return samples
     }
 
+    /// Roulement : train de clics DENSE de `clicksPerSecond` bursts par
+    /// seconde (bursts de bruit blanc déterministe de 10 ms, amplitude 0,9).
+    /// Même convention de phase que `clickTrack` — le clic `k` tombe à
+    /// `(k + 0,5) / clicksPerSecond` secondes, jamais à t = 0.
+    ///
+    /// À 20 clics/s les clics sont espacés de 50 ms, soit **4,3 frames** à
+    /// 86,1328125 frames/s (§16.3) : c'est la densité d'un roulement en 1/32
+    /// à 150 BPM, la figure exacte sur laquelle la fusion d'onsets en chaîne
+    /// s'effondrait (correctif 2 de la critique).
+    static func denseClickTrack(
+        clicksPerSecond: Double,
+        seconds: Double,
+        sampleRate: Int
+    ) -> [Float] {
+        guard clicksPerSecond > 0, seconds > 0, sampleRate > 0 else { return [] }
+        var samples = [Float](
+            repeating: 0,
+            count: Int((seconds * Double(sampleRate)).rounded())
+        )
+        var generator = DeterministicNoise(seed: 0x20C1_1C50)
+        let period = 1 / clicksPerSecond
+        var clickIndex = 0
+        while true {
+            let time = (Double(clickIndex) + 0.5) * period
+            guard time < seconds else { break }
+            writeBurst(
+                into: &samples,
+                at: time,
+                amplitude: 0.9,
+                sampleRate: sampleRate,
+                generator: &generator
+            )
+            clickIndex += 1
+        }
+        return samples
+    }
+
     /// Silence pur, puis un unique impact (burst de bruit blanc de 10 ms à
     /// 0,95) à `impactAt` secondes.
     static func silenceThenImpact(
@@ -151,6 +188,49 @@ enum TestAudioFactory {
             samples[index] = generator.next() * (0.05 + 0.65 * progress)
         }
         for index in impactStart..<count {
+            samples[index] = generator.next() * 0.98
+        }
+        return samples
+    }
+
+    /// Figure canonique EDM : **montée → GAP DE SILENCE → impact**.
+    ///
+    /// - `rampSeconds` de bruit blanc d'amplitude croissante linéaire
+    ///   (0,05 → 0,70), comme `buildUp` ;
+    /// - puis `gapSeconds` de silence ABSOLU (le « vide » d'un à deux temps
+    ///   qui précède le drop) ;
+    /// - puis `impactSeconds` de bruit à 0,98.
+    ///
+    /// C'est la fixture qui distingue une montée mesurée jusqu'à son SOMMET
+    /// d'une montée mesurée jusqu'au span qui précède l'impact : sur cette
+    /// dernière, la différence d'énergie est NÉGATIVE (le dernier span est
+    /// du silence) et aucun `.buildUp` n'était jamais émis (§25).
+    ///
+    /// Le gap vaut 1 s par défaut d'usage dans les tests : il faut qu'au
+    /// moins un span de la grille de repli (0,5 s, §63) tombe ENTIÈREMENT
+    /// dedans, sinon le span mixte silence + impact garde une énergie
+    /// intermédiaire et la démonstration est faussée.
+    static func buildUpWithSilenceGap(
+        rampSeconds: Double,
+        gapSeconds: Double,
+        impactSeconds: Double,
+        sampleRate: Int
+    ) -> [Float] {
+        guard rampSeconds > 0, gapSeconds >= 0, impactSeconds > 0, sampleRate > 0 else {
+            return []
+        }
+        let rate = Double(sampleRate)
+        let rampCount = Int((rampSeconds * rate).rounded())
+        let gapCount = Int((gapSeconds * rate).rounded())
+        let impactCount = Int((impactSeconds * rate).rounded())
+        var samples = [Float](repeating: 0, count: rampCount + gapCount + impactCount)
+        var generator = DeterministicNoise(seed: 0x6A97_B111)
+        for index in 0..<rampCount {
+            let progress = Float(index) / Float(max(rampCount - 1, 1))
+            samples[index] = generator.next() * (0.05 + 0.65 * progress)
+        }
+        // `gapCount` échantillons laissés à 0 : silence absolu.
+        for index in (rampCount + gapCount)..<samples.count {
             samples[index] = generator.next() * 0.98
         }
         return samples

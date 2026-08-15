@@ -95,6 +95,49 @@ final class BeatTrackerTests: XCTestCase {
         return sorted.count % 2 == 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
     }
 
+    // MARK: - Confiance d'un BarEvent — confiance de POSITION
+
+    /// Vérifie la propriété de `BarEvent.confidence`.
+    ///
+    /// Elle NE VAUT PLUS `downbeatConfidence`, qui est une marge
+    /// inter-hypothèses de métrique (« la mesure 4 devance-t-elle la 3 ? »)
+    /// structurellement bornée à ~0,03–0,10 même sur un 4/4 correct, et non
+    /// une confiance de position. Posée telle quelle sur chaque mesure, elle
+    /// faisait de tout début de mesure l'ancre la plus faible du champ
+    /// (`AnchorField` en tire `uncertainty = 1 − confidence` ≈ 0,92) et le
+    /// générateur évitait de couper sur le « 1 ».
+    ///
+    /// Nouvelle propriété, vérifiée ici sous ses deux formes :
+    /// - **invariant** : jamais INFÉRIEURE à la confiance du beat
+    ///   CO-LOCALISÉ (le début d'une mesure EST un temps de la grille) ;
+    /// - **formule** : `c_beat + (1 − c_beat) × downbeatConfidence` — la
+    ///   marge métrique ne peut que renforcer la certitude de position.
+    private func assertBarConfidences(
+        _ tracked: TrackedRhythm,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        for bar in tracked.bars {
+            let colocated = try XCTUnwrap(
+                tracked.beats.first { $0.time.ticks == bar.start.ticks },
+                "Le début d'une mesure doit être EXACTEMENT un temps de la grille",
+                file: file, line: line
+            )
+            XCTAssertGreaterThanOrEqual(
+                bar.confidence, colocated.confidence,
+                "La confiance d'une mesure ne doit JAMAIS être inférieure à celle du beat co-localisé",
+                file: file, line: line
+            )
+            XCTAssertEqual(
+                bar.confidence,
+                colocated.confidence + (1 - colocated.confidence) * tracked.downbeatConfidence,
+                accuracy: 1e-12,
+                "bar.confidence = confiance de POSITION renforcée par la marge métrique",
+                file: file, line: line
+            )
+        }
+    }
+
     // MARK: - §19.1.5 : tempo stable
 
     /// 120 BPM stable sur 8 s → beats réguliers : période médiane
@@ -199,8 +242,11 @@ final class BeatTrackerTests: XCTestCase {
             let nearestAccent = try XCTUnwrap(strongTimes.map { abs($0 - start) }.min())
             XCTAssertLessThanOrEqual(nearestAccent, 0.040,
                                      "downbeat à \(start) s à plus de 40 ms d'un accent fort")
-            XCTAssertEqual(bar.confidence, tracked.downbeatConfidence)
         }
+        // Remplace l'ancienne assertion `bar.confidence == downbeatConfidence` :
+        // la confiance d'une mesure est désormais une confiance de POSITION
+        // (voir `assertBarConfidences`).
+        try assertBarConfidences(tracked)
         XCTAssertEqual(tracked.bars.map(\.index), Array(0..<tracked.bars.count),
                        "Index de mesures non croissants depuis 0")
     }
@@ -252,9 +298,74 @@ final class BeatTrackerTests: XCTestCase {
             let nearestAccent = try XCTUnwrap(strongTimes.map { abs($0 - start) }.min())
             XCTAssertLessThanOrEqual(nearestAccent, 0.040,
                                      "downbeat à \(start) s à plus de 40 ms d'un accent fort")
-            XCTAssertEqual(bar.confidence, tracked.downbeatConfidence)
         }
+        try assertBarConfidences(tracked)
         XCTAssertEqual(tracked.bars.map(\.index), Array(0..<tracked.bars.count),
                        "Index de mesures non croissants depuis 0")
+    }
+
+    // MARK: - §20 niveau A : profil d'accents RIGOUREUSEMENT UNIFORME
+
+    /// 4-on-the-floor PUR : tous les temps portent exactement la même
+    /// amplitude et AUCUNE énergie de basse ne distingue un temps d'un
+    /// autre. Les deux tests précédents utilisent des profils explicitement
+    /// accentués (impulsions 2× plus fortes + basses aux mêmes instants) ;
+    /// ce cas — pourtant le plus fréquent en EDM — n'était couvert par
+    /// aucun test.
+    ///
+    /// Propriétés vérifiées :
+    /// 1. aucun crash, une grille de beats est produite ;
+    /// 2. la mesure retenue est l'une des candidates §20 (2, 3 ou 4) : le
+    ///    moteur choisit toujours, mais n'invente pas de valeur ;
+    /// 3. `downbeatConfidence` est FAIBLE — c'est la propriété HONNÊTE
+    ///    (§63 : ne jamais prétendre savoir). Sur un profil strictement
+    ///    sans bruit la marge vaut exactement 0 ; ici le seul écart possible
+    ///    entre décalages vient du plancher de bruit de l'enveloppe, borné
+    ///    par `noiseAmplitude / (1 + noiseAmplitude)` = 0,03/1,03 ≈ 0,029 —
+    ///    d'où le seuil 0,05, à comparer aux ~0,37 mesurés sur les profils
+    ///    accentués ci-dessus ;
+    /// 4. la confiance des MESURES, elle, ne s'effondre pas avec la marge
+    ///    métrique : c'est précisément l'objet du correctif, une marge nulle
+    ///    ne doit pas rendre chaque « 1 » incoupable.
+    func testUniformAccentProfileYieldsLowDownbeatConfidence() throws {
+        let duration = 12.0
+        // Impulsions RIGOUREUSEMENT identiques tous les 0,5 s (120 BPM).
+        let impulses = stride(from: 0.0, to: duration, by: 0.5)
+            .map { (time: $0, amplitude: Float(1)) }
+        let envelope = makeEnvelope(impulses: impulses, duration: duration)
+        // Aucune frame d'accent de basse : `bandEnergies[0]` est nulle
+        // partout, donc `bassAtBeat` ne départage aucun décalage.
+        let features = makeFeatures(frameCount: envelope.count, duration: duration)
+
+        let tracked = BeatTracker().track(
+            hypothesis: makeHypothesis(bpm: 120),
+            envelope: envelope,
+            envelopeRate: envelopeRate,
+            features: features
+        )
+
+        XCTAssertGreaterThanOrEqual(tracked.beats.count, 12,
+                                    "Une grille de beats doit être produite")
+        XCTAssertTrue([2, 3, 4].contains(tracked.meterNumerator),
+                      "La mesure retenue doit être une candidate §20, jamais une valeur inventée")
+        let hypothesisMeter = try XCTUnwrap(
+            tracked.hypothesis.meterNumerator,
+            "L'hypothèse complétée doit porter la mesure retenue"
+        )
+        XCTAssertEqual(hypothesisMeter, tracked.meterNumerator)
+        XCTAssertEqual(tracked.hypothesis.meterDenominator, 4)
+
+        XCTAssertGreaterThanOrEqual(tracked.downbeatConfidence, 0)
+        XCTAssertLessThan(tracked.downbeatConfidence, 0.05,
+                          "Profil uniforme : la marge métrique doit rester quasi nulle")
+
+        XCTAssertFalse(tracked.bars.isEmpty, "Deux downbeats suffisent à produire des mesures")
+        try assertBarConfidences(tracked)
+        for bar in tracked.bars {
+            XCTAssertGreaterThan(
+                bar.confidence, 0.6,
+                "Une marge métrique quasi nulle ne doit PAS effondrer la confiance de position"
+            )
+        }
     }
 }

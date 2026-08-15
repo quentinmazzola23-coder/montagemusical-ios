@@ -19,7 +19,21 @@ struct TrackedRhythm: Sendable {
     let bars: [BarEvent]
     /// 2, 3 ou 4 au niveau A (§20).
     let meterNumerator: Int
-    /// Marge relative entre la meilleure mesure candidate et la deuxième.
+    /// Marge relative entre la meilleure mesure candidate et la deuxième :
+    /// `(meilleur − second) / meilleur`.
+    ///
+    /// ATTENTION — c'est une **marge inter-hypothèses de métrique**, PAS une
+    /// confiance de position. Elle répond à « de combien la mesure retenue
+    /// devance-t-elle la deuxième candidate ? », jamais à « à quel point le
+    /// début de mesure est-il temporellement sûr ? ». Elle est
+    /// structurellement bornée bas : sur un 4/4 dont le temps 1 porte un
+    /// accent de +20 %, elle plafonne vers 0,08 ; sur un 4-on-the-floor
+    /// rigoureusement uniforme elle vaut 0.
+    ///
+    /// Elle n'est donc JAMAIS recopiée dans `BarEvent.confidence`
+    /// (voir `barConfidence` dans `track`) : son seul consommateur légitime
+    /// est `confidenceBreakdown.rhythm`, qui pondère précisément la
+    /// probabilité de l'hypothèse par la sûreté du CHOIX de la métrique.
     let downbeatConfidence: Double
 }
 
@@ -194,6 +208,42 @@ struct BeatTracker: Sendable {
             downbeatConfidence = min(1, max(0, (bestScore - secondScore) / bestScore))
         }
 
+        // ---- Confiance d'un BarEvent = confiance de POSITION ----
+        //
+        // Défaut corrigé : `downbeatConfidence` était recopiée telle quelle
+        // dans chaque `BarEvent`. Or c'est une MARGE INTER-HYPOTHÈSES DE
+        // MÉTRIQUE (« la mesure 4 l'emporte-t-elle nettement sur la 3 ? »),
+        // structurellement bornée à ~0,03–0,10 même sur un 4/4 parfaitement
+        // détecté — et exactement 0 sur un 4-on-the-floor uniforme.
+        // `AnchorField` lit `bar.confidence` comme la confiance de POSITION
+        // de l'ancre « Downbeat » et en tire, avec `uncertaintyPenalty` = 1,
+        // `uncertainty = 1 − confidence` ≈ 0,92 — contre ≈ 0,1 pour l'ancre
+        // de beat co-localisée (qui porte, elle, la cohérence des
+        // intervalles). Chaque début de mesure devenait ainsi l'ancre la
+        // plus FAIBLE du niveau beat et le générateur évitait de couper sur
+        // le « 1 » : l'inverse exact de ce qu'on veut sur de l'EDM.
+        //
+        // Ce qu'un `BarEvent` affirme d'abord, c'est la position de son
+        // début — et ce début EST le temps `beats[downbeatIndices[k]]`,
+        // construit à partir de la même frame. Sa position est donc
+        // exactement aussi sûre que celle de ce beat, c'est-à-dire
+        // `coherence` (cohérence des intervalles de la grille, §19.1.5).
+        // La marge métrique ne peut que RENFORCER cette certitude — elle
+        // dit que le beat retenu est bien un « 1 » —, jamais l'affaiblir.
+        // D'où la combinaison monotone, bornée 0…1 par construction :
+        //
+        //     barConfidence = coherence + (1 − coherence) × downbeatConfidence
+        //
+        // - vaut EXACTEMENT `coherence` quand rien ne distingue les temps
+        //   (`downbeatConfidence` = 0) : aucune certitude inventée (§63) ;
+        // - n'est JAMAIS inférieure à la confiance du beat co-localisé
+        //   (invariant couvert par `BeatTrackerTests`) ;
+        // - tend vers 1 quand la mesure s'impose nettement.
+        //
+        // `downbeatConfidence` reste rendue telle quelle par `TrackedRhythm`
+        // pour `confidenceBreakdown.rhythm`, où elle a un sens réel.
+        let barConfidence = min(1, max(0, coherence + (1 - coherence) * downbeatConfidence))
+
         // Bars : BarEvent successifs entre downbeats (index croissant).
         // Les beats situés avant le premier downbeat ne sont rattachés à
         // aucune mesure : les bars commencent au premier downbeat.
@@ -210,7 +260,7 @@ struct BeatTracker: Sendable {
                     start: beats[downbeatIndices[barIndex]].time,
                     end: beats[downbeatIndices[barIndex + 1]].time,
                     index: barIndex,
-                    confidence: downbeatConfidence
+                    confidence: barConfidence
                 ))
             }
         }

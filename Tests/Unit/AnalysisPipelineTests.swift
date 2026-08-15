@@ -15,6 +15,7 @@
 //
 
 import XCTest
+import SwiftData
 @testable import MontageMusical
 
 final class AnalysisPipelineTests: XCTestCase {
@@ -465,5 +466,273 @@ final class AnalysisPipelineTests: XCTestCase {
             result.eventRelations.allSatisfy { $0.type != .prepares },
             "Aucune relation prepares sans montée réelle"
         )
+    }
+
+    // MARK: - (i) Version de SCHÉMA ≠ version de MOTEUR (§61, §69)
+
+    /// Le résultat persisté porte la version de SCHÉMA, la méta de cache
+    /// porte les DEUX versions, et une méta écrite avant le découplage
+    /// n'autorise plus aucune relecture.
+    ///
+    /// Enjeu : tant que `MusicAnalysisResult.version` portait la version de
+    /// moteur, tout incrément de moteur périmait d'un coup le cache d'analyse
+    /// ET les partitions de tous les projets — la promesse §69 (« une
+    /// nouvelle partition ne redécode pas la musique ») ne tenait plus dans
+    /// le cas le plus fréquent, la correction de bug.
+    func testResultCarriesSchemaVersionWhileCacheKeysOnEngineVersion() async throws {
+        let (projectID, audio) = try makeProject(
+            write: { try Self.writeClickTrack(seconds: 10, to: $0) },
+            durationSeconds: 10
+        )
+        let result = try await analyzer.analyze(audio: audio, configuration: .production) { _ in }
+
+        // Le champ `version` du résultat décrit la FORME du document (§12),
+        // jamais l'algorithme.
+        XCTAssertEqual(
+            result.version, DeterministicMusicAnalyzer.analysisSchemaVersion,
+            "MusicAnalysisResult.version doit porter la version de SCHÉMA"
+        )
+        // Garde-fou : si les deux valeurs redevenaient égales, les assertions
+        // de péremption (ici et dans PaceSelectionStoreTests) ne
+        // distingueraient plus rien et passeraient par accident.
+        XCTAssertNotEqual(
+            DeterministicMusicAnalyzer.analysisSchemaVersion,
+            DeterministicMusicAnalyzer.engineVersion,
+            "Schéma et moteur doivent rester des axes de version DISTINCTS"
+        )
+
+        // La méta de cache trace les deux, séparément.
+        let metaURL = fileStore
+            .subdirectoryURL(.analysis, for: projectID)
+            .appending(path: "analysis-meta-v1.json")
+        let metaObject = try JSONSerialization.jsonObject(with: Data(contentsOf: metaURL))
+        let meta = try XCTUnwrap(metaObject as? [String: Any], "analysis-meta-v1.json doit être un objet JSON")
+        XCTAssertEqual(
+            meta["engineVersion"] as? Int, DeterministicMusicAnalyzer.engineVersion,
+            "Le cache est invalidé par la version de MOTEUR (il protège un calcul)"
+        )
+        XCTAssertEqual(
+            meta["schemaVersion"] as? Int, DeterministicMusicAnalyzer.analysisSchemaVersion,
+            "La version de SCHÉMA garde la LISIBILITÉ du blob"
+        )
+
+        // MIGRATION — une méta écrite AVANT le découplage ne porte pas
+        // `schemaVersion` et porte une version de moteur ancienne : son
+        // décodage échoue, le cache est ignoré et l'analyse est REFAITE.
+        // Aucun résultat n'est jamais relu sous un schéma qu'il ne respecte
+        // pas, et rien n'est réécrit en place (§0.7, §61).
+        var legacy = meta
+        legacy.removeValue(forKey: "schemaVersion")
+        legacy["engineVersion"] = 2
+        try JSONSerialization.data(withJSONObject: legacy, options: [.sortedKeys])
+            .write(to: metaURL, options: .atomic)
+
+        let log = ProgressLog()
+        let recomputed = try await analyzer.analyze(audio: audio, configuration: .production) { progress in
+            log.append(progress)
+        }
+        XCTAssertFalse(
+            log.all.isEmpty,
+            "Méta héritée (sans schemaVersion) → cache ignoré, toutes les phases §33 sont republiées"
+        )
+        XCTAssertEqual(recomputed.version, DeterministicMusicAnalyzer.analysisSchemaVersion)
+    }
+
+    // MARK: - (j) Reprise NON BLOQUANTE après annulation (§8.1, §33)
+
+    /// `startAnalysisIfNeeded` ne doit JAMAIS attendre la fin d'une tâche
+    /// annulée : la boucle de polling de la vue ne démarre qu'après son
+    /// retour, donc une attente bloquante fige l'écran sur « Préparation
+    /// audio — Phase 1 sur 5 » pendant que le moteur en est ailleurs — un
+    /// état affiché factuellement faux (§33).
+    ///
+    /// Le test s'appuie sur un moteur injecté qui reste occupé tant que le
+    /// test ne le libère pas, exactement comme la génération détachée
+    /// orpheline du cas réel. Si `startAnalysisIfNeeded` redevenait bloquant,
+    /// il ne reviendrait pas avant l'ouverture de la porte — l'attente bornée
+    /// ci-dessous échouerait au lieu de figer la suite de tests.
+    func testStartAfterCancellationReturnsImmediatelyAndRelaunchesOnce() async throws {
+        let container = try ModelContainerFactory.makeInMemory()
+        let projectStore = ProjectStore(modelContainer: container, fileStore: fileStore)
+        let gate = Gate()
+        let counter = AnalyzeCallCounter()
+        let analysisActor = AudioAnalysisActor(
+            analyzer: GatedAnalyzer(gate: gate, counter: counter),
+            projectStore: projectStore,
+            fileStore: fileStore
+        )
+
+        // Projet réel en statut `analyzing` avec un fichier audio présent
+        // (l'acteur lit la durée réelle via AVURLAsset — jamais inventée).
+        let projectID = try await projectStore.createDraft()
+        let audioURL = fileStore
+            .subdirectoryURL(.audio, for: projectID)
+            .appending(path: "original.wav")
+        try Self.writeClickTrack(seconds: 2, to: audioURL)
+        try await projectStore.attachAudio(
+            ImportedAudio(
+                projectID: projectID,
+                relativePath: "audio/original.wav",
+                originalFilename: "original.wav",
+                duration: MediaTime(seconds: 2),
+                fileExtension: "wav"
+            ),
+            projectID: projectID
+        )
+
+        await analysisActor.startAnalysisIfNeeded(projectID: projectID)
+        let started = await Self.waitUntil { await counter.count == 1 }
+        XCTAssertTrue(started, "La première analyse doit avoir démarré")
+
+        // Annulation (équivalent d'`onDisappear`) : la tâche est marquée
+        // annulée mais reste occupée — le moteur simulé ignore l'annulation
+        // jusqu'à l'ouverture de la porte.
+        await analysisActor.cancelAnalysis(projectID: projectID)
+
+        // Réouverture immédiate : l'appel doit RENDRE LA MAIN sans attendre.
+        let returned = Flag()
+        Task {
+            await analysisActor.startAnalysisIfNeeded(projectID: projectID)
+            await returned.raise()
+        }
+        let cameBack = await Self.waitUntil { await returned.isRaised }
+        XCTAssertTrue(
+            cameBack,
+            "startAnalysisIfNeeded doit être NON BLOQUANT même face à une tâche annulée encore active"
+        )
+        let callsWhileBlocked = await counter.count
+        XCTAssertEqual(
+            callsWhileBlocked, 1,
+            "Aucune seconde analyse ne doit démarrer tant que la tâche annulée n'est pas terminée (§8 : une analyse par projet)"
+        )
+
+        // La tâche annulée se termine → la demande de relance est honorée
+        // EXACTEMENT une fois.
+        await gate.open()
+        let relaunched = await Self.waitUntil { await counter.count == 2 }
+        XCTAssertTrue(relaunched, "La reprise doit être relancée à la terminaison de la tâche annulée")
+
+        // Et elle ne se relance pas en boucle : la demande est à usage unique
+        // et la seconde analyse mène le projet hors du statut `analyzing`.
+        try await Task.sleep(for: .milliseconds(300))
+        let finalCalls = await counter.count
+        XCTAssertEqual(finalCalls, 2, "Exactement deux analyses : l'annulée puis la reprise — jamais de boucle")
+    }
+
+    // MARK: - Outils du test (j)
+
+    /// Attente BORNÉE (2 s max) d'une condition asynchrone : un correctif
+    /// raté doit faire échouer le test, jamais figer la suite.
+    private static func waitUntil(_ condition: @Sendable () async -> Bool) async -> Bool {
+        for _ in 0..<200 {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
+    /// Porte ouvrable une seule fois. Acteur et non `NSLock` : verrouiller
+    /// un `NSLock` depuis un contexte asynchrone est interdit en Swift 6.
+    private actor Gate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func open() {
+            isOpen = true
+            let pending = waiters
+            waiters.removeAll()
+            for continuation in pending {
+                continuation.resume()
+            }
+        }
+
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    private actor AnalyzeCallCounter {
+        private(set) var count = 0
+        func increment() -> Int {
+            count += 1
+            return count
+        }
+    }
+
+    private actor Flag {
+        private(set) var isRaised = false
+        func raise() { isRaised = true }
+    }
+
+    /// Moteur d'analyse simulé — UNIQUEMENT ici : le premier appel reste
+    /// occupé jusqu'à l'ouverture de la porte SANS réagir à l'annulation
+    /// (c'est le comportement de la génération détachée orpheline), puis
+    /// honore l'annulation ; les appels suivants rendent immédiatement un
+    /// résultat minimal valide.
+    private struct GatedAnalyzer: MusicAnalyzing, Sendable {
+        let gate: Gate
+        let counter: AnalyzeCallCounter
+
+        func analyze(
+            audio: ImportedAudio,
+            configuration: AnalysisConfiguration,
+            progress: @escaping @Sendable (AnalysisProgress) -> Void
+        ) async throws -> MusicAnalysisResult {
+            let call = await counter.increment()
+            progress(AnalysisProgress(phase: .audioPreparation, completedPhases: []))
+            if call == 1 {
+                await gate.wait()
+                try Task.checkCancellation()
+            }
+            return Self.minimalResult(duration: MediaTime(seconds: 12))
+        }
+
+        /// Même forme que le résultat minimal §63 du moteur réel (racine
+        /// `globalArc` seule, aucune pulsation) — le générateur de partitions
+        /// sait le traiter (cas « ambiant sans beats »).
+        private static func minimalResult(duration: MediaTime) -> MusicAnalysisResult {
+            var flat: [TimedValue] = []
+            var seconds = 0.0
+            while seconds <= duration.seconds {
+                flat.append(TimedValue(time: MediaTime(seconds: seconds), value: 0.5))
+                seconds += 0.5
+            }
+            return MusicAnalysisResult(
+                version: DeterministicMusicAnalyzer.analysisSchemaVersion,
+                duration: duration,
+                rhythmHypotheses: [],
+                selectedRhythmHypothesisID: DeterministicMusicAnalyzer.noHypothesisID,
+                beats: [],
+                bars: [],
+                structuralUnits: [StructuralUnit(
+                    id: UUID(),
+                    parentID: nil,
+                    level: .globalArc,
+                    start: .zero,
+                    end: duration,
+                    repetitionGroupID: nil,
+                    boundaryStrengthIn: 1,
+                    boundaryStrengthOut: 1,
+                    descriptors: MusicalDescriptorVector(
+                        energy: 0.5, rhythmicDensity: 0, tension: 0, novelty: 0,
+                        stability: 0.5, regularity: 0, vocalPresence: 0, bassPresence: 0.5
+                    ),
+                    confidence: 0.5
+                )],
+                functionalStates: [],
+                musicalEvents: [],
+                eventRelations: [],
+                continuousCurves: ContinuousCurves(
+                    energy: flat, density: flat, tension: flat, novelty: flat,
+                    stability: flat, regularity: flat, vocalPresence: flat, bassPresence: flat
+                ),
+                analysisConfidence: ConfidenceBreakdown(
+                    overall: 0.2, rhythm: 0, structure: 0.2, functions: 0
+                )
+            )
+        }
     }
 }

@@ -31,11 +31,80 @@ import Foundation
 // Non defini par la specification — definition minimale V1.
 struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
 
-    /// Version du moteur déterministe (§61, §69) — incrémenter à chaque
-    /// changement de comportement d'analyse.
-    /// v2 : garde `minimumOnsetsForTempo` (§63) — un signal quasi vide
-    /// n'engendre plus d'hypothèse rythmique fantôme.
-    static let engineVersion = 2
+    /// Version de l'ALGORITHME d'analyse (§61, §69) — incrémentée à chaque
+    /// changement de COMPORTEMENT, c'est-à-dire chaque fois que le même audio
+    /// ne produirait plus le même résultat.
+    ///
+    /// Elle ne gouverne qu'une chose : la validité du CACHE (`AnalysisCache`)
+    /// et des checkpoints de phase. C'est le bon périmètre — un cache protège
+    /// un CALCUL, et un calcul qui a changé doit être refait. Elle ne périme
+    /// en revanche plus les partitions déjà générées : voir
+    /// `analysisSchemaVersion`.
+    ///
+    /// - v2 : garde `minimumOnsetsForTempo` (§63) — un signal quasi vide
+    ///   n'engendre plus d'hypothèse rythmique fantôme.
+    /// - v3 : refonte des descripteurs qui pilotent la dramaturgie. Quatre
+    ///   changements de comportement, tous suffisants à eux seuls pour
+    ///   invalider un résultat v2 :
+    ///   * **tempo** — le score d'autocorrélation est normalisé par la somme
+    ///     des poids réellement appliqués (il devient une moyenne pondérée et
+    ///     non une somme dont la valeur dépend du nombre de termes
+    ///     disponibles), et les candidats sont restreints aux lags en
+    ///     RELATION ENTIÈRE avec le pic ACF dominant, ce qui supprime l'alias
+    ///     2/3 introduit par une couche de contretemps ;
+    ///   * **onsets** — la fusion des candidats se fait par CLUSTER (distance
+    ///     mesurée au début du cluster) et non plus en chaîne : un roulement
+    ///     rapide ne s'effondre plus en 1 à 3 onsets, la densité rythmique
+    ///     culmine pendant la montée au lieu d'y chuter ;
+    ///   * **buildup** — `energyRise` est mesuré sur le MAXIMUM de la fenêtre
+    ///     et non sur son dernier span, donc insensible au silence qui
+    ///     précède le drop dans la figure canonique EDM ;
+    ///   * **structure** — kernels de nouveauté longs (échelle de la phrase)
+    ///     et seuil ABSOLU de nouveauté, pour qu'une boucle homogène puisse
+    ///     rendre zéro frontière au lieu d'en fabriquer par bruit.
+    static let engineVersion = 3
+
+    /// Version du SCHÉMA de `MusicAnalysisResult` (§61) — la forme des
+    /// données persistées, pas l'algorithme qui les produit. C'est elle qui
+    /// est écrite dans `MusicAnalysisResult.version`.
+    ///
+    /// **Pourquoi la séparer d'`engineVersion`.** Les deux étaient
+    /// confondues : `AnalysisCache` exigeait `result.version == engineVersion`
+    /// et `ScoreLibrary` exigeait `meta.analysisVersion == engineVersion`.
+    /// Conséquence, toute évolution du moteur — y compris une simple
+    /// correction de bug — périmait SIMULTANÉMENT le cache d'analyse et les
+    /// partitions de tous les projets de tous les utilisateurs. La promesse
+    /// §69 (« une nouvelle partition ne doit pas obligatoirement redécoder la
+    /// musique ») ne tenait alors que dans le cas rare (changement de
+    /// `ScoreConfiguration`) et tombait exactement dans le cas fréquent.
+    ///
+    /// **Découpage retenu.**
+    /// - la validité du CACHE dépend du MOTEUR : il protège un calcul ;
+    /// - la LISIBILITÉ d'un résultat persisté et la validité des PARTITIONS
+    ///   dépendent du SCHÉMA : une partition est une relecture du résultat,
+    ///   pas une reproduction du calcul. Régénérer des partitions à partir
+    ///   d'un résultat en cache ne redécode rien — c'est précisément §69.
+    ///
+    /// **Valeur 1, jamais incrémentée à ce jour** : le schéma §12 n'a pas
+    /// bougé depuis la première version (le fichier s'appelle d'ailleurs
+    /// `analysis-v1.json`). À incrémenter uniquement si un champ change de
+    /// nom, de type ou de sens.
+    ///
+    /// **Migration honnête (§61 : jamais de régénération SILENCIEUSE).**
+    /// Les résultats déjà sur disque portent `version = 1` ou `2` — d'anciennes
+    /// versions de MOTEUR écrites dans ce champ. Ils ne peuvent pas être
+    /// relus par erreur sous ce nouveau sens : `CacheMeta` porte désormais un
+    /// champ `schemaVersion` OBLIGATOIRE, absent de toutes les métas
+    /// existantes, dont le décodage échoue donc — cache ignoré, résultat
+    /// recalculé. Aucun résultat n'est jamais lu avec un schéma qu'il ne
+    /// respecte pas, et aucune donnée n'est réécrite en place.
+    /// Symétriquement, les `scores-meta-v1.json` existants portent
+    /// `analysisVersion = 2` : ils sont déclarés périmés UNE dernière fois
+    /// par ce changement de sémantique, et l'écran du choix du rythme affiche
+    /// « Les rythmes doivent être recalculés » avec un bouton — le recalcul
+    /// reste une action de l'utilisateur (§61). À partir de la v3, un
+    /// incrément de moteur ne périmera plus aucune partition.
+    static let analysisSchemaVersion = 1
 
     /// Nombre minimal d'onsets détectés (§18) pour tenter une estimation de
     /// tempo (§19.1). Une périodicité exige plusieurs événements réels ;
@@ -79,6 +148,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             projectID: projectID,
             fingerprint: audioFingerprint,
             engineVersion: Self.engineVersion,
+            schemaVersion: Self.analysisSchemaVersion,
             configurationFingerprint: configFingerprint
         ) {
             // Cache complet → résultat immédiat, aucune phase relancée (§69).
@@ -135,6 +205,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
                 projectID: projectID,
                 fingerprint: audioFingerprint,
                 engineVersion: Self.engineVersion,
+                schemaVersion: Self.analysisSchemaVersion,
                 configurationFingerprint: configFingerprint
             )
             cache.clearCheckpoint(projectID: projectID)
@@ -295,8 +366,12 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             structuralUnits: structuralUnits,
             functionalStates: curvesAndEvents.functionalStates
         )
+        // `version` = version de SCHÉMA (§12), jamais la version de moteur :
+        // ce champ décrit la FORME du document persisté, et c'est lui que
+        // `ScoreLibrary` compare pour la validité §61 des partitions. La
+        // version de moteur vit dans les métas (cache §69 et partitions §61).
         let result = MusicAnalysisResult(
-            version: Self.engineVersion,
+            version: Self.analysisSchemaVersion,
             duration: features.duration,
             rhythmHypotheses: rhythmHypotheses,
             selectedRhythmHypothesisID: selectedRhythmHypothesisID,
@@ -314,6 +389,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             projectID: projectID,
             fingerprint: audioFingerprint,
             engineVersion: Self.engineVersion,
+            schemaVersion: Self.analysisSchemaVersion,
             configurationFingerprint: configFingerprint
         )
         cache.clearCheckpoint(projectID: projectID)
@@ -417,7 +493,9 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             rootUnits = []
         }
         return MusicAnalysisResult(
-            version: engineVersion,
+            // Version de SCHÉMA, comme le résultat complet — un résultat
+            // minimal n'est pas un document d'une autre forme.
+            version: analysisSchemaVersion,
             duration: duration,
             rhythmHypotheses: [],
             selectedRhythmHypothesisID: noHypothesisID,

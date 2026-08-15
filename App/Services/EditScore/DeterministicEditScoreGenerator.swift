@@ -33,6 +33,22 @@
 //  optimisation possible plus tard : ré-évaluation LOCALE des seuls
 //  candidats dont l'intervalle englobant a changé.
 //
+//  ANNULATION : la boucle de raffinement teste `Task.checkCancellation()`
+//  à chaque tour — c'est le seul endroit où le générateur passe un temps
+//  non borné. `generateScores` étant déjà `throws` (protocole §7), la
+//  signature ne change pas et `AudioAnalysisActor` (qui ponte l'annulation
+//  jusqu'au `Task.detached` par `withTaskCancellationHandler`) reçoit un
+//  `CancellationError` au lieu de brûler un cœur jusqu'au bout.
+//
+//  REPLI D'UN GROUPE DÉFINITIVEMENT INFAISABLE (§28.2/§70) : un geste que
+//  la seule GÉOMÉTRIE interdit dans les trois modes (membres plus serrés
+//  que le plancher le plus permissif, ou membre collé à une frontière
+//  racine) n'est pas enregistré comme candidat de groupe : ses ancres
+//  restent des candidats INDIVIDUELS au lieu de disparaître du montage.
+//  Le critère est mode-indépendant, donc l'imbrication §70 reste garantie
+//  par construction. Un groupe refusé pour VIOLATION DE RESPIRATION, lui,
+//  ne se replie jamais : le burst reste atomique (§27).
+//
 
 import Foundation
 
@@ -73,6 +89,20 @@ extension ScoreConfiguration {
         case .percussive: return splitGainThresholdPercussive
         }
     }
+
+    /// Plancher §28.2 le plus PERMISSIF des trois modes (Percutant en
+    /// production, la monotonie étant garantie par l'`assert` de l'init).
+    ///
+    /// Sert de critère d'infaisabilité DÉFINITIVE, indépendant du mode :
+    /// une géométrie qui ne passe pas ce plancher-là ne passe aucun des
+    /// trois. Le calcul prend le minimum réel sur `PaceMode.allCases`
+    /// (ordre fixe, donc déterministe) plutôt que de présumer que Percutant
+    /// est le plus petit : l'`assert` de monotonie disparaît en Release.
+    var mostPermissiveSlotFloor: MediaTime {
+        PaceMode.allCases
+            .map { minimumSlotDuration(for: $0) }
+            .min() ?? minimumSlotDurationPercussive
+    }
 }
 
 // MARK: - Générateur
@@ -80,7 +110,16 @@ extension ScoreConfiguration {
 struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
 
     /// Version du générateur (spec §61 `scoreVersion`).
-    static let generatorVersion = 1
+    ///
+    /// 1 → 2 : la LOGIQUE DE SÉLECTION a changé, à `ScoreConfiguration`
+    /// constante — pool de candidats (le `formUnion` d'un groupe rejeté ne
+    /// retire plus ses membres du pool individuel ; un groupe géométriquement
+    /// infaisable dans les trois modes se replie sur ses ancres), et gestes
+    /// §27 exprimés en mesures. `ScoreLibrary.scoresAreCurrent` ne périme que
+    /// sur (generatorVersion, empreinte de `ScoreConfiguration`,
+    /// analysisVersion) : sans cet incrément, tous les projets existants
+    /// garderaient des partitions produites par l'ancienne logique (§61).
+    static let generatorVersion = 2
 
     // La fenêtre de densité locale et le facteur d'échelle de
     // l'`overcutPenalty` vivent dans `ScoreConfiguration`
@@ -101,7 +140,11 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
         //    le champ ne contient naturellement que structure/nouveauté :
         //    la partition reste structurelle, aucun beat n'est inventé.
         let field = AnchorFieldBuilder().build(from: analysis, configuration: configuration)
-        let gestures = GestureDetector().detect(analysis: analysis, field: field)
+        let gestures = GestureDetector().detect(
+            analysis: analysis,
+            field: field,
+            configuration: configuration
+        )
         let anchorsByID = Dictionary(uniqueKeysWithValues: field.anchors.map { ($0.id, $0) })
 
         // Zones sans coupe : intérieur strict d'un maintien (impactHold,
@@ -131,6 +174,8 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
             anchorsByID: anchorsByID,
             noCutZones: noCutZones,
             demotedMajorIDs: demotedMajorIDs,
+            rootBoundaryTicks: boundaries.map(\.ticks),
+            permissiveFloorTicks: configuration.mostPermissiveSlotFloor.ticks,
             durationTicks: durationTicks
         )
 
@@ -144,7 +189,7 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
                 targetSeconds: configuration.targetSlotDuration(for: mode).seconds,
                 gainThreshold: configuration.splitGainThreshold(for: mode)
             )
-            refine(
+            try refine(
                 stage: stage,
                 configuration: configuration,
                 durationTicks: durationTicks,
@@ -200,14 +245,18 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
     /// croissant) tant qu'elles respectent le plancher FLUIDE (le plus
     /// grand des trois) : la racine est commune aux trois modes.
     ///
-    /// GARDE-FOU : depuis la fusion AMONT des paires de majeures trop
-    /// proches (`AnchorFieldBuilder.deduplicate`, fenêtre = plancher
-    /// fluide), deux majeures survivantes sont toujours espacées d'au
-    /// moins ce plancher — la branche de rétrogradation est donc
-    /// normalement INATTEIGNABLE. Elle est conservée en garde-fou
-    /// (assertion en debug, rétrogradation silencieuse en release) pour
-    /// que `majorAnchorIDs` ne puisse jamais désigner une ancre absente
-    /// des trois modes (§28.1).
+    /// GARDE-FOU : la passe 2 de `AnchorFieldBuilder.deduplicate`
+    /// RÉTROGRADE en amont (elle ne supprime plus) la plus faible de deux
+    /// majeures distantes de moins du plancher fluide, si bien que deux
+    /// ancres restées MAJEURES sont toujours espacées d'au moins ce
+    /// plancher — la branche de rétrogradation ci-dessous est donc
+    /// normalement INATTEIGNABLE. La récurrence tient dans les trois cas :
+    /// écart suffisant (invariant direct), la nouvelle perd (la suite des
+    /// majeures est inchangée), la précédente perd (la majeure conservée
+    /// avant elle était déjà à ≥ plancher, et les centres croissent).
+    /// La branche est conservée en garde-fou (assertion en debug,
+    /// rétrogradation silencieuse en release) pour que `majorAnchorIDs` ne
+    /// puisse jamais désigner une ancre absente des trois modes (§28.1).
     private func buildRoot(
         field: AnchorField,
         durationTicks: Int64,
@@ -259,32 +308,94 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
 
     // MARK: - Candidats
 
+    /// - Parameters:
+    ///   - rootBoundaryTicks: frontières de la partition RACINE — actives
+    ///     dans les TROIS modes et jamais retirées par le raffinement.
+    ///   - permissiveFloorTicks: plancher §28.2 du mode le plus permissif.
     private func makeCandidates(
         field: AnchorField,
         gestures: [EditGesture],
         anchorsByID: [UUID: EditAnchor],
         noCutZones: [(start: Int64, end: Int64)],
         demotedMajorIDs: Set<UUID>,
+        rootBoundaryTicks: [Int64],
+        permissiveFloorTicks: Int64,
         durationTicks: Int64
     ) -> [SplitCandidate] {
         var candidates: [SplitCandidate] = []
         var groupMemberIDs = Set<UUID>()
+        // `Set` utilisé uniquement en `contains` : aucun parcours, donc
+        // aucune dépendance à l'ordre de hachage (déterminisme).
+        let rootTicks = Set(rootBoundaryTicks)
 
         func strictlyInsideZone(_ tick: Int64) -> Bool {
             noCutZones.contains { tick > $0.start && tick < $0.end }
         }
 
+        /// Un groupe est-il DÉFINITIVEMENT infaisable, c'est-à-dire refusé
+        /// par la règle du plancher §28.2 dans les TROIS modes quel que soit
+        /// l'état de la sélection ? Deux causes purement géométriques, donc
+        /// INDÉPENDANTES DU MODE — c'est ce qui rend le repli sûr vis-à-vis
+        /// de l'imbrication §70 : le verdict est le même pour Fluide,
+        /// Équilibré et Percutant, aucun candidat n'apparaît en cours de
+        /// séquence.
+        ///
+        /// (a) Deux membres consécutifs plus proches que le plancher le plus
+        ///     permissif : les activer ensemble crée une case sous le
+        ///     plancher, dans tous les modes.
+        /// (b) Un membre qui n'est pas DÉJÀ frontière racine et se trouve à
+        ///     moins de ce plancher d'une frontière racine : les racines
+        ///     sont communes aux trois modes et ne disparaissent jamais, le
+        ///     voisinage est donc définitivement trop serré.
+        ///
+        /// Attention : ce critère ne parle QUE du plancher. Un groupe refusé
+        /// pour VIOLATION DE RESPIRATION (§27/§28.1 : la zone
+        /// (fin, fin + 2 × plancher) d'un burst doit rester libre) n'est PAS
+        /// concerné — il reste un candidat de groupe, atomique, et ses
+        /// ancres restent hors du pool individuel. C'est l'invariant testé
+        /// par `testBurstRefusedWhenActiveBoundaryOccupiesBreathingZone` :
+        /// un burst dont la respiration est impossible ne doit laisser
+        /// AUCUNE de ses ancres devenir frontière.
+        func isPermanentlyInfeasible(_ members: [EditAnchor]) -> Bool {
+            for index in stride(from: 1, to: members.count, by: 1) {
+                let gap = members[index].center.ticks - members[index - 1].center.ticks
+                if gap < permissiveFloorTicks { return true }
+            }
+            for member in members {
+                let tick = member.center.ticks
+                guard !rootTicks.contains(tick) else { continue }
+                for root in rootBoundaryTicks where abs(root - tick) < permissiveFloorTicks {
+                    return true
+                }
+            }
+            return false
+        }
+
         // Groupes de gestes (§27) : toutes les ancres ensemble, ou aucune.
+        //
+        // ORDRE DES GARDES (correctif de la critique S3c) : `formUnion` est
+        // exécuté APRÈS toutes les gardes, jamais avant. Auparavant, un
+        // geste dont UN SEUL membre tombait dans l'intérieur strict d'un
+        // autre geste retirait TOUS ses membres du pool de candidats
+        // individuels alors que le candidat de groupe n'était même pas
+        // créé — les ancres disparaissaient du montage sans qu'aucune règle
+        // ne l'ait décidé. Seuls les membres d'un groupe RÉELLEMENT
+        // enregistré comme candidat sortent désormais du pool individuel.
         for gesture in gestures where !gesture.anchorIDs.isEmpty {
             let members = gesture.anchorIDs
                 .compactMap { anchorsByID[$0] }
                 .sorted { $0.center.ticks < $1.center.ticks }
             guard !members.isEmpty else { continue }
-            groupMemberIDs.formUnion(members.map(\.id))
             // Défensif : un groupe dont une ancre tombe dans une zone sans
             // coupe d'un AUTRE geste n'est pas activable (les bords d'un
             // maintien sont exclus de son intérieur strict).
             guard !members.contains(where: { strictlyInsideZone($0.center.ticks) }) else { continue }
+            // Repli §70/§28.2 : un groupe que le plancher interdit dans les
+            // trois modes n'est pas enregistré du tout — ses ancres
+            // redeviennent des candidats INDIVIDUELS (le membre porteur de
+            // l'impact compris), au lieu de perdre leur coupe partout.
+            guard !isPermanentlyInfeasible(members) else { continue }
+            groupMemberIDs.formUnion(members.map(\.id))
             candidates.append(SplitCandidate(
                 anchors: members,
                 isBurst: gesture.type == .burstResolution,
@@ -316,6 +427,16 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
     /// respecte le plancher du mode OU que le meilleur gain passe sous le
     /// seuil du mode (§28.3). Les candidats restants sont repris tels
     /// quels par l'étape suivante : imbrication par construction (§70).
+    ///
+    /// ANNULATION : la boucle est le seul point chaud du générateur
+    /// (O(activations × candidats × frontières)) et peut durer plusieurs
+    /// secondes sur un morceau long au champ dense. `Task.checkCancellation`
+    /// en tête de tour la rend réellement interruptible : `generateScores`
+    /// est déjà `throws` (protocole §7), la signature publique ne change
+    /// donc pas, et l'appelant (`AudioAnalysisActor`, `Task.detached`)
+    /// reçoit un `CancellationError` au lieu de brûler un cœur jusqu'au
+    /// bout. Le tour est atomique : l'annulation ne laisse jamais une
+    /// activation à moitié appliquée, `boundaries` reste cohérent.
     private func refine(
         stage: StageParameters,
         configuration: ScoreConfiguration,
@@ -323,8 +444,9 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
         boundaries: inout [Boundary],
         candidates: inout [SplitCandidate],
         activatedBurstEnds: inout [Int64]
-    ) {
+    ) throws {
         while true {
+            try Task.checkCancellation()
             var bestIndex: Int?
             var bestGain = 0.0
             var fullyActiveIndices: [Int] = []

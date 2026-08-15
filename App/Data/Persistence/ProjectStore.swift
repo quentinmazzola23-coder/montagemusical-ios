@@ -50,6 +50,11 @@ actor ProjectStore {
     /// `AppEnvironment`) n'initialise pas les propriétés ajoutées.
     private var fileStore = ProjectFileStore()
 
+    /// Journal de la maintenance au lancement (§69A). Valeur par défaut
+    /// requise pour la même raison que `fileStore` : l'init généré par
+    /// `@ModelActor` n'initialise pas les propriétés ajoutées.
+    private let logger = AppLogger(category: .app)
+
     // Non defini par la specification — definition minimale V1 :
     // init d'injection pour les tests (conteneur en mémoire + racine de
     // fichiers temporaire).
@@ -411,9 +416,57 @@ actor ProjectStore {
         }
         try deleteAllEmptyDrafts()
         let knownIDs = Set(try modelContext.fetch(FetchDescriptor<ProjectRecord>()).map(\.id))
-        for orphanID in fileStore.projectDirectoryIDs() where !knownIDs.contains(orphanID) {
-            try? fileStore.deleteDirectory(for: orphanID)
+        let directoryIDs = fileStore.projectDirectoryIDs()
+
+        // ================================================================
+        // FILET DE SÉCURITÉ — base VIDE face à des dossiers PLEINS
+        // ================================================================
+        // La purge ci-dessous efface le dossier §11 (audio/, analysis/,
+        // exports/, temp/) de tout identifiant présent sur disque et absent
+        // de la base. Elle suppose donc que la base est la source de vérité,
+        // ce qui n'est vrai QUE si la base ouverte est bien celle qui décrit
+        // cette racine de fichiers.
+        //
+        // Or `AppEnvironment(modelContainer: .makeInMemory())` associe un
+        // conteneur VIDE à la racine de fichiers de PRODUCTION (correctif
+        // jumeau côté `AppEnvironment` : la racine est désormais injectable).
+        // Dans cette configuration, `knownIDs` est vide, `directoryIDs`
+        // contient tous les vrais projets, et la purge détruirait la musique
+        // importée, les analyses en cache et les exports de l'utilisateur
+        // alors que ses enregistrements SwiftData, eux, survivraient — perte
+        // de données silencieuse et irréversible (§59, §69A, §89).
+        //
+        // « Aucun projet en base + au moins un dossier sur disque » est la
+        // signature exacte d'un conteneur non peuplé, JAMAIS celle d'un
+        // utilisateur ayant supprimé tous ses projets : `delete(projectID:)`
+        // supprime l'enregistrement ET le dossier dans la même opération, et
+        // une interruption entre les deux ne peut laisser qu'un sous-ensemble
+        // strict de dossiers orphelins — pas la totalité alors que la base
+        // est intégralement vide. Dans le doute, on ne supprime RIEN : un
+        // dossier orphelin conservé coûte quelques kilo-octets, une purge à
+        // tort coûte le projet. La maintenance est un confort (§69A), jamais
+        // une opération dont dépend la correction du système.
+        //
+        // Cas volontairement NON couvert par cette garde : une base non vide
+        // dont TOUS les dossiers seraient étrangers — impossible sans
+        // corruption, puisque `createDraft` crée l'arbre §11 avant même
+        // d'insérer l'enregistrement.
+        let containerLooksUnpopulated = knownIDs.isEmpty && !directoryIDs.isEmpty
+        if containerLooksUnpopulated {
+            logger.error(
+                "Maintenance : purge des dossiers orphelins ANNULÉE — base vide face à "
+                + "\(directoryIDs.count) dossier(s) de projet sur disque (conteneur non peuplé ?)."
+            )
+        } else {
+            for orphanID in directoryIDs where !knownIDs.contains(orphanID) {
+                try? fileStore.deleteDirectory(for: orphanID)
+            }
         }
+
+        // Le vidage des `temp/` reste inconditionnel : il ne porte que sur
+        // les projets CONNUS de la base (donc jamais sur un dossier dont on
+        // ignore le propriétaire) et ne détruit que des fichiers déjà
+        // déclarés jetables (§69A).
         for projectID in knownIDs {
             fileStore.clearTemporaryFiles(projectID: projectID)
         }

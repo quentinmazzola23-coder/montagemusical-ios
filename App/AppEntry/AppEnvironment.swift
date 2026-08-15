@@ -45,10 +45,11 @@ final class AppEnvironment {
     /// Cache d'analyse et checkpoints de phase dans `analysis/` (§11, §69).
     let analysisCache: AnalysisCache
 
-    /// Moteur musical déterministe niveau A (Jalon 4, §15, §79) — protocole
-    /// `MusicAnalyzing` §7 ; le moteur avancé Core ML (Jalon 11) se
-    /// branchera derrière le même protocole.
-    let musicAnalyzer: DeterministicMusicAnalyzer
+    /// Moteur musical niveau A (Jalon 4, §15, §79) — protocole
+    /// `MusicAnalyzing` §7 ; le moteur avancé Core ML (Jalon 11) se branche
+    /// derrière le même protocole. Existentiel `Sendable` : le moteur est
+    /// consommé depuis `AudioAnalysisActor`, hors `@MainActor`.
+    let musicAnalyzer: any MusicAnalyzing & Sendable
 
     /// Acteur d'analyse (§8) : une analyse lourde à la fois par projet,
     /// progression observable, annulation avec checkpoint conservé (§8.1).
@@ -125,21 +126,61 @@ final class AppEnvironment {
 
     /// Initialiseur d'injection — previews SwiftUI et tests
     /// (utiliser `ModelContainerFactory.makeInMemory()`).
-    init(modelContainer: ModelContainer) {
+    ///
+    /// ⚠️ `fileStore` est un PARAMÈTRE, et c'est un correctif de sûreté, pas
+    /// une commodité de test. Avant ce changement, cet initialiseur
+    /// construisait inconditionnellement `ProjectFileStore()` — la racine de
+    /// PRODUCTION — quel que soit le conteneur passé : un
+    /// `AppEnvironment(modelContainer: .makeInMemory())` suivi de
+    /// `performStartupMaintenance()` (ce que fait `MontageMusicalApp` au
+    /// démarrage) associait une base VIDE aux dossiers §11 RÉELS et effaçait
+    /// `audio/`, `analysis/` et `exports/` de tous les vrais projets, dont les
+    /// enregistrements SwiftData survivaient — perte de données silencieuse
+    /// (§59, §69A). Une preview enrichie ou un test d'intégration suffisait à
+    /// la déclencher.
+    ///
+    /// Deux verrous INDÉPENDANTS répondent à ce défaut, volontairement
+    /// redondants : ce paramètre (un conteneur en mémoire peut désormais être
+    /// associé à une racine temporaire) et la garde de
+    /// `ProjectStore.performStartupMaintenance` (ne jamais purger quand la
+    /// base est vide alors que des dossiers existent). Le second protège même
+    /// un appelant qui oublierait le premier.
+    ///
+    /// `musicAnalyzer` et `scoreGenerator` sont injectables derrière leurs
+    /// protocoles §7 : un test peut substituer un moteur instrumenté sans
+    /// toucher au reste de l'environnement. Les valeurs par défaut sont
+    /// EXACTEMENT la composition de production (moteur déterministe niveau A
+    /// branché sur le cache §69 de la racine fournie, générateur
+    /// déterministe), donc aucun appelant existant ne change de comportement.
+    init(
+        modelContainer: ModelContainer,
+        fileStore: ProjectFileStore = ProjectFileStore(),
+        musicAnalyzer: (any MusicAnalyzing & Sendable)? = nil,
+        scoreGenerator: any EditScoreGenerating & Sendable = DeterministicEditScoreGenerator()
+    ) {
         self.logger = AppLogger(category: .app)
         self.modelContainer = modelContainer
-        let projectStore = ProjectStore(modelContainer: modelContainer)
+        let projectStore = ProjectStore(modelContainer: modelContainer, fileStore: fileStore)
         self.projectStore = projectStore
-        let fileStore = ProjectFileStore()
         self.fileStore = fileStore
         self.audioImporter = AudioImporter(fileStore: fileStore)
         self.waveformExtractor = WaveformExtractor()
         let analysisCache = AnalysisCache(fileStore: fileStore)
         self.analysisCache = analysisCache
-        let musicAnalyzer = DeterministicMusicAnalyzer(cache: analysisCache, fileStore: fileStore)
-        self.musicAnalyzer = musicAnalyzer
+        // Le moteur par défaut dépend du cache ET de la racine effectivement
+        // injectés : il ne peut donc pas être une valeur par défaut de
+        // paramètre (elle serait évaluée avant `analysisCache`). D'où le
+        // paramètre optionnel + repli explicite ici.
+        let resolvedAnalyzer: any MusicAnalyzing & Sendable
+        if let musicAnalyzer {
+            resolvedAnalyzer = musicAnalyzer
+        } else {
+            resolvedAnalyzer = DeterministicMusicAnalyzer(cache: analysisCache, fileStore: fileStore)
+        }
+        self.musicAnalyzer = resolvedAnalyzer
         self.audioAnalysisActor = AudioAnalysisActor(
-            analyzer: musicAnalyzer,
+            analyzer: resolvedAnalyzer,
+            scoreGenerator: scoreGenerator,
             projectStore: projectStore,
             fileStore: fileStore
         )

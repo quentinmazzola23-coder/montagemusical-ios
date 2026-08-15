@@ -155,6 +155,15 @@ final class HybridAnalyzerFallbackTests: XCTestCase {
         line: UInt = #line
     ) throws {
         XCTAssertEqual(produced.version, reference.version, file: file, line: line)
+        // `version` est la version de SCHÉMA du résultat (§12), pas celle du
+        // moteur : le fallback produit le même document, et le jour où le
+        // chemin hybride existera il devra produire le MÊME schéma — seule la
+        // version de moteur, tracée ailleurs, aura le droit de bouger.
+        XCTAssertEqual(
+            produced.version, DeterministicMusicAnalyzer.analysisSchemaVersion,
+            "Le résultat doit porter la version de SCHÉMA d'analyse",
+            file: file, line: line
+        )
         XCTAssertEqual(produced.duration.ticks, reference.duration.ticks, file: file, line: line)
 
         // Tempo retenu — cœur de l'exigence §86 (fallback = même pulsation).

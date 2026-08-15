@@ -30,7 +30,9 @@ struct OnsetEvent: Sendable, Equatable {
 /// Chaîne §18 : enveloppes par bande (`bandFlux` lissé) → retrait de
 /// tendance locale (médiane glissante ~1 s, redressé) → peak picking
 /// adaptatif (seuil = moyenne glissante + k × écart local) → fusion des
-/// pics < 30 ms (garde le plus fort).
+/// pics < 30 ms **par cluster** (garde le plus fort) : un cluster de fusion
+/// ne peut jamais s'étendre au-delà de 30 ms, quel que soit le nombre de
+/// candidats (voir `detectOnsets`, correctif 2 de la critique).
 ///
 /// Retourne aussi l'enveloppe d'onsets globale (somme pondérée des
 /// enveloppes de bande détendancées, ≥ 0, même cadence que la timeline) —
@@ -45,6 +47,11 @@ struct OnsetDetector: Sendable {
     private static let bandWeights: [Float] = [1.25, 1, 1, 1, 0.75]
 
     /// Fusion des pics distants de moins de 30 ms (§18.4, contrat Jalon 4).
+    /// Convertie en frames par ARRONDI (et non par troncature) : à
+    /// 86,1328125 frames/s la fenêtre effective vaut 3 frames = 34,8 ms,
+    /// c'est-à-dire la valeur représentable la plus proche des 30 ms
+    /// déclarés — la troncature donnait 2 frames = 23,2 ms, soit une
+    /// constante qui mentait de 23 %.
     private static let mergeWindowSeconds = 0.030
 
     /// Facteur k du seuil adaptatif (seuil = moyenne + k × écart local).
@@ -114,29 +121,61 @@ struct OnsetDetector: Sendable {
             lhs.frame != rhs.frame ? lhs.frame < rhs.frame : lhs.band < rhs.band
         }
 
-        // §18.4 : fusion agglomérative des pics distants de < 30 ms —
-        // on garde la frame la plus forte (valeur d'enveloppe globale ;
-        // égalité → frame la plus précoce, déterministe).
-        let mergeGap = max(1, Int(Self.mergeWindowSeconds * frameRate))
+        // §18.4 : fusion des pics distants de < 30 ms, **par CLUSTER** et
+        // non en chaîne — on garde la frame la plus forte du cluster (valeur
+        // d'enveloppe globale ; égalité → frame la plus précoce,
+        // déterministe, les candidats étant triés par frame croissante).
+        //
+        // POURQUOI un cluster et pas une chaîne (correctif 2 de la critique).
+        // L'ancienne boucle comparait l'écart au candidat PRÉCÉDENT : une
+        // suite de candidats espacés chacun de ≤ `mergeGap` collapsait
+        // INTÉGRALEMENT en un seul onset, sans aucune borne de longueur. Un
+        // roulement en 1/32 à 150 BPM place une note toutes les 4,3 frames
+        // (11,6 ms/frame) et l'étalement inter-bandes d'une même note est de
+        // 2 à 3 frames : la chaîne se refermait note après note et un
+        // roulement entier de 16 notes rendait 1 à 3 onsets. Cascade :
+        // `onsetDensity` CHUTAIT pendant le roulement au lieu d'y culminer,
+        // et la source d'ancres « Attaque marquée » (§26.1) disparaissait
+        // exactement là où le montage doit s'accélérer. En comparant au
+        // PREMIER élément du cluster, la fenêtre de fusion est bornée à
+        // `mergeGap` frames par construction : deux notes distantes de plus
+        // de 30 ms restent deux onsets, quel que soit leur étalement interne.
+        //
+        // Vérifié numériquement (report de l'algorithme, 3 bandes décalées de
+        // 0/+1/+2 frames, une note toutes les 4 frames sur 2 s) : fusion en
+        // chaîne → 1 onset ; fusion par cluster → 39 onsets, soit exactement
+        // une note sur une. Voir
+        // `OnsetDetectorTests.testDenseRollIsNotCollapsedByOnsetMerging`.
+        //
+        // ARRONDI et non troncature : `Int(0,030 × 86,1328) = 2` frames =
+        // 23,2 ms, alors que la constante déclare 30 ms (§18.4) ; l'arrondi
+        // donne 3 frames = 34,8 ms, la valeur représentable la plus proche
+        // des 30 ms annoncés à cette cadence. 3 frames restent strictement
+        // sous les 4,3 frames qui séparent deux notes d'un roulement 1/32 à
+        // 150 BPM — la borne haute utile de la fenêtre.
+        let mergeGap = max(1, Int((Self.mergeWindowSeconds * frameRate).rounded()))
         var mergedFrames: [Int] = []
         var bestFrame = -1
         var bestValue: Float = 0
-        var lastFrame = Int.min
+        var clusterStartFrame = Int.min
         for candidate in candidates {
             let value = envelope[candidate.frame]
-            if bestFrame >= 0, candidate.frame - lastFrame <= mergeGap {
+            if bestFrame >= 0, candidate.frame - clusterStartFrame <= mergeGap {
                 if value > bestValue {
                     bestValue = value
                     bestFrame = candidate.frame
                 }
             } else {
                 if bestFrame >= 0 { mergedFrames.append(bestFrame) }
+                clusterStartFrame = candidate.frame
                 bestFrame = candidate.frame
                 bestValue = value
             }
-            lastFrame = candidate.frame
         }
         if bestFrame >= 0 { mergedFrames.append(bestFrame) }
+        // `mergedFrames` reste strictement croissant : le survivant d'un
+        // cluster appartient à `[clusterStart, clusterStart + mergeGap]` et le
+        // cluster suivant démarre au-delà de cette borne.
 
         // §18.5 : temps (ticks §9), force 0...1, bande dominante, confiance.
         let envelopeMean = movingAverage(envelope, radius: thresholdRadius)

@@ -23,13 +23,20 @@ import Foundation
 /// frontières structurelles de rang ≤ 1) — communes aux trois modes
 /// (spec §28.1 : « les ancres majeures restent dans les trois modes »).
 struct AnchorField: Sendable {
-    /// Ancres triées par `center` croissant, centres uniques (déduplication
-    /// à 60 ms près ; les paires de MAJEURES — rang ≤ 1 — fusionnent dès
-    /// qu'elles sont à moins du plancher fluide §28.2 l'une de l'autre,
-    /// voir `deduplicate`).
+    /// Ancres triées par `center` croissant, centres uniques (candidats
+    /// co-localisés fusionnés composante par composante, puis déduplication
+    /// à 60 ms près — voir `coalesceColocated` et `deduplicate`).
+    ///
+    /// Le champ est **non destructif** et **indépendant du mode** : une
+    /// majeure trop proche d'une autre est RÉTROGRADÉE (rang 4, sortie de
+    /// `majorAnchorIDs`) et non retirée, de sorte qu'Équilibré et Percutant
+    /// peuvent encore y couper. Seule la SÉLECTION est spécifique au mode.
     let anchors: [EditAnchor]
 
-    /// Début + fin + frontières de section/phrase (`hierarchyRank` ≤ 1).
+    /// Début + fin + frontières de section/phrase (`hierarchyRank` ≤ 1)
+    /// **non rétrogradées**. Deux majeures consécutives sont toujours
+    /// espacées d'au moins le plancher fluide §28.2 — invariant exigé par
+    /// `DeterministicEditScoreGenerator.buildRoot`.
     let majorAnchorIDs: Set<UUID>
 }
 
@@ -112,7 +119,38 @@ struct AnchorFieldBuilder: Sendable {
         static let strongOnsetSalience = 0.75
         /// Confiance sous laquelle une ancre devient `conditional` (§13.1).
         static let conditionalConfidence = 0.5
+
+        /// **Co-localisation** : écart maximal en deçà duquel deux candidats
+        /// décrivent le MÊME instant observé et sont fusionnés composante
+        /// par composante AVANT évaluation (voir `coalesceColocated`).
+        ///
+        /// 348 ticks = 5,8 ms = **une demi-frame d'analyse**. Justification
+        /// du seuil : tout ce que le moteur observe (onsets, impacts, beats,
+        /// bornes de spans) est quantifié au hop de la STFT, 256 échantillons
+        /// à 22 050 Hz, soit 11,61 ms = 696,6 ticks — et la conversion
+        /// frame → ticks est l'unique `FeatureTimeline.mediaTime(forFrame:)`,
+        /// déterministe. Deux observations DISTINCTES sont donc séparées d'au
+        /// moins une frame entière ; un écart inférieur à une demi-frame ne
+        /// peut provenir que de deux descriptions du même instant — cas
+        /// canonique : `bar.start` EST littéralement `beats[k].time`, écart
+        /// exactement 0.
+        ///
+        /// Le seuil reste 10× sous `mergeTicks` (60 ms), pour que la passe 1
+        /// garde son rôle : arbitrer entre deux instants que l'analyse SAIT
+        /// distinguer, ce qui est un vrai choix de position de coupe et non
+        /// une fusion d'indices.
+        static let coLocationTicks: Int64 = 348
     }
+
+    /// Rang hiérarchique donné à une ancre majeure **rétrogradée** par la
+    /// passe 2 (voir `deduplicate`) : elle sort de `majorAnchorIDs` et
+    /// redevient un candidat ordinaire, au même rang que les subdivisions.
+    private static let demotedHierarchyRank = 4
+
+    /// Raison §29 ajoutée à une majeure rétrogradée (explicabilité : sans
+    /// elle, l'ancre porterait « Nouvelle section » sans être frontière
+    /// racine, ce qui serait incompréhensible dans l'inspecteur).
+    private static let demotionReason = "Rétrogradée : majeure trop proche"
 
     init() {}
 
@@ -137,11 +175,18 @@ struct AnchorFieldBuilder: Sendable {
             .sorted()
 
         // 1. Candidats bruts (toutes sources §26.1).
-        let candidates = rawCandidates(
+        let rawList = rawCandidates(
             analysis: analysis,
             durationTicks: durationTicks,
             impactTicks: impactTicks
         )
+
+        // 1 bis. Fusion des candidats CO-LOCALISÉS, AVANT évaluation :
+        //        deux sources qui décrivent le même instant additionnent
+        //        leurs indices au lieu de s'éliminer (voir
+        //        `coalesceColocated`). Après cette passe, tous les centres
+        //        sont deux à deux distincts.
+        let candidates = coalesceColocated(rawList)
 
         // 2. Évaluation §26.3 de chaque candidat → EditAnchor.
         var built: [(anchor: EditAnchor, isProtected: Bool)] = []
@@ -160,15 +205,18 @@ struct AnchorFieldBuilder: Sendable {
             built.append((anchor, candidate.isProtected))
         }
 
-        // 3. Déduplication : candidats à < 60 ms fusionnés, puis paires de
-        //    MAJEURES à moins du plancher fluide fusionnées (garde le plus
-        //    fort, raisons cumulées) — tri final par center croissant.
+        // 3. Déduplication : candidats à < 60 ms fusionnés (passe 1, le plus
+        //    fort survit, raisons cumulées), puis paires de MAJEURES à moins
+        //    du plancher fluide RÉTROGRADÉES — jamais supprimées (passe 2) —
+        //    tri final par center croissant.
         let deduplicated = deduplicate(
             built,
             majorMergeTicks: configuration.minimumSlotDurationFluid.ticks
         )
 
-        // 4. Majeures : début + fin + rang ≤ 1 (sections, phrases).
+        // 4. Majeures : début + fin + rang ≤ 1 (sections, phrases) — les
+        //    rétrogradées de la passe 2 portent le rang 4 et sont donc
+        //    exclues ici, tout en restant présentes dans `anchors`.
         let majorIDs = Set(deduplicated.filter { $0.hierarchyRank <= 1 }.map(\.id))
 
         return AnchorField(anchors: deduplicated, majorAnchorIDs: majorIDs)
@@ -207,6 +255,29 @@ struct AnchorFieldBuilder: Sendable {
             case .downbeat, .impact: return 2
             case .beat, .resolution: return 3
             case .strongOnset: return 4
+            }
+        }
+
+        /// Ordre total EXPLICITE des sources, utilisé comme départage à
+        /// `hierarchyRank` égal lors de la fusion des candidats
+        /// co-localisés (règle de déterminisme du moteur : jamais d'ordre
+        /// implicite d'itération ni de tri instable pour décider d'un
+        /// résultat). Lit : « à instant égal et rang égal, quelle source
+        /// décrit le mieux cet instant ? ».
+        ///
+        /// `impact` passe devant `downbeat` à rang 2 : un impact est un
+        /// événement daté et raffiné à la frame de dérivée RMS maximale,
+        /// plus spécifique qu'un début de mesure déduit de la grille.
+        var mergeOrder: Int {
+            switch self {
+            case .trackEdge: return 0
+            case .section: return 1
+            case .phrase: return 2
+            case .impact: return 3
+            case .downbeat: return 4
+            case .beat: return 5
+            case .resolution: return 6
+            case .strongOnset: return 7
             }
         }
 
@@ -374,6 +445,164 @@ struct AnchorFieldBuilder: Sendable {
         return candidates
     }
 
+    // MARK: - Fusion des candidats co-localisés (AVANT évaluation)
+
+    /// Fusionne les candidats **co-localisés** — séparés de moins de
+    /// `Threshold.coLocationTicks` — en un candidat unique dont chaque
+    /// composante est le MAXIMUM de celles du groupe.
+    ///
+    /// ## Pourquoi (défaut corrigé)
+    ///
+    /// La déduplication élisait un survivant en classant par `hierarchyRank`
+    /// AVANT `finalUtility`. Au tick EXACT d'un downbeat, l'ancre de barre
+    /// (rang 2) et l'ancre de beat (rang 3) sont à distance **0** — `bar.start`
+    /// est littéralement `beats[k].time` — et la barre gagnait par son seul
+    /// rang. Or les deux portent la même attraction (pour un downbeat,
+    /// `rhythmic` = force du beat co-localisé, `structural` = 0, même fenêtre
+    /// étroite : le repli 0,7 de la source `downbeat` est mort puisqu'un
+    /// `bar.start` est toujours apparié) mais des CONFIANCES très
+    /// différentes : la barre portait la marge inter-hypothèses de métrique
+    /// (~0,03–0,10), le beat porte la cohérence des intervalles (> 0,9).
+    /// Avec `uncertaintyPenalty` = 1, la pénalité valait ~0,92 sur le
+    /// downbeat contre ~0,1 sur le beat : `finalUtility(downbeat)` tombait
+    /// ~0,8 SOUS `finalUtility(beat)`, et c'est pourtant le downbeat qui
+    /// survivait. Chaque début de mesure devenait l'ancre la plus faible du
+    /// niveau beat, et le générateur évitait de couper sur le « 1 ».
+    ///
+    /// **Règle** : une frontière de mesure ne doit jamais valoir MOINS que
+    /// le beat qu'elle remplace. À instant identique il n'y a qu'un seul
+    /// point de coupe possible : les sources ne sont pas concurrentes, elles
+    /// sont des INDICES CONVERGENTS sur ce point. On prend donc le maximum
+    /// de chaque terme (`rhythmic`, `structural`, `resolution`) et le maximum
+    /// des confiances, on garde le rang le plus fort (le plus petit) et on
+    /// cumule les raisons. L'utilité fusionnée est ainsi ≥ celle de chaque
+    /// membre pris isolément.
+    ///
+    /// La fusion a lieu AVANT `makeAnchor` : c'est le seul endroit où les
+    /// composantes existent encore séparément (`EditAnchor` ne persiste que
+    /// `attraction`/`inhibition`/`finalUtility` agrégées). Effet secondaire
+    /// souhaitable : une seule raison « Confiance x,yz » en fin de liste
+    /// (§29), au lieu d'une par membre comme le produisait le cumul aval.
+    ///
+    /// ## Déterminisme
+    ///
+    /// Le tri est un ordre total STRICT — (temps, rang, ordre de source,
+    /// index de production) — donc `sorted` rend une permutation unique
+    /// même s'il n'est pas stable. Le regroupement se fait par rapport au
+    /// PREMIER membre du groupe et non au précédent : la largeur d'un
+    /// groupe est bornée par `coLocationTicks`, sans agglomération en chaîne.
+    ///
+    /// En sortie, tous les centres sont deux à deux distincts (deux groupes
+    /// consécutifs ont des débuts séparés de plus de `coLocationTicks`, et
+    /// le représentant d'un groupe reste dans sa fenêtre) — ce qui rend au
+    /// passage le tri de la passe 1 lui aussi totalement ordonné.
+    private func coalesceColocated(_ candidates: [RawCandidate]) -> [RawCandidate] {
+        guard candidates.count > 1 else { return candidates }
+
+        let ordered = candidates.enumerated().sorted { lhs, rhs in
+            if lhs.element.centerTicks != rhs.element.centerTicks {
+                return lhs.element.centerTicks < rhs.element.centerTicks
+            }
+            if lhs.element.source.hierarchyRank != rhs.element.source.hierarchyRank {
+                return lhs.element.source.hierarchyRank < rhs.element.source.hierarchyRank
+            }
+            if lhs.element.source.mergeOrder != rhs.element.source.mergeOrder {
+                return lhs.element.source.mergeOrder < rhs.element.source.mergeOrder
+            }
+            // Départage FINAL : ordre de production de `rawCandidates`,
+            // lui-même fixe. Nécessaire — deux candidats peuvent partager temps,
+            // rang ET source (un accent et une attaque marquée au même tick)
+            // tout en portant des raisons différentes.
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+
+        var result: [RawCandidate] = []
+        result.reserveCapacity(ordered.count)
+        var group: [RawCandidate] = []
+        for candidate in ordered {
+            if let first = group.first,
+               candidate.centerTicks - first.centerTicks <= Threshold.coLocationTicks,
+               // Même garde que la passe 1 : début ET fin du morceau sont
+               // protégés (§28.1) et ne fusionnent JAMAIS entre eux, même sur
+               // un morceau dégénéré plus court que `coLocationTicks` — sans
+               // quoi `buildRoot` ne trouverait plus d'ancre à `durationTicks`.
+               !(candidate.isProtected && group.contains(where: { $0.isProtected })) {
+                group.append(candidate)
+            } else {
+                if !group.isEmpty { result.append(mergeColocated(group)) }
+                group = [candidate]
+            }
+        }
+        if !group.isEmpty { result.append(mergeColocated(group)) }
+        return result
+    }
+
+    /// Fusionne un groupe co-localisé NON VIDE, déjà trié par
+    /// `coalesceColocated`.
+    private func mergeColocated(_ group: [RawCandidate]) -> RawCandidate {
+        guard var dominant = group.first else {
+            preconditionFailure("mergeColocated appelé sur un groupe vide")
+        }
+        guard group.count > 1 else { return dominant }
+
+        // Représentant : protégé d'abord (début/fin du morceau, §28.1), puis
+        // rang le plus fort, puis ordre de source, puis instant le plus
+        // précoce. Il fixe le center, la source (donc `baseKind`, le rang et
+        // la largeur de fenêtre §13.1) ; les composantes, elles, viennent du
+        // groupe entier.
+        for candidate in group.dropFirst() where dominates(candidate, dominant) {
+            dominant = candidate
+        }
+
+        var rhythmic = 0.0
+        var structural = 0.0
+        var resolution = 0.0
+        var confidence = 0.0
+        var isProtected = false
+        var reasons: [String] = []
+        for member in group {
+            rhythmic = max(rhythmic, member.rhythmic)
+            structural = max(structural, member.structural)
+            resolution = max(resolution, member.resolution)
+            confidence = max(confidence, member.confidence)
+            isProtected = isProtected || member.isProtected
+            for reason in member.reasons where !reasons.contains(reason) {
+                reasons.append(reason)
+            }
+        }
+
+        return RawCandidate(
+            centerTicks: dominant.centerTicks,
+            source: dominant.source,
+            rhythmic: rhythmic,
+            structural: structural,
+            resolution: resolution,
+            confidence: confidence,
+            reasons: reasons,
+            isProtected: isProtected
+        )
+    }
+
+    /// Ordre de domination entre candidats co-localisés : protégé > rang le
+    /// plus petit > ordre de source > instant le plus précoce.
+    ///
+    /// Déterminisme : deux candidats encore ex æquo après ces quatre
+    /// critères partagent forcément instant ET source — donc les deux seules
+    /// données que le représentant apporte (`centerTicks`, `source`). Le
+    /// résultat de la fusion est alors identique quel que soit celui retenu,
+    /// et la boucle appelante conserve de toute façon le premier dans
+    /// l'ordre total fixé par `coalesceColocated`.
+    private func dominates(_ lhs: RawCandidate, _ rhs: RawCandidate) -> Bool {
+        if lhs.isProtected != rhs.isProtected { return lhs.isProtected }
+        if lhs.source.hierarchyRank != rhs.source.hierarchyRank {
+            return lhs.source.hierarchyRank < rhs.source.hierarchyRank
+        }
+        if lhs.source.mergeOrder != rhs.source.mergeOrder {
+            return lhs.source.mergeOrder < rhs.source.mergeOrder
+        }
+        return lhs.centerTicks < rhs.centerTicks
+    }
+
     // MARK: - Évaluation §26.3
 
     private func makeAnchor(
@@ -493,7 +722,7 @@ struct AnchorFieldBuilder: Sendable {
         )
     }
 
-    // MARK: - Déduplication (< 60 ms, puis paires de majeures < plancher fluide)
+    // MARK: - Déduplication (< 60 ms, puis rétrogradation des majeures rapprochées)
 
     /// `lhs` est-il plus fort que `rhs` ? (protégé > rang minimal >
     /// utilité maximale > center minimal) — critère unique des deux passes.
@@ -509,6 +738,37 @@ struct AnchorFieldBuilder: Sendable {
             return lhs.anchor.finalUtility > rhs.anchor.finalUtility
         }
         return lhs.anchor.center.ticks < rhs.anchor.center.ticks
+    }
+
+    /// **Rétrograde** une ancre majeure perdante de la passe 2 : même
+    /// identité, même instant, même utilité — mais `hierarchyRank` porté à
+    /// `demotedHierarchyRank` (4), donc SORTIE de `majorAnchorIDs`
+    /// (calculé par `build` sur le seul critère `hierarchyRank <= 1`).
+    ///
+    /// Elle cesse d'être une frontière racine imposée aux trois modes et
+    /// redevient un candidat de split ORDINAIRE, soumis au plancher de
+    /// chaque mode. `kind` est conservé (`.structural` reste vrai : c'est
+    /// toujours une frontière structurelle, simplement pas majeure).
+    private func demoted(_ anchor: EditAnchor) -> EditAnchor {
+        var reasons = anchor.reasons
+        // La raison de confiance §29 est TOUJOURS la dernière (voir
+        // `makeAnchor`) : la mention de rétrogradation s'insère juste avant.
+        reasons.insert(Self.demotionReason, at: max(reasons.count - 1, 0))
+        return EditAnchor(
+            id: anchor.id,
+            center: anchor.center,
+            optimalStart: anchor.optimalStart,
+            optimalEnd: anchor.optimalEnd,
+            toleratedStart: anchor.toleratedStart,
+            toleratedEnd: anchor.toleratedEnd,
+            kind: anchor.kind,
+            hierarchyRank: Self.demotedHierarchyRank,
+            attraction: anchor.attraction,
+            inhibition: anchor.inhibition,
+            finalUtility: anchor.finalUtility,
+            confidence: anchor.confidence,
+            reasons: reasons
+        )
     }
 
     /// Copie du survivant avec les raisons cumulées (dans l'ordre des
@@ -538,6 +798,9 @@ struct AnchorFieldBuilder: Sendable {
         guard !built.isEmpty else { return [] }
 
         // Tri par center croissant ; clés secondaires déterministes.
+        // (Depuis la fusion des co-localisés en amont, les centers sont deux
+        // à deux distincts : ce comparateur est un ordre total STRICT, donc
+        // `sorted` — qui n'est pas stable — rend une permutation unique.)
         let sorted = built.sorted { lhs, rhs in
             if lhs.anchor.center.ticks != rhs.anchor.center.ticks {
                 return lhs.anchor.center.ticks < rhs.anchor.center.ticks
@@ -578,47 +841,87 @@ struct AnchorFieldBuilder: Sendable {
             ))
         }
 
-        // Passe 2 — fusion élargie des PAIRES de MAJEURES (rang ≤ 1) :
-        // deux majeures à moins du plancher fluide (§28.2) l'une de
-        // l'autre ne peuvent pas être toutes deux frontières racines
-        // (§28.3.1) ; garder les deux forcerait l'aval à rétrograder la
-        // plus faible et rendrait `majorAnchorIDs` incohérent (une
-        // « majeure » absente d'un mode, §28.1). Fusion ICI : la plus
-        // forte survit, raisons cumulées — toute majeure du champ reste
-        // ainsi « dans les trois modes » (§28.1). Début et fin (protégées)
-        // ne fusionnent jamais entre elles (morceau plus court que le
-        // plancher : les deux subsistent, cas §63 d'une case unique).
-        // Par induction, deux majeures survivantes consécutives sont
-        // toujours espacées d'au moins `majorMergeTicks`.
-        var merged: [(anchor: EditAnchor, isProtected: Bool)] = []
-        merged.reserveCapacity(survivors.count)
+        // Passe 2 — RÉTROGRADATION (et non plus suppression) des MAJEURES
+        // (rang ≤ 1) trop rapprochées.
+        //
+        // ## Le problème corrigé
+        //
+        // Deux majeures à moins du plancher FLUIDE (`majorMergeTicks` =
+        // 45 000 ticks = 0,75 s) ne peuvent pas être toutes deux frontières
+        // racines (§28.3.1) : `buildRoot` insère les majeures sous ce
+        // plancher-là, le plus grand des trois. Il fallait donc en écarter
+        // une — mais l'ancienne passe la RETIRAIT du champ
+        // (`merged.remove(at:)`), imposant ainsi le plancher du mode le plus
+        // LENT à un champ d'ancres PARTAGÉ par les trois modes.
+        //
+        // Scénario : coupure à 60,0 s (bord de section, rang 0) et retour du
+        // kick à 60,4 s (frontière de phrase, rang 1). Écart 0,4 s < 0,75 s
+        // → la phrase disparaissait. AUCUN des trois modes ne pouvait couper
+        // sur le retour du kick, alors que 0,4 s est une case parfaitement
+        // légitime en Percutant (plancher 0,25 s) comme en Équilibré (0,40 s).
+        //
+        // ## Le correctif
+        //
+        // La perdante RESTE dans le champ : elle est simplement rétrogradée
+        // (`demoted`, rang 4) et sort donc de `majorAnchorIDs`. Elle redevient
+        // un candidat de split ORDINAIRE, que Équilibré et Percutant peuvent
+        // activer si leur propre plancher le permet, et que Fluide écartera
+        // naturellement par le sien. Le champ redevient indépendant du mode ;
+        // seule la sélection reste spécifique au mode.
+        //
+        // À noter : `DeterministicEditScoreGenerator` porte déjà un jeu
+        // `demotedMajorIDs` implémentant EXACTEMENT cette sémantique
+        // (réinjection en candidat individuel via `makeCandidates`), mais il
+        // était rendu inatteignable par la suppression amont — sa branche est
+        // documentée « normalement inatteignable ». Elle le reste : on
+        // atteint le même état final, une passe plus tôt, sans `assertionFailure`.
+        //
+        // ## Invariant préservé (celui qu'exige `buildRoot`)
+        //
+        // « Deux ancres MAJEURES consécutives sont espacées d'au moins
+        // `majorMergeTicks` » reste VRAI : une rétrogradée n'est plus
+        // majeure, elle ne compte donc plus dans la suite des majeures.
+        // Démonstration par récurrence sur `lastMajorIndex`, qui désigne
+        // toujours la dernière majeure CONSERVÉE :
+        //  - si l'écart au précédent est ≥ `majorMergeTicks`, on conserve —
+        //    l'invariant tient directement ;
+        //  - sinon, exactement une des deux est rétrogradée. Si c'est la
+        //    nouvelle, la suite des majeures est inchangée. Si c'est la
+        //    précédente P, la majeure conservée avant P était à ≥
+        //    `majorMergeTicks` de P (hypothèse de récurrence) donc, les
+        //    centres étant croissants, elle est à plus que cela de la
+        //    nouvelle : l'écart ne peut que CROÎTRE.
+        //
+        // Enfin, une ancre PROTÉGÉE (début et fin du morceau, §28.1) n'est
+        // jamais rétrogradée : elle ne peut perdre que face à une autre
+        // protégée, et cette paire-là est exclue par la garde ci-dessous
+        // (morceau plus court que le plancher : les deux subsistent,
+        // cas §63 de la case unique).
+        var merged = survivors
         var lastMajorIndex: Int?
-        for item in survivors {
-            if item.anchor.hierarchyRank <= 1,
-               let index = lastMajorIndex,
-               item.anchor.center.ticks - merged[index].anchor.center.ticks < majorMergeTicks,
-               !(item.isProtected && merged[index].isProtected) {
-                let existing = merged[index]
-                var mergedReasons = existing.anchor.reasons
-                for reason in item.anchor.reasons where !mergedReasons.contains(reason) {
-                    mergedReasons.append(reason)
-                }
-                let pairProtected = existing.isProtected || item.isProtected
-                if isStronger(existing, than: item) {
-                    merged[index] = (withReasons(existing.anchor, mergedReasons), pairProtected)
-                    // `lastMajorIndex` inchangé : le center ne bouge pas.
+        for index in merged.indices {
+            guard merged[index].anchor.hierarchyRank <= 1 else { continue }
+            if let previous = lastMajorIndex,
+               merged[index].anchor.center.ticks
+                   - merged[previous].anchor.center.ticks < majorMergeTicks,
+               !(merged[index].isProtected && merged[previous].isProtected) {
+                if isStronger(merged[previous], than: merged[index]) {
+                    // La nouvelle venue perd : rétrogradée sur place.
+                    // `lastMajorIndex` inchangé — la dernière majeure
+                    // conservée reste `previous`.
+                    let loser = merged[index]
+                    merged[index] = (anchor: demoted(loser.anchor), isProtected: loser.isProtected)
                 } else {
-                    // Le nouveau venu survit : retirer l'ancien (les
-                    // éventuelles non-majeures intermédiaires restent),
-                    // l'ajout en fin conserve le tri par center croissant.
-                    merged.remove(at: index)
-                    merged.append((withReasons(item.anchor, mergedReasons), pairProtected))
-                    lastMajorIndex = merged.count - 1
+                    // La précédente perd : rétrogradée SUR PLACE (aucun
+                    // retrait, donc le tri par center croissant et les
+                    // indices déjà parcourus restent valides).
+                    let loser = merged[previous]
+                    merged[previous] = (anchor: demoted(loser.anchor), isProtected: loser.isProtected)
+                    lastMajorIndex = index
                 }
                 continue
             }
-            merged.append(item)
-            if item.anchor.hierarchyRank <= 1 { lastMajorIndex = merged.count - 1 }
+            lastMajorIndex = index
         }
 
         // Tri final par center croissant (rang en clé secondaire).
