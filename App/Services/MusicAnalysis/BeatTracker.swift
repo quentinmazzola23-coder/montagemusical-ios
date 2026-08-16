@@ -56,6 +56,13 @@ struct BeatTracker: Sendable {
     /// Mesure par défaut quand aucun beat n'est disponible (confiance 0).
     private static let fallbackMeter = 4
 
+    /// Fraction du maximum d'enveloppe exigée d'une frame pour qu'elle
+    /// puisse SERVIR DE DÉPART au backtrack. 0,10 : assez bas pour accepter
+    /// un coup faible en fin de morceau, assez haut pour rejeter le bruit
+    /// de fond (que `OnsetDetector` plafonne déjà à quelques centièmes).
+    /// Voir le commentaire du backtrack pour la démonstration.
+    private static let startFloorRatio = 0.10
+
     // MARK: - API
 
     /// Suit l'hypothèse rythmique sur l'enveloppe d'onsets et estime la
@@ -113,11 +120,44 @@ struct BeatTracker: Sendable {
             backlink[t] = bestTau
         }
 
-        // Backtrack depuis le meilleur score de la dernière période.
-        let tailStart = max(0, frameCount - max(1, Int(period.rounded())))
-        var cursor = tailStart
-        for t in tailStart..<frameCount where score[t] > score[cursor] {
-            cursor = t
+        // Backtrack depuis le meilleur score de la dernière période — mais
+        // en exigeant que la frame de départ porte un ÉVÉNEMENT.
+        //
+        // `score` est cumulatif : dans la queue du morceau il vaut à peu
+        // près la même chose partout, puisque toutes les frames héritent du
+        // score accumulé sur les beats précédents. L'argmax sur la dernière
+        // période ne se joue donc que sur le terme LOCAL `env[t]`. Si cette
+        // fenêtre ne contient aucune attaque — fin en fade-out, en silence,
+        // ou simplement queue plus courte qu'une période après le dernier
+        // coup — l'argmax tombe sur un maximum de BRUIT, et le dernier beat
+        // est posé n'importe où dans la fenêtre : jusqu'à une demi-période
+        // hors phase. Tout le backtrack étant chaîné par `backlink`, une
+        // seule frame de départ fausse décale la grille entière.
+        //
+        // Correctif : on ne retient comme départ qu'une frame dont
+        // l'enveloppe atteint `startFloorRatio` du maximum, et on élargit la
+        // fenêtre période par période vers l'arrière tant qu'aucune ne
+        // qualifie. Repli sur l'argmax brut si le morceau entier est sous le
+        // plancher (enveloppe plate — cas déjà traité en amont, gardé ici
+        // pour ne jamais rendre de grille vide).
+        let periodFrames = max(1, Int(period.rounded()))
+        let startFloor = (env.max() ?? 0) * Self.startFloorRatio
+
+        var cursor = -1
+        var windowStart = max(0, frameCount - periodFrames)
+        var windowEnd = frameCount
+        while cursor < 0 && windowEnd > 0 {
+            for t in windowStart..<windowEnd where env[t] >= startFloor {
+                if cursor < 0 || score[t] > score[cursor] { cursor = t }
+            }
+            windowEnd = windowStart
+            windowStart = max(0, windowStart - periodFrames)
+        }
+        if cursor < 0 {
+            cursor = max(0, frameCount - periodFrames)
+            for t in cursor..<frameCount where score[t] > score[cursor] {
+                cursor = t
+            }
         }
         var beatFrames: [Int] = []
         var walk = cursor
