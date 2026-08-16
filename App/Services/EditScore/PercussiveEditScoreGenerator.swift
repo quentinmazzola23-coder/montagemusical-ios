@@ -18,9 +18,13 @@
 //  cible de durée, pas de sélection. Ce que le moteur promet devient
 //  vérifiable en une écoute.
 //
-//  L'ancien générateur n'est pas supprimé : il reste compilé et testé, il
-//  n'est simplement plus câblé dans `AppEnvironment`. Le pivot est
-//  réversible.
+//  L'ancien générateur EST SUPPRIMÉ : `DeterministicEditScoreGenerator` et
+//  ses trois fichiers de tests (`EditScoreGeneratorTests`,
+//  `ScoreGenerationPipelineTests`, `ScoreConfigurationWeightsTests`) ne sont
+//  plus dans le dépôt. Le pivot n'est donc PAS réversible par un simple
+//  recâblage d'`AppEnvironment` : il faudrait restaurer ces fichiers depuis
+//  l'historique. `AnchorField` et les poids de `ScoreConfiguration` restent,
+//  eux, en place mais ne sont plus lus par personne.
 //
 //  LA SEULE CONTRAINTE CONSERVÉE
 //  -----------------------------
@@ -143,7 +147,7 @@ struct PercussiveEditScoreGenerator: EditScoreGenerating, Sendable {
             gestures: [],
             averageDuration: durations.isEmpty
                 ? .zero
-                : MediaTime(ticks: MediaTime.roundedDivision(durations.reduce(0, +), dividedBy: durations.count)),
+                : MediaTime(ticks: MediaTime.roundedDivision(durations.reduce(0, +), dividedBy: Int64(durations.count))),
             minimumDuration: MediaTime(ticks: durations.min() ?? 0),
             maximumDuration: MediaTime(ticks: durations.max() ?? 0)
         )

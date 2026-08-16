@@ -610,9 +610,14 @@ final class PaceSelectionStoreTests: XCTestCase {
     }
 
     /// Famille synthétique directe (plus simple et suffisant que le
-    /// générateur réel) : trois modes imbriqués sur 4 s — Fluide 1 case,
-    /// Équilibré 2, Percutant 4 (densité croissante, mêmes frontières
-    /// majeures — §2).
+    /// générateur réel) : trois familles de frappe sur 4 s — kick 1 case,
+    /// snare 2, hat 4.
+    ///
+    /// Les frontières sont ici emboîtées par simple commodité d'écriture, et
+    /// non par contrat : l'imbrication §70 (Fluide ⊆ Équilibré ⊆ Percutant) a
+    /// DISPARU avec le pivot du 16 août 2026 — voir `PaceMode`. Aucun test de
+    /// ce fichier n'en dépend ; ces cases ne servent qu'à fournir des
+    /// frontières valides au `ProjectStore`.
     private func makeFamily() -> EditScoreFamily {
         EditScoreFamily(
             analysisVersion: 1,
