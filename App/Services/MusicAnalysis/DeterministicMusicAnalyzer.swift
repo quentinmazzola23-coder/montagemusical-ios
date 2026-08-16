@@ -396,7 +396,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             // plus lu — voir `PaceMode`.
             percussiveHits: PercussiveClassifier()
                 .classify(onsets: onsets, features: features)
-                .map { PercussiveHit(time: $0.onset.time, strength: $0.onset.strength, percussiveClass: $0.class) }
+                .map { PercussiveHit(time: $0.onset.time, strength: $0.onset.strength, percussiveClass: $0.percussiveClass) }
         )
         try cache.save(
             result,

@@ -119,7 +119,10 @@ struct PercussiveClassifier: Sendable {
     /// (`FeatureTimeline.mediaTime(forFrame:frameRate:)`, §9) prise à
     /// l'envers, puis bornée : un onset produit à partir de cette même
     /// timeline retombe toujours sur une frame valide.
-    func classify(onsets: [OnsetEvent], features: FeatureTimeline) -> [(onset: OnsetEvent, class: PercussiveClass)] {
+    func classify(
+        onsets: [OnsetEvent],
+        features: FeatureTimeline
+    ) -> [(onset: OnsetEvent, percussiveClass: PercussiveClass)] {
         let frameCount = features.rms.count
         guard frameCount > 0, features.frameRate > 0 else {
             return onsets.map { ($0, .snare) }

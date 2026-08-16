@@ -62,7 +62,27 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee /tmp/build.log
+
+      # Le téléchargement des logs GitHub exige une authentification que la
+      # machine de développement n'a pas. Sans ce relais, un échec de
+      # compilation est ILLISIBLE depuis le poste de travail et se diagnostique
+      # à l'aveugle. Les erreurs sont donc publiées en release, lisible sans
+      # jeton comme n'importe quel artefact du dépôt.
+      - name: Publier les erreurs de compilation
+        if: failure()
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "error:|warning: .*(deprecated|unused)" /tmp/build.log \
+            | head -200 > compile-errors.txt || true
+          echo "--- contexte ---" >> compile-errors.txt
+          grep -B 2 -A 2 "error:" /tmp/build.log | head -200 >> compile-errors.txt || true
+          gh release create "ci-errors-${{ github.run_number }}" compile-errors.txt \
+            --title "Erreurs de compilation ${{ github.run_number }}" \
+            --notes "Relais lisible sans authentification — voir compile-errors.txt." \
+            -R "${{ github.repository }}"
 
       - name: Empaqueter l'IPA
         working-directory: src
@@ -116,6 +136,20 @@ jobs:
       # Or le téléchargement des logs GitHub exige une authentification, que
       # la machine de développement n'a pas toujours. On recopie donc les
       # lignes d'échec dans le RÉSUMÉ du job, lisible sans jeton.
+      # Même relais que pour la compilation : les échecs de tests sont
+      # publiés en release, donc lisibles sans jeton.
+      - name: Publier les échecs de tests
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -E "error:|Test Case .* failed|failed \(" /tmp/tests.log \
+            | head -200 > test-failures.txt || true
+          gh release create "ci-tests-${{ github.run_number }}" test-failures.txt \
+            --title "Échecs de tests ${{ github.run_number }}" \
+            --notes "Relais lisible sans authentification — voir test-failures.txt." \
+            -R "${{ github.repository }}" || true
+
       - name: Résumé des tests en échec
         if: always()
         run: |
