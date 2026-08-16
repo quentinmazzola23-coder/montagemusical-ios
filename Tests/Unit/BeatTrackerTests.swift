@@ -163,6 +163,64 @@ final class BeatTrackerTests: XCTestCase {
         }
     }
 
+    // MARK: - §19.1.5 : PHASE de la grille (oracle manquant)
+
+    /// La grille de beats tombe SUR les impulsions, pas entre elles.
+    ///
+    /// C'est le trou d'oracle le plus grave relevé par la critique : tous
+    /// les tests de suivi n'assertaient que des MÉDIANES D'INTERVALLES, qui
+    /// sont invariantes par translation. Un tracker verrouillé sur le
+    /// contretemps — la pire défaillance possible pour un montage, chaque
+    /// coupe tombant exactement entre deux kicks — produit les mêmes
+    /// intervalles de 0,5 s et passait donc au vert.
+    ///
+    /// On vérifie ici la propriété qui manquait : chaque beat suivi est à
+    /// moins d'un HUITIÈME de période d'une impulsion réelle (62,5 ms à
+    /// 120 BPM, soit ~5 frames à 86,13 fps — la tolérance couvre le jitter
+    /// de quantification de la grille de frames sans laisser passer un
+    /// décalage d'un demi-temps, qui vaudrait 250 ms).
+    func testBeatGridLocksOntoImpulsePhaseNotOffbeat() {
+        let duration = 8.0
+        let period = 0.5
+        let impulseTimes = (0..<16).map { Double($0) * period }
+        let envelope = makeEnvelope(
+            impulses: impulseTimes.map { (time: $0, amplitude: Float(1)) },
+            duration: duration
+        )
+        let features = makeFeatures(frameCount: envelope.count, duration: duration)
+
+        let tracked = BeatTracker().track(
+            hypothesis: makeHypothesis(bpm: 120),
+            envelope: envelope,
+            envelopeRate: envelopeRate,
+            features: features
+        )
+
+        XCTAssertGreaterThanOrEqual(tracked.beats.count, 12)
+        let tolerance = period / 8
+        for beat in tracked.beats {
+            let seconds = beat.time.seconds
+            let nearest = impulseTimes.map { abs($0 - seconds) }.min() ?? .infinity
+            XCTAssertLessThanOrEqual(
+                nearest, tolerance,
+                "beat à \(seconds) s : \(nearest) s de l'impulsion la plus proche — "
+                    + "grille décalée en phase (contretemps ?)"
+            )
+        }
+
+        // Contre-épreuve : la même assertion DOIT échouer sur une grille
+        // volontairement décalée d'un demi-temps. Sans elle, un test qui
+        // passerait pour une mauvaise raison ne se verrait pas.
+        let offbeatSeconds = tracked.beats.map { $0.time.seconds + period / 2 }
+        let worstOffbeat = offbeatSeconds
+            .map { candidate in impulseTimes.map { abs($0 - candidate) }.min() ?? .infinity }
+            .max() ?? 0
+        XCTAssertGreaterThan(
+            worstOffbeat, tolerance,
+            "la tolérance est trop lâche : elle accepterait aussi le contretemps"
+        )
+    }
+
     // MARK: - §19.1.5 : légères variations de tempo
 
     /// Accélération linéaire 100 → 140 BPM : les intervalles entre beats

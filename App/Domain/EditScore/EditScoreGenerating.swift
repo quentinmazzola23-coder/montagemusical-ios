@@ -73,6 +73,22 @@ struct ScoreConfiguration: Codable, Sendable {
     /// 0…0,25. 0,5.
     var inhibitionNoChange: Double
 
+    /// Poussée de MONTÉE (correctif S4). ÉCART ASSUMÉ : ce terme n'est pas
+    /// dans la formule §26.3. Il est ajouté parce que les événements
+    /// `.buildUp` (§12.4) et les états `.accumulation` (§24) étaient
+    /// calculés et persistés sans jamais être lus : le moteur savait
+    /// reconnaître une montée sans que cela change une seule coupe.
+    ///
+    /// La valeur pondérée est la POSITION dans la montée, de 0 à son début
+    /// à 1 juste avant l'impact : la densification s'intensifie donc en
+    /// approchant du drop. C'est une accélération, et non un palier — la
+    /// sensation que §27 confiait au geste `.acceleration`, jamais émis.
+    ///
+    /// 0,75 et non 1,0 : une montée doit peser fort sans pouvoir à elle
+    /// seule dominer un bord de section (structural 1,0 × poids 1,0).
+    /// Non defini par la specification — à ajuster après écoute (§74).
+    var riseDrive: Double
+
     // Paramètres de l'`overcutPenalty` à la sélection (§26.3, §28.1 : ne
     // pas épuiser les micro-ancres). Appliqués par le générateur, jamais
     // au niveau du champ d'ancres.
@@ -143,6 +159,7 @@ struct ScoreConfiguration: Codable, Sendable {
         inhibitionHeldNote: Double = 0.5,
         inhibitionPostImpact: Double = 1.0,
         inhibitionNoChange: Double = 0.5,
+        riseDrive: Double = 0.75,
         overcutDensityWindow: MediaTime = MediaTime(ticks: 90_000),
         overcutDensityScale: Double = 0.1,
         minimumSlotDurationFluid: MediaTime = MediaTime(ticks: 45_000),
@@ -168,6 +185,7 @@ struct ScoreConfiguration: Codable, Sendable {
         self.inhibitionHeldNote = inhibitionHeldNote
         self.inhibitionPostImpact = inhibitionPostImpact
         self.inhibitionNoChange = inhibitionNoChange
+        self.riseDrive = riseDrive
         self.overcutDensityWindow = overcutDensityWindow
         self.overcutDensityScale = overcutDensityScale
         self.minimumSlotDurationFluid = minimumSlotDurationFluid

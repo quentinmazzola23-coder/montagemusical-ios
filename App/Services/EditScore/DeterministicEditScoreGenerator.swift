@@ -119,7 +119,15 @@ struct DeterministicEditScoreGenerator: EditScoreGenerating, Sendable {
     /// sur (generatorVersion, empreinte de `ScoreConfiguration`,
     /// analysisVersion) : sans cet incrément, tous les projets existants
     /// garderaient des partitions produites par l'ancienne logique (§61).
-    static let generatorVersion = 2
+    ///
+    /// **v3** — correctif S4 : le champ d'ancres lit enfin les montées. Les
+    /// événements `.buildUp` (§12.4) et les états `.accumulation` (§24)
+    /// étaient calculés et persistés sans aucun lecteur ; ils alimentent
+    /// désormais un terme d'attraction dont la valeur croît de 0 au début
+    /// de la montée à 1 juste avant l'impact, ce qui densifie les coupes en
+    /// approchant du drop. Écart assumé par rapport à la formule §26.3, qui
+    /// ne prévoit pas ce terme — voir `ScoreConfiguration.riseDrive`.
+    static let generatorVersion = 3
 
     // La fenêtre de densité locale et le facteur d'échelle de
     // l'`overcutPenalty` vivent dans `ScoreConfiguration`

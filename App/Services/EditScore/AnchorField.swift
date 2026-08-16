@@ -173,6 +173,12 @@ struct AnchorFieldBuilder: Sendable {
         // TENUE d'une boucle de kick régulière : voir `heldNote` dans
         // `makeAnchor`.
         let density = AnchorCurveSampler(analysis.continuousCurves.density)
+        // Montées §25 — intervalles de `.buildUp` et états `.accumulation`.
+        // CORRECTIF S4 : ces deux couches étaient calculées, persistées, et
+        // lues NULLE PART. Le moteur savait donc reconnaître une montée sans
+        // que cela change une seule coupe, alors que la densification avant
+        // le drop est la sensation la plus caractéristique du genre visé.
+        let riseIntervals = Self.riseIntervals(analysis: analysis, durationTicks: durationTicks)
         let impactTicks = analysis.musicalEvents
             .filter { $0.type == .impact && $0.start.ticks >= 0 && $0.start.ticks <= durationTicks }
             .map(\.start.ticks)
@@ -205,7 +211,8 @@ struct AnchorFieldBuilder: Sendable {
                 energy: energy,
                 novelty: novelty,
                 stability: stability,
-                density: density
+                density: density,
+                riseIntervals: riseIntervals
             )
             built.append((anchor, candidate.isProtected))
         }
@@ -619,7 +626,8 @@ struct AnchorFieldBuilder: Sendable {
         energy: AnchorCurveSampler,
         novelty: AnchorCurveSampler,
         stability: AnchorCurveSampler,
-        density: AnchorCurveSampler
+        density: AnchorCurveSampler,
+        riseIntervals: [(start: Int64, end: Int64)]
     ) -> EditAnchor {
         let tick = candidate.centerTicks
 
@@ -698,6 +706,30 @@ struct AnchorFieldBuilder: Sendable {
         // `ScoreConfiguration`. `overcutPenalty` est appliqué à la
         // SÉLECTION (densité de coupes déjà activées, voir
         // `DeterministicEditScoreGenerator`) : nul au niveau du champ.
+        // Poussée de montée (correctif S4). ÉCART ASSUMÉ par rapport à
+        // §26.3 : la formule de la spécification ne prévoit pas ce terme.
+        // Il est ajouté parce que `.buildUp` (§12.4) et `.accumulation`
+        // (§24) étaient produits sans aucun lecteur — le moteur savait
+        // reconnaître une montée sans que cela change une seule coupe.
+        //
+        // La valeur est la POSITION dans la montée : 0 à son début, 1 juste
+        // avant l'impact. La densification s'intensifie donc à mesure qu'on
+        // approche du drop, ce qui est une accélération et non un simple
+        // palier — c'est la sensation que §27 confiait au geste
+        // `.acceleration`, toujours jamais émis.
+        //
+        // À distinguer de `expectedFutureValue`, qui est une rampe fixe de
+        // 1,5 s avant TOUT impact, qu'il y ait montée ou non : ici il faut
+        // qu'une montée ait été RÉELLEMENT détectée (§25 : jamais de montée
+        // inventée), et la fenêtre est celle de la montée elle-même.
+        var riseDrive = 0.0
+        for interval in riseIntervals {
+            guard tick > interval.start, tick <= interval.end else { continue }
+            let span = interval.end - interval.start
+            guard span > 0 else { continue }
+            riseDrive = max(riseDrive, Double(tick - interval.start) / Double(span))
+        }
+
         let attraction =
             configuration.rhythmicStrength * candidate.rhythmic
             + configuration.structuralStrength * candidate.structural
@@ -705,6 +737,7 @@ struct AnchorFieldBuilder: Sendable {
             + configuration.contrast * contrastValue
             + configuration.resolutionValue * candidate.resolution
             + configuration.expectedFutureValue * futureValue
+            + configuration.riseDrive * riseDrive
         let inhibition = configuration.inhibition * inhibitionComponent
         let uncertainty = configuration.uncertaintyPenalty * (1.0 - clamp01(candidate.confidence))
         let finalUtility = attraction - inhibition - uncertainty
@@ -731,6 +764,7 @@ struct AnchorFieldBuilder: Sendable {
         if noveltyValue >= 0.5 { reasons.append("Nouveauté élevée") }
         if contrastValue >= 0.5 { reasons.append("Contraste élevé") }
         if kind == .anticipatory { reasons.append("Anticipation d'un impact") }
+        if riseDrive >= 0.5 { reasons.append("Montée vers l'impact") }
         reasons.append(Self.confidenceReason(candidate.confidence))
 
         // Fenêtres §13.1 : optimal ± (beat/2, borné à 60 ms minimum) pour
@@ -971,6 +1005,55 @@ struct AnchorFieldBuilder: Sendable {
 
     private func clamp01(_ value: Double) -> Double {
         min(max(value, 0), 1)
+    }
+
+    /// Intervalles de MONTÉE, fusionnés (correctif S4).
+    ///
+    /// Deux sources, toutes deux déjà produites par l'analyse et jusqu'ici
+    /// sans lecteur :
+    /// - les événements `.buildUp` de géométrie `.interval` (§12.4), que
+    ///   `CurvesAndEventsBuilder` n'émet qu'après vérification d'une montée
+    ///   réelle — énergie ET tension — donc jamais inventés (§25) ;
+    /// - les états fonctionnels `.accumulation` (§24).
+    ///
+    /// Les deux se recouvrent largement mais pas toujours : un `.buildUp`
+    /// exige un impact à son terme, un état `.accumulation` non. On prend
+    /// l'union, puis on FUSIONNE les intervalles qui se chevauchent pour
+    /// qu'une ancre située dans deux d'entre eux ne compte pas deux fois.
+    ///
+    /// Déterminisme : tri par (début, fin) croissants avant fusion, aucune
+    /// itération sur un `Set`.
+    private static func riseIntervals(
+        analysis: MusicAnalysisResult,
+        durationTicks: Int64
+    ) -> [(start: Int64, end: Int64)] {
+        var raw: [(start: Int64, end: Int64)] = []
+
+        for event in analysis.musicalEvents where event.type == .buildUp {
+            guard event.geometry == .interval, let end = event.end else { continue }
+            let start = max(event.start.ticks, 0)
+            let stop = min(end.ticks, durationTicks)
+            if stop > start { raw.append((start, stop)) }
+        }
+        for state in analysis.functionalStates where state.function == .accumulation {
+            let start = max(state.start.ticks, 0)
+            let stop = min(state.end.ticks, durationTicks)
+            if stop > start { raw.append((start, stop)) }
+        }
+
+        guard !raw.isEmpty else { return [] }
+        raw.sort { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end }
+
+        var merged: [(start: Int64, end: Int64)] = [raw[0]]
+        for interval in raw.dropFirst() {
+            let last = merged[merged.count - 1]
+            if interval.start <= last.end {
+                merged[merged.count - 1] = (last.start, max(last.end, interval.end))
+            } else {
+                merged.append(interval)
+            }
+        }
+        return merged
     }
 
     /// « Confiance 0,91 » (§29) — format déterministe, virgule française,
