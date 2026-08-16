@@ -394,7 +394,7 @@ final class GeometryLockStoreTests: XCTestCase {
     /// Projet en assemblage avec 4 cases percutantes de 1 s chacune.
     private func makeAssemblingProject() async throws -> UUID {
         let projectID = try await store.createDraft()
-        try await store.selectPace(.percussive, from: makeFamily(), projectID: projectID)
+        try await store.selectPace(.hat, from: makeFamily(), projectID: projectID)
         return projectID
     }
 
@@ -429,10 +429,10 @@ final class GeometryLockStoreTests: XCTestCase {
     private func makeFamily() -> EditScoreFamily {
         EditScoreFamily(
             analysisVersion: 1,
-            fluid: makeScore(mode: .fluid, boundaries: [0, 240_000]),
-            balanced: makeScore(mode: .balanced, boundaries: [0, 120_000, 240_000]),
-            percussive: makeScore(
-                mode: .percussive,
+            kick: makeScore(mode: .kick, boundaries: [0, 240_000]),
+            snare: makeScore(mode: .snare, boundaries: [0, 120_000, 240_000]),
+            hat: makeScore(
+                mode: .hat,
                 boundaries: [0, 60_000, 120_000, 180_000, 240_000]
             )
         )

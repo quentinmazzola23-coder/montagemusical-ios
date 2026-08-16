@@ -61,7 +61,7 @@ actor AudioAnalysisActor {
 
     init(
         analyzer: any MusicAnalyzing & Sendable,
-        scoreGenerator: any EditScoreGenerating & Sendable = DeterministicEditScoreGenerator(),
+        scoreGenerator: any EditScoreGenerating & Sendable = PercussiveEditScoreGenerator(),
         projectStore: ProjectStore,
         fileStore: ProjectFileStore
     ) {
@@ -273,7 +273,7 @@ actor AudioAnalysisActor {
             // `awaitingPaceSelection` (annexe A).
             try await projectStore.saveScores(
                 relativePath: Self.scoresRelativePath,
-                scoreVersion: DeterministicEditScoreGenerator.generatorVersion,
+                scoreVersion: PercussiveEditScoreGenerator.generatorVersion,
                 projectID: projectID
             )
             // `ProjectRecord.analysisVersion` est une TRACE §61 (« conserver
@@ -363,7 +363,7 @@ actor AudioAnalysisActor {
         encoder.outputFormatting = [.sortedKeys]
         // `ScoresMeta` : schéma unique partagé (défini dans ScoreLibrary.swift).
         let meta = ScoresMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: try ScoreConfigurationFingerprint.fingerprint(of: configuration),
             analysisVersion: analysisVersion,
             analysisEngineVersion: analysisEngineVersion,

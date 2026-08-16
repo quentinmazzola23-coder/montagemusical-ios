@@ -488,7 +488,7 @@ final class ProjectStoreTests: XCTestCase {
         ProjectSlotRecord(
             id: id,
             projectID: projectID,
-            scoreModeRaw: PaceMode.balanced.rawValue,
+            scoreModeRaw: PaceMode.snare.rawValue,
             index: index,
             startTicks: startTicks,
             endTicks: endTicks,

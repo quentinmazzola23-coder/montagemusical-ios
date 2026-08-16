@@ -1736,7 +1736,7 @@ private func makeAssemblyPreviewContainer(
         createdAt: now,
         updatedAt: now,
         statusRaw: ProjectStatus.assembling.rawValue,
-        selectedPaceRaw: PaceMode.balanced.rawValue,
+        selectedPaceRaw: PaceMode.kick.rawValue,
         activeSlotIndex: activeSlotIndex,
         audioRelativePath: nil,
         analysisRelativePath: nil,
@@ -1750,7 +1750,7 @@ private func makeAssemblyPreviewContainer(
         container.mainContext.insert(ProjectSlotRecord(
             id: UUID(),
             projectID: projectID,
-            scoreModeRaw: PaceMode.balanced.rawValue,
+            scoreModeRaw: PaceMode.kick.rawValue,
             index: index,
             startTicks: start,
             endTicks: start + duration,

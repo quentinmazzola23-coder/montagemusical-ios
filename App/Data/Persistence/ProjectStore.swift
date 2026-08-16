@@ -759,9 +759,9 @@ extension ProjectStore {
         }
         let record = try requireProject(projectID)
         let score: EditScore = switch mode {
-        case .fluid: family.fluid
-        case .balanced: family.balanced
-        case .percussive: family.percussive
+        case .kick: family.kick
+        case .snare: family.snare
+        case .hat: family.hat
         }
         // TRANSACTION UNIQUE (tout-ou-rien) : suppression des cases
         // existantes + insertions validées §10.1 + champs du projet, puis

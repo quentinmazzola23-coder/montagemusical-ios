@@ -162,7 +162,7 @@ final class AppEnvironment {
         modelContainer: ModelContainer,
         fileStore: ProjectFileStore = ProjectFileStore(),
         musicAnalyzer: (any MusicAnalyzing & Sendable)? = nil,
-        scoreGenerator: any EditScoreGenerating & Sendable = DeterministicEditScoreGenerator()
+        scoreGenerator: any EditScoreGenerating & Sendable = PercussiveEditScoreGenerator()
     ) {
         self.logger = AppLogger(category: .app)
         self.modelContainer = modelContainer

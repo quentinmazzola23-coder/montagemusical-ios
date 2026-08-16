@@ -66,13 +66,13 @@ final class PaceSelectionStoreTests: XCTestCase {
         let projectID = try await store.createDraft()
         let family = makeFamily()
 
-        try await store.selectPace(.balanced, from: family, projectID: projectID)
+        try await store.selectPace(.snare, from: family, projectID: projectID)
 
         // Cases persistées == cases de la partition Équilibré (ticks §9
         // exacts, ancres conservées), UNIQUEMENT le mode choisi (§11 : les
         // trois partitions complètes restent dans scores-v1.json).
         let slots = try persistedSlots(projectID: projectID)
-        let expected = family.balanced.slots
+        let expected = family.snare.slots
         XCTAssertEqual(slots.count, expected.count, "Cases du mode choisi uniquement")
         XCTAssertEqual(slots.map(\.index), expected.map(\.index))
         XCTAssertEqual(slots.map(\.startTicks), expected.map(\.start.ticks), "Frontières de début exactes (§9)")
@@ -80,14 +80,14 @@ final class PaceSelectionStoreTests: XCTestCase {
         XCTAssertEqual(slots.map(\.entryAnchorID), expected.map(\.entryAnchorID))
         XCTAssertEqual(slots.map(\.exitAnchorID), expected.map(\.exitAnchorID))
         XCTAssertTrue(
-            slots.allSatisfy { $0.scoreModeRaw == PaceMode.balanced.rawValue },
+            slots.allSatisfy { $0.scoreModeRaw == PaceMode.snare.rawValue },
             "scoreModeRaw == balanced pour toutes les cases"
         )
         XCTAssertTrue(slots.allSatisfy { $0.assignmentID == nil }, "Aucune association à l'insertion")
 
         // Projet : rythme choisi, statut assembling, case active 0 (§59).
         let project = try projectState(projectID)
-        XCTAssertEqual(project.selectedPaceRaw, PaceMode.balanced.rawValue)
+        XCTAssertEqual(project.selectedPaceRaw, PaceMode.snare.rawValue)
         XCTAssertEqual(project.statusRaw, ProjectStatus.assembling.rawValue)
         XCTAssertEqual(project.activeSlotIndex, 0)
 
@@ -100,7 +100,7 @@ final class PaceSelectionStoreTests: XCTestCase {
     func testRevertWithoutAssignmentClearsSlotsAndAllowsReselection() async throws {
         let projectID = try await store.createDraft()
         let family = makeFamily()
-        try await store.selectPace(.balanced, from: family, projectID: projectID)
+        try await store.selectPace(.snare, from: family, projectID: projectID)
         try await store.setActiveSlot(index: 1, projectID: projectID)
 
         try await store.revertToPaceSelection(projectID: projectID)
@@ -113,14 +113,14 @@ final class PaceSelectionStoreTests: XCTestCase {
         XCTAssertEqual(project.statusRaw, ProjectStatus.awaitingPaceSelection.rawValue)
 
         // Re-sélection d'un AUTRE mode : fonctionne et repart de zéro.
-        try await store.selectPace(.percussive, from: family, projectID: projectID)
+        try await store.selectPace(.hat, from: family, projectID: projectID)
         let slots = try persistedSlots(projectID: projectID)
-        XCTAssertEqual(slots.count, family.percussive.slots.count)
-        XCTAssertEqual(slots.map(\.startTicks), family.percussive.slots.map(\.start.ticks))
-        XCTAssertEqual(slots.map(\.endTicks), family.percussive.slots.map(\.end.ticks))
-        XCTAssertTrue(slots.allSatisfy { $0.scoreModeRaw == PaceMode.percussive.rawValue })
+        XCTAssertEqual(slots.count, family.hat.slots.count)
+        XCTAssertEqual(slots.map(\.startTicks), family.hat.slots.map(\.start.ticks))
+        XCTAssertEqual(slots.map(\.endTicks), family.hat.slots.map(\.end.ticks))
+        XCTAssertTrue(slots.allSatisfy { $0.scoreModeRaw == PaceMode.hat.rawValue })
         project = try projectState(projectID)
-        XCTAssertEqual(project.selectedPaceRaw, PaceMode.percussive.rawValue)
+        XCTAssertEqual(project.selectedPaceRaw, PaceMode.hat.rawValue)
         XCTAssertEqual(project.statusRaw, ProjectStatus.assembling.rawValue)
         XCTAssertEqual(project.activeSlotIndex, 0, "Case active remise à 0 à la re-sélection")
     }
@@ -130,7 +130,7 @@ final class PaceSelectionStoreTests: XCTestCase {
     func testAssignmentLocksSelectPaceRevertAndClearSlots() async throws {
         let projectID = try await store.createDraft()
         let family = makeFamily()
-        try await store.selectPace(.balanced, from: family, projectID: projectID)
+        try await store.selectPace(.snare, from: family, projectID: projectID)
         try insertAssignment(projectID: projectID)
 
         let locked = try await store.hasAssignments(projectID: projectID)
@@ -138,7 +138,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         let before = try persistedSlots(projectID: projectID)
 
         do {
-            try await store.selectPace(.percussive, from: family, projectID: projectID)
+            try await store.selectPace(.hat, from: family, projectID: projectID)
             XCTFail("selectPace doit échouer après association (§65)")
         } catch let error as ProjectStoreError {
             XCTAssertEqual(error, .paceLockedByAssignments(projectID))
@@ -163,7 +163,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         XCTAssertEqual(after, before, "Cases strictement intactes (§65, §89)")
         XCTAssertEqual(after.compactMap(\.assignmentID).count, 1, "Association conservée")
         let project = try projectState(projectID)
-        XCTAssertEqual(project.selectedPaceRaw, PaceMode.balanced.rawValue, "Rythme choisi inchangé")
+        XCTAssertEqual(project.selectedPaceRaw, PaceMode.snare.rawValue, "Rythme choisi inchangé")
         XCTAssertEqual(project.statusRaw, ProjectStatus.assembling.rawValue, "Statut inchangé")
     }
 
@@ -175,7 +175,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         let family = makeFamily()
         try writeScores(family, projectID: projectID)
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
             projectID: projectID
         )
@@ -184,9 +184,9 @@ final class PaceSelectionStoreTests: XCTestCase {
         let loaded = try XCTUnwrap(library.loadScores(projectID: projectID), "scores-v1.json présent → famille décodée")
         XCTAssertEqual(loaded.analysisVersion, family.analysisVersion)
         for (original, redecoded) in [
-            (family.fluid, loaded.fluid),
-            (family.balanced, loaded.balanced),
-            (family.percussive, loaded.percussive),
+            (family.kick, loaded.kick),
+            (family.snare, loaded.snare),
+            (family.hat, loaded.hat),
         ] {
             XCTAssertEqual(redecoded.mode, original.mode)
             XCTAssertEqual(redecoded.slots.map(\.id), original.slots.map(\.id))
@@ -221,7 +221,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         try fileStore.createDirectories(for: projectID)
         try writeScores(makeFamily(), projectID: projectID)
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion + 1,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion + 1,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
             projectID: projectID
         )
@@ -241,7 +241,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         var otherConfiguration = ScoreConfiguration()
         otherConfiguration.rhythmicStrength += 1.0
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: otherConfiguration),
             projectID: projectID
         )
@@ -272,7 +272,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         try fileStore.createDirectories(for: projectID)
         try writeScores(makeFamily(), projectID: projectID)
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
             analysisVersion: DeterministicMusicAnalyzer.analysisSchemaVersion + 1,
             projectID: projectID
@@ -318,7 +318,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         // restent à jour — aucune régénération imposée à un projet terminé.
         for tracedEngineVersion in [2, DeterministicMusicAnalyzer.engineVersion + 1] {
             try writeMeta(
-                generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+                generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
                 configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
                 analysisEngineVersion: tracedEngineVersion,
                 projectID: projectID
@@ -348,7 +348,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         try fileStore.createDirectories(for: projectID)
         try writeScores(makeFamily(), projectID: projectID)
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
             analysisEngineVersion: nil,
             projectID: projectID
@@ -382,7 +382,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let withoutModel = ScoresMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: "empreinte",
             analysisVersion: DeterministicMusicAnalyzer.analysisSchemaVersion,
             coreMLModelVersion: CoreMLModelRegistry.beatActivationModelVersion()
@@ -416,7 +416,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         let legacyJSON = """
         {"analysisVersion":\(DeterministicMusicAnalyzer.analysisSchemaVersion),\
         "configurationFingerprint":"empreinte",\
-        "generatorVersion":\(DeterministicEditScoreGenerator.generatorVersion)}
+        "generatorVersion":\(PercussiveEditScoreGenerator.generatorVersion)}
         """
         let legacy = try JSONDecoder().decode(ScoresMeta.self, from: Data(legacyJSON.utf8))
         XCTAssertNil(legacy.coreMLModelVersion, "Champ absent → nil, jamais une erreur de décodage")
@@ -424,7 +424,7 @@ final class PaceSelectionStoreTests: XCTestCase {
             legacy.analysisEngineVersion,
             "Version de moteur absente → nil : les trois clés historiques suffisent à décoder (§61)"
         )
-        XCTAssertEqual(legacy.generatorVersion, DeterministicEditScoreGenerator.generatorVersion)
+        XCTAssertEqual(legacy.generatorVersion, PercussiveEditScoreGenerator.generatorVersion)
     }
 
     func testScoresAreCurrentIgnoresCoreMLModelVersion() throws {
@@ -436,7 +436,7 @@ final class PaceSelectionStoreTests: XCTestCase {
         try fileStore.createDirectories(for: projectID)
         try writeScores(makeFamily(), projectID: projectID)
         try writeMeta(
-            generatorVersion: DeterministicEditScoreGenerator.generatorVersion,
+            generatorVersion: PercussiveEditScoreGenerator.generatorVersion,
             configurationFingerprint: ScoreConfigurationFingerprint.fingerprint(of: .production),
             projectID: projectID,
             coreMLModelVersion: "beat-activation-1.2.0"
@@ -453,7 +453,7 @@ final class PaceSelectionStoreTests: XCTestCase {
 
     func testDuplicateForPaceChangeUnlocksCopyAndKeepsOriginalIntact() async throws {
         let projectID = try await store.createDraft()
-        try await store.selectPace(.balanced, from: makeFamily(), projectID: projectID)
+        try await store.selectPace(.snare, from: makeFamily(), projectID: projectID)
         try insertAssignment(projectID: projectID)
         let originalSlots = try persistedSlots(projectID: projectID)
 
@@ -470,28 +470,28 @@ final class PaceSelectionStoreTests: XCTestCase {
 
         // `selectPace` RÉUSSIT sur la copie (§65 : une issue réelle, pas une
         // boucle de duplications toutes verrouillées).
-        try await store.selectPace(.percussive, from: makeFamily(), projectID: copyID)
-        XCTAssertEqual(try projectState(copyID).selectedPaceRaw, PaceMode.percussive.rawValue)
+        try await store.selectPace(.hat, from: makeFamily(), projectID: copyID)
+        XCTAssertEqual(try projectState(copyID).selectedPaceRaw, PaceMode.hat.rawValue)
 
         // L'original est STRICTEMENT intact (cases, association, rythme).
         XCTAssertEqual(try persistedSlots(projectID: projectID), originalSlots)
         let originalHasAssignments = try await store.hasAssignments(projectID: projectID)
         XCTAssertTrue(originalHasAssignments)
-        XCTAssertEqual(try projectState(projectID).selectedPaceRaw, PaceMode.balanced.rawValue)
+        XCTAssertEqual(try projectState(projectID).selectedPaceRaw, PaceMode.snare.rawValue)
     }
 
     // MARK: - §10.1 : insertion refusée après association
 
     func testInsertSlotsRefusedAfterAssignment() async throws {
         let projectID = try await store.createDraft()
-        try await store.selectPace(.fluid, from: makeFamily(), projectID: projectID)
+        try await store.selectPace(.kick, from: makeFamily(), projectID: projectID)
         try insertAssignment(projectID: projectID)
         let before = try persistedSlots(projectID: projectID)
 
         do {
             try await store.insertSlots(
                 [makeSlot(index: 10, startTicks: 240_000, endTicks: 300_000)],
-                scoreMode: .fluid,
+                scoreMode: .kick,
                 projectID: projectID
             )
             XCTFail("insertSlots doit être refusé après association (§10.1/§65)")
@@ -616,10 +616,10 @@ final class PaceSelectionStoreTests: XCTestCase {
     private func makeFamily() -> EditScoreFamily {
         EditScoreFamily(
             analysisVersion: 1,
-            fluid: makeScore(mode: .fluid, boundaries: [0, 240_000]),
-            balanced: makeScore(mode: .balanced, boundaries: [0, 120_000, 240_000]),
-            percussive: makeScore(
-                mode: .percussive,
+            kick: makeScore(mode: .kick, boundaries: [0, 240_000]),
+            snare: makeScore(mode: .snare, boundaries: [0, 120_000, 240_000]),
+            hat: makeScore(
+                mode: .hat,
                 boundaries: [0, 60_000, 120_000, 180_000, 240_000]
             )
         )

@@ -23,6 +23,56 @@ struct MusicAnalysisResult: Codable, Sendable {
     let eventRelations: [EventRelation]
     let continuousCurves: ContinuousCurves
     let analysisConfidence: ConfidenceBreakdown
+
+    /// Frappes percussives classées (pivot du 16 août 2026).
+    ///
+    /// C'est désormais la SEULE sortie d'analyse que le générateur de
+    /// partitions consomme : une coupe par frappe de la famille choisie. Le
+    /// reste — unités structurelles, états fonctionnels, relations, courbes
+    /// continues — continue d'être produit mais n'est plus lu par personne.
+    /// Voir `PaceMode` pour le raisonnement, et `PercussiveClassifier` pour
+    /// la règle de classement.
+    ///
+    /// Décodage TOLÉRANT : absent des analyses écrites avant le pivot, d'où
+    /// le `decodeIfPresent` de l'initialiseur. Une analyse ancienne rend
+    /// donc un tableau vide, ce que `PercussiveEditScoreGenerator` traite
+    /// comme « aucune frappe » — jamais un crash, jamais une frappe inventée.
+    let percussiveHits: [PercussiveHit]
+}
+
+extension MusicAnalysisResult {
+    /// Décodage tolérant des analyses écrites AVANT le pivot : elles n'ont
+    /// pas de clé `percussiveHits`, et doivent rester lisibles plutôt que de
+    /// faire échouer le chargement (§61 — une analyse existante n'est jamais
+    /// invalidée silencieusement, elle est recalculée explicitement).
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        duration = try container.decode(MediaTime.self, forKey: .duration)
+        rhythmHypotheses = try container.decode([RhythmHypothesis].self, forKey: .rhythmHypotheses)
+        selectedRhythmHypothesisID = try container.decode(UUID.self, forKey: .selectedRhythmHypothesisID)
+        beats = try container.decode([BeatEvent].self, forKey: .beats)
+        bars = try container.decode([BarEvent].self, forKey: .bars)
+        structuralUnits = try container.decode([StructuralUnit].self, forKey: .structuralUnits)
+        functionalStates = try container.decode([FunctionalStateInterval].self, forKey: .functionalStates)
+        musicalEvents = try container.decode([MusicalEvent].self, forKey: .musicalEvents)
+        eventRelations = try container.decode([EventRelation].self, forKey: .eventRelations)
+        continuousCurves = try container.decode(ContinuousCurves.self, forKey: .continuousCurves)
+        analysisConfidence = try container.decode(ConfidenceBreakdown.self, forKey: .analysisConfidence)
+        percussiveHits = try container.decodeIfPresent([PercussiveHit].self, forKey: .percussiveHits) ?? []
+    }
+}
+
+/// Une frappe percussive datée et classée.
+// Non defini par la specification — pivot du 16 août 2026.
+struct PercussiveHit: Codable, Sendable, Equatable {
+    /// Temps absolu, échelle canonique (§9).
+    let time: MediaTime
+    /// Force normalisée `0...1` relativement au morceau (reprise de
+    /// l'onset dont elle provient).
+    let strength: Double
+    /// Famille percussive.
+    let percussiveClass: PercussiveClass
 }
 
 // MARK: - Hypothèse rythmique (spec §12.1, verbatim)

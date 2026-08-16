@@ -731,7 +731,8 @@ final class AnalysisPipelineTests: XCTestCase {
                 ),
                 analysisConfidence: ConfidenceBreakdown(
                     overall: 0.2, rhythm: 0, structure: 0.2, functions: 0
-                )
+                ),
+                percussiveHits: []
             )
         }
     }

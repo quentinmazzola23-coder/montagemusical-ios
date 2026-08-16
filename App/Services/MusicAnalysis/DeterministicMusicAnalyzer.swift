@@ -70,7 +70,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
     /// spectre — où la fondamentale du kick le faisait DESCENDRE dans un
     /// drop et monter dans un breakdown. Il alimente 40 % de la courbe de
     /// tension, qui était donc inversée elle aussi.
-    static let engineVersion = 4
+    static let engineVersion = 5
 
     /// Version du SCHÉMA de `MusicAnalysisResult` (§61) — la forme des
     /// données persistées, pas l'algorithme qui les produit. C'est elle qui
@@ -112,7 +112,7 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
     /// « Les rythmes doivent être recalculés » avec un bouton — le recalcul
     /// reste une action de l'utilisateur (§61). À partir de la v3, un
     /// incrément de moteur ne périmera plus aucune partition.
-    static let analysisSchemaVersion = 1
+    static let analysisSchemaVersion = 2
 
     /// Nombre minimal d'onsets détectés (§18) pour tenter une estimation de
     /// tempo (§19.1). Une périodicité exige plusieurs événements réels ;
@@ -390,7 +390,13 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
             musicalEvents: curvesAndEvents.events,
             eventRelations: curvesAndEvents.relations,
             continuousCurves: curvesAndEvents.curves,
-            analysisConfidence: confidence
+            analysisConfidence: confidence,
+            // PIVOT du 16 août 2026 : la seule sortie que le générateur de
+            // partitions consomme désormais. Le reste est produit et n'est
+            // plus lu — voir `PaceMode`.
+            percussiveHits: PercussiveClassifier()
+                .classify(onsets: onsets, features: features)
+                .map { PercussiveHit(time: $0.onset.time, strength: $0.onset.strength, percussiveClass: $0.class) }
         )
         try cache.save(
             result,
@@ -517,7 +523,11 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
                 energy: [], density: [], tension: [], novelty: [],
                 stability: [], regularity: [], vocalPresence: [], bassPresence: []
             ),
-            analysisConfidence: ConfidenceBreakdown(overall: 0.1, rhythm: 0, structure: 0.1, functions: 0)
+            analysisConfidence: ConfidenceBreakdown(overall: 0.1, rhythm: 0, structure: 0.1, functions: 0),
+            // Morceau trop court pour une analyse spectrale : aucune frappe
+            // n'est INVENTÉE (§0.7). Les trois partitions se réduiront donc
+            // à une case unique couvrant le morceau, ce que §63 exige.
+            percussiveHits: []
         )
     }
 

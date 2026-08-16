@@ -8,21 +8,79 @@
 
 import Foundation
 
-// MARK: - Modes de rythme (spec §13, verbatim)
+// MARK: - Modes de rythme
 
+/// PIVOT DU 16 AOÛT 2026 — ÉCART MAJEUR ASSUMÉ PAR RAPPORT À §13.
+///
+/// Les trois modes de la spécification (Fluide / Équilibré / Percutant)
+/// étaient trois DENSITÉS de coupe, produites par une interprétation
+/// dramaturgique du morceau — sections, phrases, tension, nouveauté,
+/// montées, gestes, neuf poids d'utilité, sélection gloutonne. Aucune de
+/// ces interprétations n'a jamais été validée à l'oreille (§74 : les huit
+/// mesures demandées n'ont jamais été relevées).
+///
+/// Les trois modes deviennent trois FAMILLES DE FRAPPE. Une partition par
+/// famille, et chaque coupe tombe exactement sur une frappe de cette
+/// famille. Ce que le moteur promet devient vérifiable en une écoute, ce
+/// qui n'était pas le cas de « cette section est une accumulation ».
+///
+/// CONSÉQUENCE ACTÉE : l'imbrication §70 (Fluide ⊆ Équilibré ⊆ Percutant)
+/// DISPARAÎT. Kick, caisse claire et charley sont des ensembles disjoints,
+/// pas emboîtés — l'invariant le plus structurant du générateur précédent
+/// n'a plus d'objet. Le verrou §65 (le mode se verrouille à la première
+/// association) prend donc encore plus de poids : changer de mode après
+/// coup n'est plus une fusion de cases, c'est une autre grille.
+///
+/// La couche dramaturgique n'est pas supprimée, elle est MISE EN SOMMEIL :
+/// `DeterministicMusicAnalyzer` continue de la produire, plus personne ne
+/// la lit. C'est réversible tant que ce commentaire est là pour le dire.
 enum PaceMode: String, Codable, CaseIterable {
-    case fluid
-    case balanced
-    case percussive
+    /// Grave : grosse caisse, kick distordu.
+    case kick
+    /// Médium large bande : caisse claire, clap.
+    case snare
+    /// Aigu : charley, shaker, cymbale.
+    case hat
+
+    /// Famille percussive correspondante. Les deux énumérations sont
+    /// volontairement distinctes : `PercussiveClass` appartient à l'analyse,
+    /// `PaceMode` est ce qui est PERSISTÉ dans `ProjectSlotRecord` (§10.1)
+    /// et affiché. Les faire coïncider par ce pont plutôt que par un alias
+    /// laisse la possibilité d'ajouter une famille sans toucher au schéma.
+    var percussiveClass: PercussiveClass {
+        switch self {
+        case .kick: .kick
+        case .snare: .snare
+        case .hat: .hat
+        }
+    }
+
+    init(percussiveClass: PercussiveClass) {
+        switch percussiveClass {
+        case .kick: self = .kick
+        case .snare: self = .snare
+        case .hat: self = .hat
+        }
+    }
 }
 
-// MARK: - Famille de partitions (spec §13, verbatim)
+// MARK: - Famille de partitions (spec §13)
 
 struct EditScoreFamily: Codable, Sendable {
     let analysisVersion: Int
-    let fluid: EditScore
-    let balanced: EditScore
-    let percussive: EditScore
+    let kick: EditScore
+    let snare: EditScore
+    let hat: EditScore
+
+    /// Partition d'un mode donné — évite d'avoir à répéter le `switch`
+    /// partout où l'on passe d'un mode à sa partition.
+    func score(for mode: PaceMode) -> EditScore {
+        switch mode {
+        case .kick: kick
+        case .snare: snare
+        case .hat: hat
+        }
+    }
 }
 
 struct EditScore: Codable, Sendable {

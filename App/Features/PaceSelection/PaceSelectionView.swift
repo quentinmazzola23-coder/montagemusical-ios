@@ -37,9 +37,9 @@ extension PaceMode {
     /// Libellé d'interface français (§34 : `Fluide | Équilibré | Percutant`).
     var displayLabel: String {
         switch self {
-        case .fluid: "Fluide"
-        case .balanced: "Équilibré"
-        case .percussive: "Percutant"
+        case .kick: "Kick"
+        case .snare: "Caisse claire"
+        case .hat: "Charley"
         }
     }
 }
@@ -134,7 +134,7 @@ struct PaceSelectionView: View {
     @State private var scoresState: ScoresState = .loading
     /// Mode présenté dans l'aperçu. Défaut Équilibré — position centrale
     /// §34. Non defini par la specification — definition minimale V1.
-    @State private var selectedMode: PaceMode = .balanced
+    @State private var selectedMode: PaceMode = .kick
     /// Vrai pendant `selectPace` — évite la double validation.
     @State private var isValidating = false
     @State private var isLockAlertPresented = false
@@ -553,9 +553,9 @@ struct PaceSelectionView: View {
 
     private func score(for mode: PaceMode, in family: EditScoreFamily) -> EditScore {
         switch mode {
-        case .fluid: family.fluid
-        case .balanced: family.balanced
-        case .percussive: family.percussive
+        case .kick: family.kick
+        case .snare: family.snare
+        case .hat: family.hat
         }
     }
 
@@ -640,9 +640,9 @@ private func makePreviewFamily() -> EditScoreFamily {
     }
     return EditScoreFamily(
         analysisVersion: 1,
-        fluid: makePreviewScore(mode: .fluid, durationsTicks: fluid),
-        balanced: makePreviewScore(mode: .balanced, durationsTicks: balanced),
-        percussive: makePreviewScore(mode: .percussive, durationsTicks: percussive)
+        kick: makePreviewScore(mode: .kick, durationsTicks: fluid),
+        snare: makePreviewScore(mode: .snare, durationsTicks: balanced),
+        hat: makePreviewScore(mode: .hat, durationsTicks: percussive)
     )
 }
 
@@ -689,7 +689,7 @@ private func makePreviewFamily() -> EditScoreFamily {
 
 #Preview("Miniature de timeline") {
     MiniTimelineView(slots: makePreviewScore(
-        mode: .balanced,
+        mode: .kick,
         durationsTicks: [72_000, 96_000, 60_000, 120_000, 84_000, 108_000, 66_000, 90_000]
     ).slots)
     .frame(height: 56)
