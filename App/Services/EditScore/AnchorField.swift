@@ -169,6 +169,10 @@ struct AnchorFieldBuilder: Sendable {
         let energy = AnchorCurveSampler(analysis.continuousCurves.energy)
         let novelty = AnchorCurveSampler(analysis.continuousCurves.novelty)
         let stability = AnchorCurveSampler(analysis.continuousCurves.stability)
+        // Densité rythmique D (§23) — nécessaire pour distinguer une NOTE
+        // TENUE d'une boucle de kick régulière : voir `heldNote` dans
+        // `makeAnchor`.
+        let density = AnchorCurveSampler(analysis.continuousCurves.density)
         let impactTicks = analysis.musicalEvents
             .filter { $0.type == .impact && $0.start.ticks >= 0 && $0.start.ticks <= durationTicks }
             .map(\.start.ticks)
@@ -200,7 +204,8 @@ struct AnchorFieldBuilder: Sendable {
                 impactTicks: impactTicks,
                 energy: energy,
                 novelty: novelty,
-                stability: stability
+                stability: stability,
+                density: density
             )
             built.append((anchor, candidate.isProtected))
         }
@@ -613,7 +618,8 @@ struct AnchorFieldBuilder: Sendable {
         impactTicks: [Int64],
         energy: AnchorCurveSampler,
         novelty: AnchorCurveSampler,
-        stability: AnchorCurveSampler
+        stability: AnchorCurveSampler,
+        density: AnchorCurveSampler
     ) -> EditAnchor {
         let tick = candidate.centerTicks
 
@@ -645,9 +651,24 @@ struct AnchorFieldBuilder: Sendable {
         // La « coupe précédente trop proche » et le « besoin de
         // respiration » sont gérés à la SÉLECTION (overcutPenalty et règle
         // de respiration après burst dans le générateur), pas ici.
+        // CORRECTIF S1 — la stabilité seule a le signe INVERSÉ sur une
+        // musique à kick dominant. `stability` vaut 1 − variance locale du
+        // flux : une boucle de kick régulière, qui est la matière même d'un
+        // drop, a une variance de flux FAIBLE, donc une stabilité ÉLEVÉE.
+        // L'ancienne formule y voyait une « note tenue » et posait donc son
+        // inhibition maximale exactement là où on veut couper.
+        //
+        // Une note tenue, musicalement, c'est du son SANS attaques. On
+        // conditionne donc `heldNote` à une densité rythmique BASSE (D,
+        // §23) : porte pleine à densité nulle, fermée au-delà de 0,4. Une
+        // boucle de kick (densité élevée) rend désormais heldNote = 0 ;
+        // une nappe de breakdown le laisse intact.
         let stabilityValue = clamp01(stability.value(at: tick))
+        let densityValue = clamp01(density.value(at: tick))
+        let sustainGate = max(0, (0.4 - densityValue) / 0.4)
         let heldNote = max(0, (stabilityValue - 0.6) / 0.4)
             * max(0, (0.3 - noveltyValue) / 0.3)
+            * sustainGate
         var postImpactHold = 0.0
         for impact in impactTicks {
             let delta = tick - impact
@@ -656,7 +677,22 @@ struct AnchorFieldBuilder: Sendable {
             postImpactHold = max(postImpactHold, 1.0 - abs(2.0 * position - 1.0))
         }
         let noChange = max(0, (0.1 - noveltyValue) / 0.1) * 0.5
-        let inhibitionComponent = heldNote + postImpactHold + noChange
+
+        // CORRECTIF S1 (suite) — les trois sous-termes étaient SOMMÉS sous
+        // un poids unique de 1,0, donc de plage 0…2,5 face à des termes
+        // d'attraction de plage 0…1 chacun : une pondération implicite
+        // arbitraire, qui donnait à l'inhibition deux fois et demie le bras
+        // de levier de n'importe quel indice d'attraction. Chaque sous-terme
+        // porte désormais son propre poids (§26.2), et le poids global
+        // `inhibition` reste disponible au-dessus pour régler l'ensemble.
+        // Plages avec les valeurs de production : heldNote 0…0,5,
+        // postImpactHold 0…1,0, noChange 0…0,25 — soit 1,75 dans le pire
+        // cas théorique, jamais atteint (heldNote exige une densité basse,
+        // postImpactHold un impact récent).
+        let inhibitionComponent =
+            configuration.inhibitionHeldNote * heldNote
+            + configuration.inhibitionPostImpact * postImpactHold
+            + configuration.inhibitionNoChange * noChange
 
         // Utilité §26.3 — formule exacte avec les 9 poids de
         // `ScoreConfiguration`. `overcutPenalty` est appliqué à la

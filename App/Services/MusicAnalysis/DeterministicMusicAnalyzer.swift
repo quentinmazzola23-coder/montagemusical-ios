@@ -62,7 +62,15 @@ struct DeterministicMusicAnalyzer: MusicAnalyzing, Sendable {
     ///   * **structure** — kernels de nouveauté longs (échelle de la phrase)
     ///     et seuil ABSOLU de nouveauté, pour qu'une boucle homogène puisse
     ///     rendre zéro frontière au lieu d'en fabriquer par bruit.
-    static let engineVersion = 3
+    ///
+    /// **v4** — correctif S1, le signe inversé des descripteurs sur une
+    /// musique à kick dominant : le centroïde §17 est désormais un centroïde
+    /// de BRILLANCE, pondéré par la magnitude et calculé au-dessus de
+    /// 200 Hz, au lieu d'être pondéré par la puissance linéaire sur tout le
+    /// spectre — où la fondamentale du kick le faisait DESCENDRE dans un
+    /// drop et monter dans un breakdown. Il alimente 40 % de la courbe de
+    /// tension, qui était donc inversée elle aussi.
+    static let engineVersion = 4
 
     /// Version du SCHÉMA de `MusicAnalysisResult` (§61) — la forme des
     /// données persistées, pas l'algorithme qui les produit. C'est elle qui

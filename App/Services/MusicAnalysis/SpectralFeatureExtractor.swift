@@ -73,11 +73,37 @@ private final class ShortBranchProcessor {
     private let window: [Float]
     private let bandRanges: [ClosedRange<Int>]
     private let binFrequencies: [Float]
+    /// Premier bin retenu par le centroïde de brillance (voir
+    /// `centroidLowerBoundHz`). Toujours ≥ 1 : le DC reste exclu.
+    private let centroidLowerBin: Int
 
     /// Plancher du spectre de puissance logarithmique (§16.3) — évite
     /// `log(0)` ; sa valeur exacte est neutralisée par la normalisation
     /// relative (§17).
     private static let logFloor: Float = 1e-9
+
+    /// Borne basse du centroïde de brillance (défaut S1 de la critique).
+    ///
+    /// Le centroïde §17 servait à mesurer la BRILLANCE, et il alimente 40 %
+    /// de la courbe de tension (`CurvesAndEventsBuilder.tensionCurve`).
+    /// Calculé sur tout le spectre et pondéré par la PUISSANCE linéaire, il
+    /// était en réalité dominé par la fondamentale du kick : sur un kick
+    /// distordu il valait ~270 Hz dans un drop contre ~800 Hz dans un
+    /// breakdown, c'est-à-dire qu'il DESCENDAIT quand la musique devenait la
+    /// plus brillante. Signe inversé, et donc courbe de tension inversée.
+    ///
+    /// Deux corrections combinées, toutes deux usuelles en MIR percussive :
+    /// 1. écarter la zone grave, où vivent la fondamentale du kick et la
+    ///    basse (20-200 Hz) — c'est de l'énergie, pas de la brillance ;
+    /// 2. pondérer par la MAGNITUDE et non par la puissance, pour qu'une
+    ///    seule composante très forte ne puisse plus écraser la somme.
+    ///
+    /// 200 Hz à 22 050 Hz / FFT 1 024 (largeur de bin 21,53 Hz) tombe au
+    /// bin 9,29, donc premier bin retenu = 10 = 215,3 Hz. La bande 0
+    /// (20-120 Hz) et le bas de la bande 1 sont ainsi exclus ; l'énergie du
+    /// grave reste disponible ailleurs, dans `bandEnergies[0]`, qui est ce
+    /// que lit le suivi de mesure (§20).
+    private static let centroidLowerBoundHz: Double = 200
 
     // Buffer glissant (§68) : compacté dès que le préfixe consommé grossit.
     private var buffer: [Float]
@@ -151,6 +177,13 @@ private final class ShortBranchProcessor {
             frequencies[bin] = Float(Double(bin) * sampleRate / Double(fftSize))
         }
         self.binFrequencies = frequencies
+
+        // Borne basse du centroïde de brillance (§17, défaut S1). Arrondi
+        // vers le haut pour ne jamais inclure un bin sous la borne, plancher
+        // à 1 (DC exclu), plafond à halfSize pour rester valide même sur une
+        // configuration exotique où 200 Hz dépasserait Nyquist.
+        let rawCentroidBin = (Self.centroidLowerBoundHz * Double(fftSize) / sampleRate).rounded(.up)
+        self.centroidLowerBin = min(max(Int(rawCentroidBin), 1), halfSize)
 
         // Frames centrées : remplissage initial de fftSize/2 zéros.
         self.buffer = [Float](repeating: 0, count: halfSize)
@@ -322,12 +355,16 @@ private final class ShortBranchProcessor {
         swap(&previousLogPower, &logPower)
         hasPreviousFrame = true
 
-        // Centroïde spectral en Hz (spec §17) — DC exclu.
+        // Centroïde de BRILLANCE en Hz (spec §17, corrigé — défaut S1).
+        // Pondération par la MAGNITUDE (racine de la puissance) et non par
+        // la puissance, sur les bins au-dessus de 200 Hz uniquement : voir
+        // `centroidLowerBoundHz` pour la démonstration du signe inversé.
         var weighted: Float = 0
         var total: Float = 0
-        for bin in 1...halfSize {
-            weighted += binFrequencies[bin] * power[bin]
-            total += power[bin]
+        for bin in centroidLowerBin...halfSize {
+            let magnitude = sqrt(power[bin])
+            weighted += binFrequencies[bin] * magnitude
+            total += magnitude
         }
         centroid.append(total > 1e-12 ? weighted / total : 0)
     }

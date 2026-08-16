@@ -49,6 +49,30 @@ struct ScoreConfiguration: Codable, Sendable {
     var uncertaintyPenalty: Double
     var overcutPenalty: Double
 
+    // Sous-poids de l'inhibition §26.2 (correctif S1 de la critique). Les
+    // trois composantes étaient sommées sous le seul poids `inhibition`,
+    // donc de plage 0…2,5 face à des indices d'attraction de plage 0…1 :
+    // l'inhibition disposait ainsi de deux fois et demie le bras de levier
+    // de n'importe quel autre terme, sans que ce choix soit jamais énoncé.
+    // Chacune porte désormais son poids. Non defini par la specification —
+    // valeurs V1, à ajuster après écoute sur matériel réel (§74).
+
+    /// Note tenue : son sans attaques. Conditionné à une densité rythmique
+    /// basse depuis le correctif S1 — sans quoi une boucle de kick, qui a
+    /// une variance de flux faible donc une stabilité élevée, était lue
+    /// comme une note tenue. 0,5.
+    var inhibitionHeldNote: Double
+
+    /// Maintien juste après un impact (triangle culminant à 0,5 s). Le plus
+    /// défendable musicalement des trois — on ne coupe pas dans l'attaque
+    /// d'un drop — donc laissé à pleine échelle. 1,0.
+    var inhibitionPostImpact: Double
+
+    /// Absence de changement : nouveauté très faible. Sous-terme déjà
+    /// divisé par deux dans sa propre formule, d'où une plage effective de
+    /// 0…0,25. 0,5.
+    var inhibitionNoChange: Double
+
     // Paramètres de l'`overcutPenalty` à la sélection (§26.3, §28.1 : ne
     // pas épuiser les micro-ancres). Appliqués par le générateur, jamais
     // au niveau du champ d'ancres.
@@ -116,6 +140,9 @@ struct ScoreConfiguration: Codable, Sendable {
         inhibition: Double = 1.0,
         uncertaintyPenalty: Double = 1.0,
         overcutPenalty: Double = 1.0,
+        inhibitionHeldNote: Double = 0.5,
+        inhibitionPostImpact: Double = 1.0,
+        inhibitionNoChange: Double = 0.5,
         overcutDensityWindow: MediaTime = MediaTime(ticks: 90_000),
         overcutDensityScale: Double = 0.1,
         minimumSlotDurationFluid: MediaTime = MediaTime(ticks: 45_000),
@@ -138,6 +165,9 @@ struct ScoreConfiguration: Codable, Sendable {
         self.inhibition = inhibition
         self.uncertaintyPenalty = uncertaintyPenalty
         self.overcutPenalty = overcutPenalty
+        self.inhibitionHeldNote = inhibitionHeldNote
+        self.inhibitionPostImpact = inhibitionPostImpact
+        self.inhibitionNoChange = inhibitionNoChange
         self.overcutDensityWindow = overcutDensityWindow
         self.overcutDensityScale = overcutDensityScale
         self.minimumSlotDurationFluid = minimumSlotDurationFluid
