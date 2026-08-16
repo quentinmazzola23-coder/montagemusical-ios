@@ -10,56 +10,44 @@ import Foundation
 
 // MARK: - Modes de rythme
 
-/// PIVOT DU 16 AOÛT 2026 — ÉCART MAJEUR ASSUMÉ PAR RAPPORT À §13.
+/// SECOND PIVOT DU 16 AOÛT 2026 — ÉCART MAJEUR ASSUMÉ PAR RAPPORT À §13.
 ///
-/// Les trois modes de la spécification (Fluide / Équilibré / Percutant)
-/// étaient trois DENSITÉS de coupe, produites par une interprétation
-/// dramaturgique du morceau — sections, phrases, tension, nouveauté,
-/// montées, gestes, neuf poids d'utilité, sélection gloutonne. Aucune de
-/// ces interprétations n'a jamais été validée à l'oreille (§74 : les huit
-/// mesures demandées n'ont jamais été relevées).
+/// Historique en deux temps, parce qu'il explique la forme actuelle :
 ///
-/// Les trois modes deviennent trois FAMILLES DE FRAPPE. Une partition par
-/// famille, et chaque coupe tombe exactement sur une frappe de cette
-/// famille. Ce que le moteur promet devient vérifiable en une écoute, ce
-/// qui n'était pas le cas de « cette section est une accumulation ».
+/// 1. §13 définissait trois DENSITÉS (Fluide / Équilibré / Percutant),
+///    produites par une interprétation dramaturgique du morceau — sections,
+///    phrases, tension, nouveauté, montées, gestes, neuf poids d'utilité,
+///    sélection gloutonne. Rien n'en a jamais été validé à l'oreille (§74).
+/// 2. Elles sont devenues trois FAMILLES DE FRAPPE (kick / caisse claire /
+///    charley). Essayé sur du matériel réel : inutilisable. `bandFlux` est
+///    normalisé bande par bande, donc aucune comparaison inter-bandes n'y
+///    est fiable et presque toute frappe retombait sur la même classe —
+///    voir l'en-tête de `BeatGridEditScoreGenerator` pour la démonstration.
 ///
-/// CONSÉQUENCE ACTÉE : l'imbrication §70 (Fluide ⊆ Équilibré ⊆ Percutant)
-/// DISPARAÎT. Kick, caisse claire et charley sont des ensembles disjoints,
-/// pas emboîtés — l'invariant le plus structurant du générateur précédent
-/// n'a plus d'objet. Le verrou §65 (le mode se verrouille à la première
-/// association) prend donc encore plus de poids : changer de mode après
-/// coup n'est plus une fusion de cases, c'est une autre grille.
+/// Elles sont maintenant trois PAS DE SUBDIVISION de la grille rythmique.
+/// Aucune reconnaissance, aucune pondération : on prend un point sur N. En
+/// EDM le temps EST le kick, donc couper sur le temps revient à couper sur
+/// la grosse caisse sans avoir à la reconnaître.
 ///
-/// La couche dramaturgique n'est pas supprimée, elle est MISE EN SOMMEIL :
-/// `DeterministicMusicAnalyzer` continue de la produire, plus personne ne
-/// la lit. C'est réversible tant que ce commentaire est là pour le dire.
+/// CONSÉQUENCE ACTÉE, inchangée depuis le premier pivot : l'imbrication §70
+/// n'est plus un invariant garanti. Elle se trouve être VRAIE ici — un temps
+/// sur quatre est un sous-ensemble d'un temps sur deux, lui-même sous-ensemble
+/// de chaque temps — mais c'est une propriété du pas, pas une construction
+/// défendue par le code. Aucun test ne s'en réclame.
 enum PaceMode: String, Codable, CaseIterable {
-    /// Grave : grosse caisse, kick distordu.
-    case kick
-    /// Médium large bande : caisse claire, clap.
-    case snare
-    /// Aigu : charley, shaker, cymbale.
-    case hat
+    /// Une coupe à chaque temps.
+    case everyBeat
+    /// Une coupe un temps sur deux.
+    case everyTwoBeats
+    /// Une coupe un temps sur quatre — le début de mesure en 4/4.
+    case everyFourBeats
 
-    /// Famille percussive correspondante. Les deux énumérations sont
-    /// volontairement distinctes : `PercussiveClass` appartient à l'analyse,
-    /// `PaceMode` est ce qui est PERSISTÉ dans `ProjectSlotRecord` (§10.1)
-    /// et affiché. Les faire coïncider par ce pont plutôt que par un alias
-    /// laisse la possibilité d'ajouter une famille sans toucher au schéma.
-    var percussiveClass: PercussiveClass {
+    /// Pas de subdivision : on retient un point de grille sur `gridStep`.
+    var gridStep: Int {
         switch self {
-        case .kick: .kick
-        case .snare: .snare
-        case .hat: .hat
-        }
-    }
-
-    init(percussiveClass: PercussiveClass) {
-        switch percussiveClass {
-        case .kick: self = .kick
-        case .snare: self = .snare
-        case .hat: self = .hat
+        case .everyBeat: 1
+        case .everyTwoBeats: 2
+        case .everyFourBeats: 4
         }
     }
 }
@@ -68,17 +56,16 @@ enum PaceMode: String, Codable, CaseIterable {
 
 struct EditScoreFamily: Codable, Sendable {
     let analysisVersion: Int
-    let kick: EditScore
-    let snare: EditScore
-    let hat: EditScore
+    let everyBeat: EditScore
+    let everyTwoBeats: EditScore
+    let everyFourBeats: EditScore
 
-    /// Partition d'un mode donné — évite d'avoir à répéter le `switch`
-    /// partout où l'on passe d'un mode à sa partition.
+    /// Partition d'un mode donné — évite de répéter le `switch` partout.
     func score(for mode: PaceMode) -> EditScore {
         switch mode {
-        case .kick: kick
-        case .snare: snare
-        case .hat: hat
+        case .everyBeat: everyBeat
+        case .everyTwoBeats: everyTwoBeats
+        case .everyFourBeats: everyFourBeats
         }
     }
 }

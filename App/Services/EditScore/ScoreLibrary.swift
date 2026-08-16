@@ -56,7 +56,7 @@ struct ScoreLibrary: Sendable {
     }
 
     /// Vrai ssi `analysis/scores-meta-v1.json` est présent ET
-    /// `generatorVersion` == `PercussiveEditScoreGenerator.generatorVersion`
+    /// `generatorVersion` == `BeatGridEditScoreGenerator.generatorVersion`
     /// ET `analysisVersion` == `DeterministicMusicAnalyzer.analysisSchemaVersion`
     /// ET `configurationFingerprint` == empreinte de
     /// `ScoreConfiguration.production` (§61). Toute divergence — méta
@@ -98,7 +98,7 @@ struct ScoreLibrary: Sendable {
             .appending(path: AudioAnalysisActor.scoresMetaRelativePath)
         guard let data = try? Data(contentsOf: url),
               let meta = try? JSONDecoder().decode(ScoresMeta.self, from: data),
-              meta.generatorVersion == PercussiveEditScoreGenerator.generatorVersion,
+              meta.generatorVersion == BeatGridEditScoreGenerator.generatorVersion,
               meta.analysisVersion == DeterministicMusicAnalyzer.analysisSchemaVersion,
               let expected = try? ScoreConfigurationFingerprint.fingerprint(of: .production)
         else {

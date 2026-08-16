@@ -37,9 +37,9 @@ extension PaceMode {
     /// Libellé d'interface français (§34 : `Fluide | Équilibré | Percutant`).
     var displayLabel: String {
         switch self {
-        case .kick: "Kick"
-        case .snare: "Caisse claire"
-        case .hat: "Charley"
+        case .everyBeat: "Chaque temps"
+        case .everyTwoBeats: "1 temps sur 2"
+        case .everyFourBeats: "1 temps sur 4"
         }
     }
 }
@@ -134,7 +134,7 @@ struct PaceSelectionView: View {
     @State private var scoresState: ScoresState = .loading
     /// Mode présenté dans l'aperçu. Défaut Équilibré — position centrale
     /// §34. Non defini par la specification — definition minimale V1.
-    @State private var selectedMode: PaceMode = .kick
+    @State private var selectedMode: PaceMode = .everyTwoBeats
     /// Vrai pendant `selectPace` — évite la double validation.
     @State private var isValidating = false
     @State private var isLockAlertPresented = false
@@ -553,9 +553,9 @@ struct PaceSelectionView: View {
 
     private func score(for mode: PaceMode, in family: EditScoreFamily) -> EditScore {
         switch mode {
-        case .kick: family.kick
-        case .snare: family.snare
-        case .hat: family.hat
+        case .everyBeat: family.everyBeat
+        case .everyTwoBeats: family.everyTwoBeats
+        case .everyFourBeats: family.everyFourBeats
         }
     }
 
@@ -640,9 +640,9 @@ private func makePreviewFamily() -> EditScoreFamily {
     }
     return EditScoreFamily(
         analysisVersion: 1,
-        kick: makePreviewScore(mode: .kick, durationsTicks: fluid),
-        snare: makePreviewScore(mode: .snare, durationsTicks: balanced),
-        hat: makePreviewScore(mode: .hat, durationsTicks: percussive)
+        everyBeat: makePreviewScore(mode: .everyBeat, durationsTicks: percussive),
+        everyTwoBeats: makePreviewScore(mode: .everyTwoBeats, durationsTicks: balanced),
+        everyFourBeats: makePreviewScore(mode: .everyFourBeats, durationsTicks: fluid)
     )
 }
 
@@ -689,7 +689,7 @@ private func makePreviewFamily() -> EditScoreFamily {
 
 #Preview("Miniature de timeline") {
     MiniTimelineView(slots: makePreviewScore(
-        mode: .kick,
+        mode: .everyTwoBeats,
         durationsTicks: [72_000, 96_000, 60_000, 120_000, 84_000, 108_000, 66_000, 90_000]
     ).slots)
     .frame(height: 56)

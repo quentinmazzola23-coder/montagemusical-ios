@@ -501,7 +501,7 @@ final class MediaAssignmentTests: XCTestCase {
     /// ([0, 1, 2, 3] — indexes utilisés par les tests §45/§46).
     private func makeAssemblingProject() async throws -> UUID {
         let projectID = try await store.createDraft()
-        try await store.selectPace(.hat, from: makeFamily(), projectID: projectID)
+        try await store.selectPace(.everyFourBeats, from: makeFamily(), projectID: projectID)
         return projectID
     }
 
@@ -539,10 +539,10 @@ final class MediaAssignmentTests: XCTestCase {
     private func makeFamily() -> EditScoreFamily {
         EditScoreFamily(
             analysisVersion: 1,
-            kick: makeScore(mode: .kick, boundaries: [0, 240_000]),
-            snare: makeScore(mode: .snare, boundaries: [0, 120_000, 240_000]),
-            hat: makeScore(
-                mode: .hat,
+            everyBeat: makeScore(mode: .everyBeat, boundaries: [0, 240_000]),
+            everyTwoBeats: makeScore(mode: .everyTwoBeats, boundaries: [0, 120_000, 240_000]),
+            everyFourBeats: makeScore(
+                mode: .everyFourBeats,
                 boundaries: [0, 60_000, 120_000, 180_000, 240_000]
             )
         )
