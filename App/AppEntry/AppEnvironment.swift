@@ -42,6 +42,12 @@ final class AppEnvironment {
     /// lecture par blocs pour limiter la mémoire.
     let waveformExtractor: WaveformExtractor
 
+    /// Cache mémoire de la forme d'onde, PARTAGÉ par les trois écrans qui
+    /// l'affichent (timeline du projet, assemblage, sélecteur de rushs).
+    /// Sans lui, chaque apparition redécodait le morceau entier pour un
+    /// résultat identique — voir `WaveformStore`.
+    let waveformStore: WaveformStore
+
     /// Cache d'analyse et checkpoints de phase dans `analysis/` (§11, §69).
     let analysisCache: AnalysisCache
 
@@ -164,7 +170,9 @@ final class AppEnvironment {
         self.projectStore = projectStore
         self.fileStore = fileStore
         self.audioImporter = AudioImporter(fileStore: fileStore)
-        self.waveformExtractor = WaveformExtractor()
+        let waveformExtractor = WaveformExtractor()
+        self.waveformExtractor = waveformExtractor
+        self.waveformStore = WaveformStore(extractor: waveformExtractor)
         let analysisCache = AnalysisCache(fileStore: fileStore)
         self.analysisCache = analysisCache
         // Le moteur par défaut dépend du cache ET de la racine effectivement

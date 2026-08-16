@@ -27,6 +27,16 @@ struct WaveformView: View {
     /// Position de lecture `0...1`, ou `nil` pour ne rien afficher.
     var progress: Double?
 
+    /// Portion du morceau à mettre en avant, en fractions `0...1` du total,
+    /// ou `nil` pour n'en mettre aucune. Sert au sélecteur de rushs à
+    /// montrer OÙ tombe la case en cours de remplissage : hors de cette
+    /// plage les barres sont estompées, dans la plage elles gardent leur
+    /// contraste et deux traits verticaux en marquent les bornes.
+    ///
+    /// La distinction ne repose pas sur la seule couleur (§39) : l'écart
+    /// d'opacité s'accompagne des deux traits de bornes.
+    var highlight: ClosedRange<Double>?
+
     var body: some View {
         Canvas { context, size in
             guard !samples.isEmpty, size.width > 0, size.height > 0 else { return }
@@ -36,7 +46,16 @@ struct WaveformView: View {
             let barWidth = max(1, step * 0.6)
             let midY = size.height / 2
 
+            // Bornes de la portion mise en avant, en pixels. Calculées AVANT
+            // le dessin des barres pour répartir celles-ci en deux chemins.
+            let band: (start: CGFloat, end: CGFloat)? = highlight.map { range in
+                let lower = CGFloat(min(max(range.lowerBound, 0), 1)) * size.width
+                let upper = CGFloat(min(max(range.upperBound, 0), 1)) * size.width
+                return (min(lower, upper), max(lower, upper))
+            }
+
             var bars = Path()
+            var dimmedBars = Path()
             for (index, sample) in samples.enumerated() {
                 // Défense en profondeur : le contrat garantit 0...1, mais un
                 // échantillon hors bornes ne doit jamais casser le dessin.
@@ -45,14 +64,39 @@ struct WaveformView: View {
                 // une fine ligne, la forme globale reste lisible.
                 let barHeight = max(2, clamped * size.height)
                 let x = CGFloat(index) * step + (step - barWidth) / 2
-                bars.addRect(CGRect(
+                let rect = CGRect(
                     x: x,
                     y: midY - barHeight / 2,
                     width: barWidth,
                     height: barHeight
-                ))
+                )
+                // Une barre appartient à la portion mise en avant dès que son
+                // CENTRE y tombe : au-delà de ~200 barres, une barre vaut
+                // moins d'un point, et un test sur les bords ferait clignoter
+                // l'appartenance d'une case à l'autre.
+                if let band, x + barWidth / 2 >= band.start, x + barWidth / 2 <= band.end {
+                    bars.addRect(rect)
+                } else if band != nil {
+                    dimmedBars.addRect(rect)
+                } else {
+                    bars.addRect(rect)
+                }
+            }
+            if !dimmedBars.isEmpty {
+                context.fill(dimmedBars, with: .color(.secondary.opacity(0.25)))
             }
             context.fill(bars, with: .color(.secondary))
+
+            // Bornes de la portion : deux traits pleins. C'est eux qui
+            // portent l'information quand le contraste ne suffit pas (§39),
+            // et ils restent visibles même si la portion est plus étroite
+            // qu'une barre — cas d'une case courte sur un long morceau.
+            if let band {
+                var edges = Path()
+                edges.addRect(CGRect(x: band.start - 1, y: 0, width: 2, height: size.height))
+                edges.addRect(CGRect(x: band.end - 1, y: 0, width: 2, height: size.height))
+                context.fill(edges, with: .color(.primary))
+            }
 
             // Barre de position sobre (§38 : pas d'animation décorative).
             if let progress {

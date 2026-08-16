@@ -315,6 +315,12 @@ struct ClipPickerView: View {
     @State private var phase: Phase = .requestingAccess
     @State private var authorization: MediaLibraryAuthorization = .notDetermined
 
+    /// Forme d'onde du morceau pour la bande de situation. `nil` tant que
+    /// l'extraction n'a pas rendu ; tableau vide en cas d'échec, ce qui fait
+    /// simplement disparaître la bande — jamais de message d'erreur ici, le
+    /// sélecteur doit rester utilisable sans elle.
+    @State private var waveformSamples: [Float]?
+
     // MARK: État photothèque
 
     @State private var albums: [MediaAlbum] = []
@@ -540,6 +546,7 @@ struct ClipPickerView: View {
         // §38 ci-dessus, elle, reste active (ce n'est pas une animation).
         .reduceMotionSafe()
         .task { await start() }
+        .task { await loadWaveform() }
         .onDisappear {
             // §42 : cache de miniatures relâché à la fermeture.
             prefetchTask?.cancel()
@@ -660,6 +667,8 @@ struct ClipPickerView: View {
             let side = max(44, (proxy.size.width - 2 * spacing) / 3) // cibles ≥ 44 pt (§39)
             ScrollView {
                 VStack(spacing: 8) {
+                    musicStrip
+
                     Text(selectedAlbumTitle)
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -686,6 +695,83 @@ struct ClipPickerView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { browsingDock }
+    }
+
+    /// Forme d'onde du morceau, avec la case en cours de remplissage mise en
+    /// avant.
+    ///
+    /// Le sélecteur ne disait jusqu'ici RIEN de la musique : on choisissait
+    /// un rush pour « le plan 37 de 1,20 s » sans savoir si ce plan tombe
+    /// dans une intro calme ou en plein drop. La bande donne cette
+    /// information d'un coup d'œil — la hauteur des barres EST le niveau
+    /// sonore — et situe la case dans le morceau.
+    ///
+    /// Les bornes viennent des cases elles-mêmes, pas d'une durée audio
+    /// relue : les partitions couvrent le morceau entier (§28.1, début et
+    /// fin toujours frontières), donc la fin de la dernière case EST la
+    /// durée de la musique. Aucun décodage supplémentaire, aucune valeur
+    /// dérivée d'un `Double` arrondi (§9).
+    @ViewBuilder
+    private var musicStrip: some View {
+        let ordered = slotRecords
+        if let totalTicks = ordered.last?.endTicks, totalTicks > 0,
+           let samples = waveformSamples, !samples.isEmpty {
+            let current = ordered.first { $0.index == currentSlotIndex } ?? ordered.first
+            let highlight: ClosedRange<Double>? = current.map { slot in
+                let lower = Double(slot.startTicks) / Double(totalTicks)
+                let upper = Double(slot.endTicks) / Double(totalTicks)
+                return min(lower, upper)...max(lower, upper)
+            }
+            VStack(spacing: 4) {
+                WaveformView(samples: samples, progress: nil, highlight: highlight)
+                    .frame(height: 44)
+                if let current {
+                    HStack {
+                        Text(MediaTime(ticks: current.startTicks).displayString)
+                        Spacer(minLength: 0)
+                        Text(MediaTime(ticks: current.endTicks).displayString)
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(musicStripAccessibilityLabel(total: totalTicks, slot: current))
+        }
+    }
+
+    /// Charge la forme d'onde via le cache partagé (`WaveformStore`) : les
+    /// trois écrans qui l'affichent se partagent un seul décodage.
+    private func loadWaveform() async {
+        guard waveformSamples == nil else { return }
+        guard let url = environment.fileStore.audioFileURL(projectID: projectID) else {
+            waveformSamples = []
+            return
+        }
+        do {
+            waveformSamples = try await environment.waveformStore.waveform(for: url, binCount: 200)
+        } catch is CancellationError {
+            // Feuille refermée pendant l'extraction : laisser `nil` pour
+            // retenter à la prochaine ouverture.
+            return
+        } catch {
+            environment.logger.error(
+                "Forme d'onde indisponible dans le sélecteur : \(error.localizedDescription)"
+            )
+            waveformSamples = []
+        }
+    }
+
+    /// Libellé VoiceOver de la bande : la forme visuelle n'apporte rien sans
+    /// lecture d'écran, on énonce donc la position dans le morceau.
+    private func musicStripAccessibilityLabel(total: Int64, slot: ProjectSlotRecord?) -> String {
+        guard let slot else { return "Forme d'onde de la musique" }
+        let start = MediaTime(ticks: slot.startTicks)
+        let end = MediaTime(ticks: slot.endTicks)
+        return "Forme d'onde de la musique. Ce plan va de \(start.spokenString) à \(end.spokenString)"
+            + " sur \(MediaTime(ticks: total).spokenString)."
     }
 
     /// Bandeau discret §40 : accès limité — action système d'ajout d'assets
